@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# gbc 런타임 상태 (프로젝트별, 비커밋)
+.gbc/
+
+# init이 머신별로 생성 (절대경로 포함) — 사용자가 직접 `gbc init` 실행
+.claude/
+
+# MVP 빌드 작업 아티팩트
+scratch.md
+.mvp-state.json
+.mvp-state.completed-*.json

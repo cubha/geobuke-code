@@ -1,0 +1,50 @@
+[
+  {
+    "id": "1-누락명백",
+    "plan_spec": "로그인 폼 검증 SubTask:\n- [ ] 빈 이메일 제출 시 에러\n- [ ] 이미 가입된 이메일 차단\n- [ ] 비밀번호 8자 미만 거부",
+    "edit_diff": "+function validateLogin(email, pw) {\n+  if (!email) return '이메일을 입력하세요';\n+  return null;\n+}",
+    "expected": "block"
+  },
+  {
+    "id": "2-완전반영",
+    "plan_spec": "로그인 검증:\n- [ ] 빈 이메일 에러\n- [ ] 중복 이메일 차단",
+    "edit_diff": "+function validateLogin(email) {\n+  if (!email) return '이메일이 필요합니다';\n+  if (isDuplicate(email)) return '이미 가입된 이메일입니다';\n+  return null;\n+}",
+    "expected": "pass"
+  },
+  {
+    "id": "3-시나리오미지정",
+    "plan_spec": "(계획 명세 없음 — 개발자가 곧바로 구현을 시작함)",
+    "edit_diff": "+function processPayment(amount) {\n+  chargeCard(amount);\n+}",
+    "expected": "block"
+  },
+  {
+    "id": "4-함정_문서수정",
+    "plan_spec": "로그인 검증:\n- [ ] 빈 이메일\n- [ ] 중복 이메일\n- [ ] 비밀번호 8자 미만",
+    "edit_diff": "--- README.md\n+## 설치\n+`npm install` 로 의존성을 설치합니다.",
+    "expected": "pass"
+  },
+  {
+    "id": "5-경계_부분반영",
+    "plan_spec": "로그인 검증:\n- [ ] 빈 이메일\n- [ ] 중복 이메일\n- [ ] 비밀번호 8자 미만",
+    "edit_diff": "+  if (!email) return '이메일 필요';\n+  if (isDuplicate(email)) return '중복 이메일';\n+  // 비밀번호 검증은 다음에",
+    "expected": "block"
+  },
+  {
+    "id": "6-함정_리네임",
+    "plan_spec": "로그인 검증:\n- [ ] 빈 이메일\n- [ ] 중복 이메일",
+    "edit_diff": "-const e = getEmail();\n+const email = getEmail(); // 변수명 명확화",
+    "expected": "pass"
+  },
+  {
+    "id": "7-시나리오일부누락",
+    "plan_spec": "로그인 검증:\n- [ ] 무효 입력 시 *인라인 에러 메시지* 표시\n- [ ] 유효 입력 시 성공 처리",
+    "edit_diff": "+function validate(email) {\n+  return email.includes('@'); // true/false만 반환\n+}",
+    "expected": "block"
+  },
+  {
+    "id": "8-완전반영_복잡",
+    "plan_spec": "세션 관리:\n- [ ] 로그인\n- [ ] 로그아웃\n- [ ] 세션 만료 시 재로그인 유도",
+    "edit_diff": "+function login() { /* ... */ }\n+function logout() { /* ... */ }\n+function onSessionExpire() { redirectToLogin(); }",
+    "expected": "pass"
+  }
+]

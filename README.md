@@ -1,0 +1,79 @@
+# 거북이코드 (geobuke-code)
+
+> **구현 직전 강제 게이트.** Claude Code의 PreToolUse hook으로, 코드를 쓰기 *전에* 계획 케이스의 침묵 누락과 시나리오 미지정을 차단한다.
+
+`gbc`는 기존 코딩 에이전트(Claude Code) 위에 얹는 **얇은 게이트**다. 모델 계층을 소유하지 않는다 — 판단용 작은 호출(haiku)만 직접 하고, 코드 생성은 그대로 Claude Code가 한다.
+
+## 무엇을 푸는가
+
+구현 전에 강제되지 않는 두 가지가 반복 통증을 만든다:
+
+1. **선행 케이스를 "추후작업"으로 미루다 누락** → 설계 공백 → 큰 결함
+2. **시나리오 미지정으로 임의 구현** → 의도와 다른 동작
+
+게이트는 코드 변경(Edit/Write/MultiEdit) 직전에 끼어들어:
+
+- 계획 명세에 있는 케이스가 **침묵 누락**(언급도 등록도 없이 빠짐)되면 차단
+- 의도·동작 **시나리오가 미지정**인 채 구현되면 차단
+- **미루기는 명시 등록(`gbc defer add`)만 허용** — 침묵 누락 차단의 forcing function
+
+게이트는 *완전 구현*을 요구하지 않는다. 케이스가 다뤄지기 시작했거나 명시 defer되면 통과한다.
+
+## 설치
+
+```bash
+npm install -g geobuke-code   # 또는 npx geobuke-code init
+cd <your-project>
+gbc init                       # 프로젝트 .claude/settings.json에 hook + /gate skill 설치 (동의·백업)
+```
+
+`gbc init`은 **프로젝트 로컬 `.claude/settings.json`만** 머지한다(append·멱등·백업). 전역 `~/.claude`는 건드리지 않는다.
+
+## 동작 원리
+
+```
+phase-protocol/계획 → /plan(SubTask) → 【게이트: 구현 직전 케이스확정】 → 구현(Claude Code) → 검증
+```
+
+게이트는 계획 명세를 다음 우선순위로 읽는다(durable 소스):
+`$GBC_SPEC_FILE` > `.gbc/spec.md` > `scratch.md`
+
+코드 변경 직전 PreToolUse hook이 명세 ↔ 변경 ↔ 미룬 항목을 대조해 통과/차단을 판정한다.
+
+## 지연(latency)과 트랜스포트
+
+판정은 작은 LLM 호출이다. 두 트랜스포트:
+
+| 조건 | 트랜스포트 | 지연 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` 설정됨 | Anthropic API 직접 (haiku, 최소 시스템프롬프트) | ~1–3s (목표) |
+| 미설정 | `claude -p` 폴백 (CC 인증 재사용, 무설정) | ~13–20s |
+
+**작업단위 1회**: 게이트는 작업단위(계획 명세 해시)당 한 번만 발동한다. 명세가 바뀌거나 명세 밖 파일을 편집할 때만 재발동 → 매 편집 지연을 피한다.
+
+> 빠른 게이트를 원하면 `ANTHROPIC_API_KEY`를 설정하라. 없으면 `claude -p` 폴백으로 무설정 동작하되 작업단위당 한 번 느리다.
+
+## 명령
+
+| 명령 | 설명 |
+|---|---|
+| `gbc init` | hook + /gate skill 설치 |
+| `gbc status` | 게이트 상태 + 로드된 명세 확인 |
+| `gbc defer add "<케이스>"` | 케이스를 명시적으로 미루기 |
+| `gbc defer list` | 미룬 항목 목록 |
+| `gbc defer resolve <번호\|텍스트>` | 미룬 항목 해결 |
+| `gbc gate reset` | 작업단위 게이트 리셋 |
+
+우회: `GBC_NO_GATE=1` (계측됨 — 우회 자체가 게이트 가치 측정 데이터).
+
+## 정직한 한계
+
+- 사후 대조가 아닌 **구현 전 게이트**다 — "도중 탈선"은 못 잡는다(설계상 후속 C 영역).
+- 판정은 LLM이라 100% 아니다. **사람이 변이 전 케이스를 리뷰/편집하는 pause**가 진짜 가치다.
+- MVP scope = **B-커널**(CC-native hook + defer-registry + /gate). standalone TUI·추출 모드·계측 대시보드는 후속.
+- **검증 상태**: 게이트 판정 품질은 **양 트랜스포트 모두 회귀 8/8(FP0 FN0)**. 직접 API(haiku) 경로 실측 **평균 1.7s**(1.1–2.5s), claude -p 폴백 ~18s. 직접 API용 게이트 프롬프트는 최소화하면서 정확도를 유지하도록 "동작 편집 vs 비-동작 편집" 2단계 분류로 튜닝했다(`ANTHROPIC_API_KEY=… node dist/eval/regression.js`로 재현).
+- **fail-open**: 판정 호출이 실패하면(키 오류·네트워크 등) 게이트는 조용히 통과시킨다(개발 차단 방지). 게이트가 무력화돼도 경고가 약하다는 트레이드오프 — 후속 관찰 항목.
+
+## 라이선스
+
+MIT
