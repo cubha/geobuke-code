@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { normalizeEdit, isGatedTool } from "../dist/normalize.js";
-import { parseVerdict, buildUserMessage } from "../dist/judge.js";
+import { parseVerdict, buildUserMessage, failOpenVerdict } from "../dist/judge.js";
 import { computeSpecHash } from "../dist/spec.js";
 import { addDefer, activeDeferItems, resolveDefer, unresolvedDefers } from "../dist/defer.js";
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
@@ -59,6 +59,19 @@ test("parseVerdict: JSON 추출 + block/pass 정규화", () => {
 test("parseVerdict: 알 수 없는 verdict는 pass로", () => {
   const v = parseVerdict('{"verdict":"maybe"}');
   assert.equal(v.verdict, "pass");
+});
+
+test("failOpenVerdict: 판정 실패 시 failOpen=true pass 반환(사유 포함)", () => {
+  const v = failOpenVerdict(new Error("network down"));
+  assert.equal(v.verdict, "pass");
+  assert.equal(v.failOpen, true);
+  assert.match(v.reason, /fail-open/);
+  assert.match(v.reason, /network down/);
+});
+
+test("parseVerdict: 정상 판정 결과엔 failOpen 미설정(falsy)", () => {
+  const v = parseVerdict('{"verdict":"pass","missing":[],"reason":"ok"}');
+  assert.ok(!v.failOpen);
 });
 
 test("buildUserMessage: defer 없으면 (없음)", () => {
