@@ -10,7 +10,7 @@ import { computeSpecHash } from "../dist/spec.js";
 import { addDefer, activeDeferItems, resolveDefer, unresolvedDefers } from "../dist/defer.js";
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
 import { addSpecCase, readSpecCases, clearSpec } from "../dist/spec.js";
-import { buildBlockReason } from "../dist/hook.js";
+import { buildBlockReason, shouldCacheVerdict } from "../dist/hook.js";
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "gbc-test-"));
@@ -139,6 +139,16 @@ test("addSpecCase: 멀티라인·장문 입력을 한 줄로 정규화", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("shouldCacheVerdict: 정상 pass만 캐시, fail-open·block은 캐시 안 함", () => {
+  assert.equal(shouldCacheVerdict({ verdict: "pass", missing: [], reason: "ok" }), true);
+  // fail-open pass는 캐시 제외 (일시 장애가 작업단위 내내 게이트 무력화 방지)
+  assert.equal(
+    shouldCacheVerdict({ verdict: "pass", missing: [], reason: "x", failOpen: true }),
+    false,
+  );
+  assert.equal(shouldCacheVerdict({ verdict: "block", missing: [], reason: "y" }), false);
 });
 
 test("buildBlockReason: 시나리오 미지정이면 도출·등록 루프를 지시", () => {

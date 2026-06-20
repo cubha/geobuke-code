@@ -34,6 +34,15 @@ export function buildBlockReason(verdict: Verdict, specEmpty: boolean, source: s
   );
 }
 
+/**
+ * pass verdict를 작업단위 캐시(markGated)에 넣어도 되는가.
+ * fail-open(판정 실패 안전통과)은 제외 — 일시 장애가 작업단위 내내 게이트를 무력화하는 것을 막는다.
+ */
+export function shouldCacheVerdict(verdict: Verdict): boolean {
+  // STUB: failOpen 미고려 — ST2 유효 RED 유도용
+  return verdict.verdict === "pass";
+}
+
 interface PreToolUseInput {
   tool_name?: string;
   tool_input?: EditToolInput;
