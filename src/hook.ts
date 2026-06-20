@@ -39,8 +39,7 @@ export function buildBlockReason(verdict: Verdict, specEmpty: boolean, source: s
  * fail-open(판정 실패 안전통과)은 제외 — 일시 장애가 작업단위 내내 게이트를 무력화하는 것을 막는다.
  */
 export function shouldCacheVerdict(verdict: Verdict): boolean {
-  // STUB: failOpen 미고려 — ST2 유효 RED 유도용
-  return verdict.verdict === "pass";
+  return verdict.verdict === "pass" && !verdict.failOpen;
 }
 
 interface PreToolUseInput {
@@ -74,6 +73,18 @@ function emit(obj: unknown): void {
 function logBypass(cwd: string, toolName: string): void {
   try {
     appendFileSync(join(gbcDir(cwd), "bypass.log"), `${new Date().toISOString()} ${toolName}\n`);
+  } catch {
+    /* 계측 실패는 무시 */
+  }
+}
+
+/** fail-open(판정 실패 안전통과) 계측 — 게이트가 무력화된 편집을 사후 추적할 수 있게 한다. */
+function logFailOpen(cwd: string, toolName: string, reason: string): void {
+  try {
+    appendFileSync(
+      join(gbcDir(cwd), "failopen.log"),
+      `${new Date().toISOString()} ${toolName} ${reason}\n`,
+    );
   } catch {
     /* 계측 실패는 무시 */
   }
@@ -115,8 +126,22 @@ export async function runPreToolUse(): Promise<void> {
   const verdict = await judge(specText, editText, defers);
 
   if (verdict.verdict === "pass") {
-    markGated(cwd, specHash, verdict.reason);
-    process.exit(0); // 정상 흐름 (자동승인 X — 무출력)
+    if (shouldCacheVerdict(verdict)) {
+      markGated(cwd, specHash, verdict.reason);
+      process.exit(0); // 정상 통과 (자동승인 X — 무출력)
+    }
+    // fail-open: 판정 실패로 안전 통과. 캐시하지 않아(작업단위 무력화 방지) 다음 편집에서 재판정.
+    // 계측 + systemMessage로 사용자에게 "게이트가 검사 못 했음"을 알린다(조용한 무력화 방지).
+    logFailOpen(cwd, toolName, verdict.reason);
+    emit({
+      systemMessage: `🐢 거북이 게이트 — 판정 실패로 안전 통과(fail-open). 이 편집은 게이트 검사를 받지 못했습니다: ${verdict.reason}`,
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        permissionDecisionReason: verdict.reason,
+      },
+    });
+    process.exit(0);
   }
 
   // block: 사람 pause (ask 기본) — 사유가 사용자에게 표시됨
