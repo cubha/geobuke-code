@@ -11,6 +11,7 @@ import { addDefer, activeDeferItems, resolveDefer, unresolvedDefers } from "../d
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
 import { addSpecCase, readSpecCases, clearSpec } from "../dist/spec.js";
 import { buildBlockReason, shouldCacheVerdict } from "../dist/hook.js";
+import { buildPreCommand, upgradeKeylessHooks } from "../dist/install.js";
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "gbc-test-"));
@@ -170,6 +171,35 @@ test("buildBlockReason: 침묵 누락이면 defer 등록을 안내", () => {
   );
   assert.match(r, /gbc defer add/);
   assert.match(r, /중복 이메일/); // 누락 케이스 표시
+});
+
+test("buildPreCommand: useKey면 $HOME 기반 키주입 prefix, 아니면 기본", () => {
+  const withKey = buildPreCommand("/x/dist/cli.js", true);
+  assert.match(withKey, /ANTHROPIC_API_KEY/);
+  assert.match(withKey, /\$HOME\/\.gbc\/api-key/); // 셸 확장 경로
+  assert.doesNotMatch(withKey, /\/home\//); // 하드코딩 홈경로 금지
+  assert.match(withKey, /hook pre-tool-use/);
+  const noKey = buildPreCommand("/x/dist/cli.js", false);
+  assert.doesNotMatch(noKey, /ANTHROPIC_API_KEY/);
+  assert.match(noKey, /hook pre-tool-use/);
+});
+
+test("upgradeKeylessHooks: 기존 keyless hook을 키주입 버전으로 업그레이드(멱등)", () => {
+  const settings = {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Edit|Write|MultiEdit",
+          hooks: [{ type: "command", command: 'node "/x/dist/cli.js" hook pre-tool-use' }],
+        },
+      ],
+    },
+  };
+  const n = upgradeKeylessHooks(settings, "/x/dist/cli.js", true);
+  assert.equal(n, 1); // 1건 업그레이드
+  assert.match(settings.hooks.PreToolUse[0].hooks[0].command, /ANTHROPIC_API_KEY/);
+  // 이미 키주입됨 → 재업그레이드 안 함(멱등)
+  assert.equal(upgradeKeylessHooks(settings, "/x/dist/cli.js", true), 0);
 });
 
 test("gate-state: markGated/isGated/reset 작업단위 1회 캐시", () => {
