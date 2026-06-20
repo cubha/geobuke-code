@@ -20,8 +20,7 @@ interface Settings {
  */
 export function buildPreCommand(cliPath: string, useKey: boolean): string {
   const base = `node "${cliPath}" hook pre-tool-use`;
-  // STUB: useKey 미반영 — ST3 유효 RED 유도용
-  return base;
+  return useKey ? `ANTHROPIC_API_KEY="$(cat "$HOME/.gbc/api-key")" ${base}` : base;
 }
 
 /**
@@ -29,6 +28,17 @@ export function buildPreCommand(cliPath: string, useKey: boolean): string {
  * settings를 제자리 수정하고, 업그레이드한 건수를 반환한다(멱등: 이미 키주입된 건 건너뜀).
  */
 export function upgradeKeylessHooks(settings: Settings, cliPath: string, useKey: boolean): number {
-  // STUB: 미구현 — ST3 유효 RED 유도용
-  return 0;
+  if (!useKey) return 0;
+  const target = buildPreCommand(cliPath, true);
+  let upgraded = 0;
+  for (const entry of settings.hooks?.PreToolUse ?? []) {
+    for (const h of entry.hooks ?? []) {
+      // pre-tool-use hook인데 아직 키 주입이 없으면(keyless) 교체
+      if (h.command.includes("hook pre-tool-use") && !h.command.includes("ANTHROPIC_API_KEY")) {
+        h.command = target;
+        upgraded++;
+      }
+    }
+  }
+  return upgraded;
 }

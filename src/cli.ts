@@ -2,6 +2,7 @@
 // gbc — 거북이코드 CLI. zero-dep 인자 파싱(핫패스 보호).
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import {
   mkdirSync,
   existsSync,
@@ -15,12 +16,14 @@ import { loadPlanSpec, computeSpecHash, addSpecCase, readSpecCases, clearSpec } 
 import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer } from "./defer.js";
 import { selectedTransport } from "./judge.js";
+import { buildPreCommand, upgradeKeylessHooks } from "./install.js";
 
 const CLI_PATH = fileURLToPath(import.meta.url);
 const PKG_ROOT = join(dirname(CLI_PATH), ".."); // dist/cli.js → 패키지 루트
 
-function preCommand(): string {
-  return `node "${CLI_PATH}" hook pre-tool-use`;
+/** ~/.gbc/api-key 존재 여부 — 있으면 hook에 키 주입(빠른 haiku 경로). */
+function hasApiKey(): boolean {
+  return existsSync(join(homedir(), ".gbc", "api-key"));
 }
 function stopCommand(): string {
   return `node "${CLI_PATH}" hook stop`;
@@ -50,7 +53,7 @@ function cmdInit(args: string[]): void {
   1) ${settingsPath} 에 PreToolUse(Edit|Write) + Stop hook 추가 (머지·멱등)
      - 기존 settings.json 있으면 백업: settings.json.bak-<시각>
   2) ${join(skillDestDir, "SKILL.md")} 에 /gate 스킬 설치
-  3) hook 명령: ${preCommand()}
+  3) hook 명령: ${buildPreCommand(CLI_PATH, hasApiKey())}
 
   실행하려면: gbc init --yes
 `);
@@ -75,16 +78,19 @@ function cmdInit(args: string[]): void {
 
   const hooks = (settings.hooks ??= {}) as Record<string, unknown[]>;
   const serialized = JSON.stringify(settings);
+  const useKey = hasApiKey();
 
-  // PreToolUse (멱등: 이미 'hook pre-tool-use' 있으면 skip)
+  // PreToolUse (멱등). 신규면 추가, 이미 있으면 keyless→키주입 업그레이드(skip만 하지 않음).
   if (!serialized.includes("hook pre-tool-use")) {
     (hooks.PreToolUse ??= []).push({
       matcher: "Edit|Write|MultiEdit",
-      hooks: [{ type: "command", command: preCommand() }],
+      hooks: [{ type: "command", command: buildPreCommand(CLI_PATH, useKey) }],
     });
-    console.log(`  + PreToolUse hook 추가`);
+    console.log(`  + PreToolUse hook 추가${useKey ? " (API 키 주입)" : ""}`);
   } else {
-    console.log(`  = PreToolUse hook 이미 존재 (skip)`);
+    const n = useKey ? upgradeKeylessHooks(settings, CLI_PATH, true) : 0;
+    if (n > 0) console.log(`  ↑ PreToolUse hook 키주입 업그레이드 (${n}건)`);
+    else console.log(`  = PreToolUse hook 이미 존재 (skip)`);
   }
 
   // Stop (멱등)
