@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 
 import { runPreToolUse, runStop } from "./hook.js";
-import { loadPlanSpec, computeSpecHash } from "./spec.js";
+import { loadPlanSpec, computeSpecHash, addSpecCase, readSpecCases, clearSpec } from "./spec.js";
 import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer } from "./defer.js";
 import { selectedTransport } from "./judge.js";
@@ -166,6 +166,34 @@ function cmdDefer(args: string[]): void {
   }
 }
 
+// ---------- gbc spec ----------
+function cmdSpec(args: string[]): void {
+  const cwd = process.cwd();
+  const sub = args[0];
+  if (sub === "add") {
+    const item = args.slice(1).join(" ").trim();
+    if (!item) {
+      console.error('사용: gbc spec add "<케이스/시나리오>"');
+      process.exit(1);
+    }
+    addSpecCase(cwd, item);
+    console.log(`🐢 명세 등록: ${item}`);
+  } else if (sub === "show") {
+    const cases = readSpecCases(cwd);
+    if (cases.length === 0) {
+      console.log("(등록된 케이스 없음 — .gbc/spec.md 비어있음)");
+      return;
+    }
+    cases.forEach((c, i) => console.log(`${i + 1}. ${c}`));
+  } else if (sub === "clear") {
+    clearSpec(cwd);
+    console.log("🐢 명세 비움 — 다음 작업단위로 깨끗이 넘어갑니다.");
+  } else {
+    console.error("사용: gbc spec <add|show|clear> ...");
+    process.exit(1);
+  }
+}
+
 // ---------- gbc gate ----------
 function cmdGate(args: string[]): void {
   if (args[0] === "reset") {
@@ -186,6 +214,9 @@ function usage(): void {
   gbc defer add "<케이스>"             케이스를 명시적으로 미루기
   gbc defer list                      미룬 항목 목록
   gbc defer resolve <번호|텍스트>      미룬 항목 해결
+  gbc spec add "<케이스>"              승인된 시나리오를 .gbc/spec.md에 등록
+  gbc spec show                       등록된 케이스 목록
+  gbc spec clear                      명세 비우기(작업단위 종료)
   gbc gate reset                      작업단위 게이트 리셋
   gbc hook pre-tool-use               (내부) PreToolUse hook
   gbc hook stop                       (내부) Stop hook
@@ -207,6 +238,8 @@ async function main(): Promise<void> {
       return cmdStatus();
     case "defer":
       return cmdDefer(rest);
+    case "spec":
+      return cmdSpec(rest);
     case "gate":
       return cmdGate(rest);
     case undefined:

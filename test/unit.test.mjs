@@ -9,6 +9,8 @@ import { parseVerdict, buildUserMessage } from "../dist/judge.js";
 import { computeSpecHash } from "../dist/spec.js";
 import { addDefer, activeDeferItems, resolveDefer, unresolvedDefers } from "../dist/defer.js";
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
+import { addSpecCase, readSpecCases, clearSpec } from "../dist/spec.js";
+import { buildBlockReason } from "../dist/hook.js";
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "gbc-test-"));
@@ -91,6 +93,60 @@ test("defer-registry: add → active → resolve 흐름", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("spec-store: addSpecCase → readSpecCases → clearSpec 흐름", () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "로그인 빈 자격증명 거부");
+    addSpecCase(dir, "중복 이메일 인라인 에러");
+    const cases = readSpecCases(dir);
+    assert.equal(cases.length, 2);
+    assert.ok(cases.some((c) => c.includes("빈 자격증명")));
+    assert.ok(cases.some((c) => c.includes("중복 이메일")));
+    // clear 후 케이스 0
+    clearSpec(dir);
+    assert.equal(readSpecCases(dir).length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("addSpecCase: 멀티라인·장문 입력을 한 줄로 정규화", () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "케이스\n둘째 줄\n셋째 줄");
+    let cases = readSpecCases(dir);
+    assert.equal(cases.length, 1); // 줄바꿈→공백 → 한 줄로 합쳐짐
+    assert.match(cases[0], /케이스 둘째 줄 셋째 줄/);
+    // 길이 상한(500자) 절단
+    addSpecCase(dir, "x".repeat(1000));
+    cases = readSpecCases(dir);
+    assert.ok(cases[1].length <= 500);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildBlockReason: 시나리오 미지정이면 도출·등록 루프를 지시", () => {
+  const r = buildBlockReason(
+    { verdict: "block", missing: [], reason: "시나리오 미지정" },
+    true, // specEmpty
+    ".gbc/spec.md",
+  );
+  assert.match(r, /도출/); // 에이전트에게 시나리오 도출 지시
+  assert.match(r, /gbc spec add/); // 등록 경로 안내
+  assert.doesNotMatch(r, /gbc defer add/); // 누락 경로 메시지는 아님
+});
+
+test("buildBlockReason: 침묵 누락이면 defer 등록을 안내", () => {
+  const r = buildBlockReason(
+    { verdict: "block", missing: ["중복 이메일"], reason: "형제 케이스 누락" },
+    false, // specEmpty
+    "scratch.md",
+  );
+  assert.match(r, /gbc defer add/);
+  assert.match(r, /중복 이메일/); // 누락 케이스 표시
 });
 
 test("gate-state: markGated/isGated/reset 작업단위 1회 캐시", () => {
