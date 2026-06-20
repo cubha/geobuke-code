@@ -8,7 +8,31 @@ import { activeDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDir } from "./store.js";
-import type { EditToolInput } from "./types.js";
+import type { EditToolInput, Verdict } from "./types.js";
+
+/**
+ * 차단 사유 메시지를 빌드한다. 두 차단 종류를 다르게 안내한다:
+ * - specEmpty=true (시나리오 미지정): 에이전트가 요청에서 시나리오를 도출 → 사용자 검증 →
+ *   'gbc spec add'로 등록 후 재시도하도록 지시한다(도출 루프 트리거). 자동 등록 금지.
+ * - specEmpty=false (침묵 누락): 지금 다루거나 'gbc defer add'로 명시 미루도록 안내한다.
+ */
+export function buildBlockReason(verdict: Verdict, specEmpty: boolean, source: string): string {
+  if (specEmpty) {
+    return (
+      `🐢 거북이 게이트 — ${verdict.reason}\n` +
+      `→ [에이전트] 사용자 요청에서 의도·동작 시나리오를 도출해 사용자에게 제시·검증받은 뒤, ` +
+      `승인된 케이스를 'gbc spec add "<케이스>"'로 등록하고 재시도하세요. ` +
+      `사용자 승인 없이 자동 등록하지 마세요. (명세 소스: ${source})`
+    );
+  }
+  const missingLine =
+    verdict.missing.length > 0 ? `\n누락(침묵): ${verdict.missing.join(", ")}` : "";
+  return (
+    `🐢 거북이 게이트 — ${verdict.reason}${missingLine}\n` +
+    `→ 지금 이 변경에서 다루거나, 의도적으로 미룰 거면 'gbc defer add "<케이스>"'로 명시 등록 후 진행하세요.` +
+    ` (명세 소스: ${source})`
+  );
+}
 
 interface PreToolUseInput {
   tool_name?: string;
@@ -87,12 +111,8 @@ export async function runPreToolUse(): Promise<void> {
   }
 
   // block: 사람 pause (ask 기본) — 사유가 사용자에게 표시됨
-  const missingLine =
-    verdict.missing.length > 0 ? `\n누락(침묵): ${verdict.missing.join(", ")}` : "";
-  const reason =
-    `🐢 거북이 게이트 — ${verdict.reason}${missingLine}\n` +
-    `→ 지금 이 변경에서 다루거나, 의도적으로 미룰 거면 'gbc defer add "<케이스>"'로 명시 등록 후 진행하세요.` +
-    ` (명세 소스: ${source})`;
+  // 시나리오 미지정(명세 빈약)과 침묵 누락을 다르게 안내한다.
+  const reason = buildBlockReason(verdict, specText.trim() === "", source);
 
   const mode = process.env.GBC_BLOCK_MODE === "deny" ? "deny" : "ask";
   emit({
