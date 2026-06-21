@@ -8,6 +8,7 @@ import { activeDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDir } from "./store.js";
+import { logEvent } from "./metrics.js";
 import type { EditToolInput, Verdict } from "./types.js";
 
 /**
@@ -47,6 +48,7 @@ interface PreToolUseInput {
   tool_input?: EditToolInput;
   cwd?: string;
   permission_mode?: string;
+  session_id?: string;
 }
 
 interface StopInput {
@@ -68,6 +70,14 @@ function readStdin(): Promise<string> {
 
 function emit(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj));
+}
+
+function nowIso(): string {
+  try {
+    return new Date().toISOString();
+  } catch {
+    return "";
+  }
 }
 
 function logBypass(cwd: string, toolName: string): void {
@@ -103,6 +113,7 @@ export async function runPreToolUse(): Promise<void> {
 
   const toolName = input.tool_name ?? "";
   const cwd = input.cwd || process.cwd();
+  const session = input.session_id ?? "";
 
   // 코드 변경 도구가 아니면 즉시 통과
   if (!isGatedTool(toolName)) process.exit(0);
@@ -110,14 +121,29 @@ export async function runPreToolUse(): Promise<void> {
   // 명시적 우회 (계측됨)
   if (process.env.GBC_NO_GATE === "1") {
     logBypass(cwd, toolName);
+    logEvent(cwd, { at: nowIso(), session, specHash: "", kind: "bypass", tool: toolName });
     process.exit(0);
   }
 
   const { text: specText, source } = loadPlanSpec(cwd);
   const specHash = computeSpecHash(specText);
+  // 계측용 해시: 빈 spec은 ""(센티넬)로 기록 → M1 churn 교차세션 합산 방지.
+  // (게이트 캐시용 specHash는 그대로 — markGated/isGated 동작 불변)
+  const logHash = specText.trim() === "" ? "" : specHash;
 
   // 작업단위 1회: 이미 게이트 통과한 단위면 즉시 통과 (judge 미호출, 핫패스)
-  if (isGated(cwd, specHash)) process.exit(0);
+  // 계측: cached-skip도 기록해야 M3(작업단위당 edit 반복)이 진짜 횟수를 잡는다.
+  if (isGated(cwd, specHash)) {
+    logEvent(cwd, {
+      at: nowIso(),
+      session,
+      specHash: logHash,
+      kind: "gate",
+      tool: toolName,
+      decision: "cached",
+    });
+    process.exit(0);
+  }
 
   // judge는 여기서만 동적 import (SDK lazy)
   const { judge } = await import("./judge.js");
@@ -128,11 +154,28 @@ export async function runPreToolUse(): Promise<void> {
   if (verdict.verdict === "pass") {
     if (shouldCacheVerdict(verdict)) {
       markGated(cwd, specHash, verdict.reason);
+      logEvent(cwd, {
+        at: nowIso(),
+        session,
+        specHash: logHash,
+        kind: "gate",
+        tool: toolName,
+        decision: "pass",
+        deferCount: defers.length,
+      });
       process.exit(0); // 정상 통과 (자동승인 X — 무출력)
     }
     // fail-open: 판정 실패로 안전 통과. 캐시하지 않아(작업단위 무력화 방지) 다음 편집에서 재판정.
     // 계측 + systemMessage로 사용자에게 "게이트가 검사 못 했음"을 알린다(조용한 무력화 방지).
     logFailOpen(cwd, toolName, verdict.reason);
+    logEvent(cwd, {
+      at: nowIso(),
+      session,
+      specHash: logHash,
+      kind: "gate",
+      tool: toolName,
+      decision: "failopen",
+    });
     emit({
       systemMessage: `🐢 거북이 게이트 — 판정 실패로 안전 통과(fail-open). 이 편집은 게이트 검사를 받지 못했습니다: ${verdict.reason}`,
       hookSpecificOutput: {
@@ -147,6 +190,17 @@ export async function runPreToolUse(): Promise<void> {
   // block: 사람 pause (ask 기본) — 사유가 사용자에게 표시됨
   // 시나리오 미지정(명세 빈약)과 침묵 누락을 다르게 안내한다.
   const reason = buildBlockReason(verdict, specText.trim() === "", source);
+
+  logEvent(cwd, {
+    at: nowIso(),
+    session,
+    specHash: logHash,
+    kind: "gate",
+    tool: toolName,
+    decision: "block",
+    missing: verdict.missing,
+    deferCount: defers.length,
+  });
 
   const mode = process.env.GBC_BLOCK_MODE === "deny" ? "deny" : "ask";
   emit({

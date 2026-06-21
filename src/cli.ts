@@ -17,6 +17,8 @@ import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer } from "./defer.js";
 import { selectedTransport } from "./judge.js";
 import { buildPreCommand, upgradeKeylessHooks } from "./install.js";
+import { logEvent, parseEvents, computeMetrics } from "./metrics.js";
+import type { EventKind } from "./metrics.js";
 
 const CLI_PATH = fileURLToPath(import.meta.url);
 const PKG_ROOT = join(dirname(CLI_PATH), ".."); // dist/cli.js → 패키지 루트
@@ -27,6 +29,28 @@ function hasApiKey(): boolean {
 }
 function stopCommand(): string {
   return `node "${CLI_PATH}" hook stop`;
+}
+
+function nowIso(): string {
+  try {
+    return new Date().toISOString();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 현재 작업단위 명세 해시 (CLI 이벤트의 specHash 상관 키).
+ * 빈 spec은 ""(센티넬) — M1 churn 교차세션 합산 방지(computeMetrics가 제외).
+ */
+function curHash(cwd: string): string {
+  const text = loadPlanSpec(cwd).text;
+  return text.trim() === "" ? "" : computeSpecHash(text);
+}
+
+/** CLI 변이 이벤트를 events.jsonl에 기록(메트릭 상관용). specHash는 변이 전 값을 넘긴다. */
+function logCli(cwd: string, kind: EventKind, specHash: string): void {
+  logEvent(cwd, { at: nowIso(), session: "", specHash, kind });
 }
 
 function nowStamp(): string {
@@ -152,6 +176,7 @@ function cmdDefer(args: string[]): void {
       process.exit(1);
     }
     addDefer(cwd, item);
+    logCli(cwd, "defer-add", curHash(cwd));
     console.log(`🐢 미룸 등록: ${item}`);
   } else if (sub === "list") {
     const defers = loadDefers(cwd);
@@ -165,6 +190,7 @@ function cmdDefer(args: string[]): void {
   } else if (sub === "resolve") {
     const ref = args.slice(1).join(" ").trim();
     const r = resolveDefer(cwd, ref);
+    if (r) logCli(cwd, "defer-resolve", curHash(cwd));
     console.log(r ? `🐢 해결 표시: ${r.item}` : `매칭되는 미룬 항목 없음: ${ref}`);
   } else {
     console.error("사용: gbc defer <add|list|resolve> ...");
@@ -182,7 +208,9 @@ function cmdSpec(args: string[]): void {
       console.error('사용: gbc spec add "<케이스/시나리오>"');
       process.exit(1);
     }
+    const beforeHash = curHash(cwd); // 변이 전 해시 = 수정 대상 작업단위와 상관
     addSpecCase(cwd, item);
+    logCli(cwd, "spec-add", beforeHash);
     console.log(`🐢 명세 등록: ${item}`);
   } else if (sub === "show") {
     const cases = readSpecCases(cwd);
@@ -192,7 +220,9 @@ function cmdSpec(args: string[]): void {
     }
     cases.forEach((c, i) => console.log(`${i + 1}. ${c}`));
   } else if (sub === "clear") {
+    const beforeHash = curHash(cwd);
     clearSpec(cwd);
+    logCli(cwd, "spec-clear", beforeHash);
     console.log("🐢 명세 비움 — 다음 작업단위로 깨끗이 넘어갑니다.");
   } else {
     console.error("사용: gbc spec <add|show|clear> ...");
@@ -203,12 +233,41 @@ function cmdSpec(args: string[]): void {
 // ---------- gbc gate ----------
 function cmdGate(args: string[]): void {
   if (args[0] === "reset") {
-    resetGate(process.cwd());
+    const cwd = process.cwd();
+    logCli(cwd, "gate-reset", curHash(cwd));
+    resetGate(cwd);
     console.log("🐢 작업단위 게이트 리셋 — 다음 편집에서 다시 발동합니다.");
   } else {
     console.error("사용: gbc gate reset");
     process.exit(1);
   }
+}
+
+// ---------- gbc metrics ----------
+function cmdMetrics(args: string[]): void {
+  const cwd = process.cwd();
+  const eventsPath = join(cwd, ".gbc", "events.jsonl");
+  const raw = existsSync(eventsPath) ? readFileSync(eventsPath, "utf8") : "";
+  const m = computeMetrics(parseEvents(raw));
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(m, null, 2));
+    return;
+  }
+
+  console.log(`🐢 거북이 게이트 계측 — ${cwd}
+  이벤트 총 ${m.totalEvents}건  (.gbc/events.jsonl)
+
+  [M3] 재호출/iteration — 작업단위당 edit 반복
+    작업단위 ${m.m3.workUnits} · 총 edit ${m.m3.totalEdits} · 평균 ${m.m3.avgEditsPerUnit}/단위 · 최대 ${m.m3.maxEditsPerUnit} · 반복(>1)단위 ${m.m3.multiEditUnits}
+
+  [M2] 게이트 적중 vs 도중발견
+    게이트 적중(차단 누락케이스) ${m.m2.gateCaught} · 차단 ${m.m2.blocks}회
+    도중발견(defer 등록) ${m.m2.deferred} · 도중발견 비율 ${(m.m2.midDiscoveryRatio * 100).toFixed(1)}%
+
+  [M1] post-gate 재작업
+    게이트 리셋 ${m.m1.resets} · 통과후 churn ${m.m1.churnAfterPass}
+    ⚠️ ${m.m1.note}`);
 }
 
 function usage(): void {
@@ -224,6 +283,7 @@ function usage(): void {
   gbc spec show                       등록된 케이스 목록
   gbc spec clear                      명세 비우기(작업단위 종료)
   gbc gate reset                      작업단위 게이트 리셋
+  gbc metrics [--json]                계측 리포트(M1~M3, B-모드 관측 프록시)
   gbc hook pre-tool-use               (내부) PreToolUse hook
   gbc hook stop                       (내부) Stop hook
 `);
@@ -248,6 +308,8 @@ async function main(): Promise<void> {
       return cmdSpec(rest);
     case "gate":
       return cmdGate(rest);
+    case "metrics":
+      return cmdMetrics(rest);
     case undefined:
     case "help":
     case "--help":

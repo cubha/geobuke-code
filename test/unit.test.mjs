@@ -12,6 +12,8 @@ import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
 import { addSpecCase, readSpecCases, clearSpec } from "../dist/spec.js";
 import { buildBlockReason, shouldCacheVerdict } from "../dist/hook.js";
 import { buildPreCommand, upgradeKeylessHooks } from "../dist/install.js";
+import { serializeEvent, parseEvents, computeMetrics, logEvent } from "../dist/metrics.js";
+import { readFileSync } from "node:fs";
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "gbc-test-"));
@@ -211,6 +213,175 @@ test("upgradeKeylessHooks: 기존 keyless hook을 키주입 버전으로 업그�
   assert.match(settings.hooks.PreToolUse[0].hooks[0].command, /ANTHROPIC_API_KEY/);
   // 이미 키주입됨 → 재업그레이드 안 함(멱등)
   assert.equal(upgradeKeylessHooks(settings, "/x/dist/cli.js", true), 0);
+});
+
+test("serializeEvent: 한 줄 JSON으로 직렬화 + parseEvents 라운드트립", () => {
+  const e = {
+    at: "2026-06-21T00:00:00.000Z",
+    session: "sess-1",
+    specHash: "abc",
+    kind: "gate",
+    tool: "Edit",
+    decision: "block",
+    missing: ["중복 이메일", "비번 길이"],
+    deferCount: 0,
+    specCount: 2,
+  };
+  const line = serializeEvent(e);
+  assert.equal(line.includes("\n"), false); // 단일 라인
+  const back = parseEvents(line);
+  assert.equal(back.length, 1);
+  assert.equal(back[0].kind, "gate");
+  assert.equal(back[0].decision, "block");
+  assert.deepEqual(back[0].missing, ["중복 이메일", "비번 길이"]);
+  assert.equal(back[0].specCount, 2);
+});
+
+test("serializeEvent: 과대 missing[]을 캡해 라인 길이 4096 미만 보장", () => {
+  const e = {
+    at: "2026-06-21T00:00:00.000Z",
+    session: "s",
+    specHash: "h",
+    kind: "gate",
+    decision: "block",
+    missing: Array.from({ length: 200 }, (_, i) => "x".repeat(500) + i),
+  };
+  const line = serializeEvent(e);
+  assert.ok(line.length < 4096, `라인 길이 ${line.length} < 4096`);
+  // 캡 후에도 유효 JSON으로 파싱돼야 함
+  const back = parseEvents(line);
+  assert.equal(back.length, 1);
+});
+
+test("parseEvents: 멀티라인 jsonl 파싱 + 깨진/빈 줄 skip", () => {
+  const raw = [
+    JSON.stringify({ at: "t1", session: "", specHash: "h", kind: "defer-add" }),
+    "", // 빈 줄
+    "{깨진 json", // 파싱 실패
+    JSON.stringify({ at: "t2", session: "", specHash: "h", kind: "spec-add" }),
+    "   ", // 공백 줄
+  ].join("\n");
+  const evs = parseEvents(raw);
+  assert.equal(evs.length, 2);
+  assert.deepEqual(
+    evs.map((e) => e.kind),
+    ["defer-add", "spec-add"],
+  );
+});
+
+test("parseEvents: 빈/공백 입력은 빈 배열", () => {
+  assert.deepEqual(parseEvents(""), []);
+  assert.deepEqual(parseEvents("   \n  \n"), []);
+});
+
+test("computeMetrics M3: 작업단위(session)별 edit 반복 집계", () => {
+  const evs = [
+    // session A: 3 edits (block, block, pass)
+    { at: "t1", session: "A", specHash: "h1", kind: "gate", decision: "block", missing: ["x"] },
+    { at: "t2", session: "A", specHash: "h1", kind: "gate", decision: "block", missing: [] },
+    { at: "t3", session: "A", specHash: "h1", kind: "gate", decision: "pass" },
+    // session B: 1 edit (pass)
+    { at: "t4", session: "B", specHash: "h2", kind: "gate", decision: "pass" },
+  ];
+  const m = computeMetrics(evs);
+  assert.equal(m.m3.workUnits, 2);
+  assert.equal(m.m3.totalEdits, 4);
+  assert.equal(m.m3.avgEditsPerUnit, 2); // 4/2
+  assert.equal(m.m3.maxEditsPerUnit, 3);
+  assert.equal(m.m3.multiEditUnits, 1); // A만 >1
+});
+
+test("computeMetrics M2: 게이트적중(Σmissing) vs 도중발견(defer-add)", () => {
+  const evs = [
+    { at: "t1", session: "A", specHash: "h", kind: "gate", decision: "block", missing: ["a", "b"] },
+    { at: "t2", session: "A", specHash: "h", kind: "gate", decision: "block", missing: ["c"] },
+    { at: "t3", session: "", specHash: "h", kind: "defer-add" },
+    { at: "t4", session: "A", specHash: "h", kind: "gate", decision: "pass" },
+  ];
+  const m = computeMetrics(evs);
+  assert.equal(m.m2.gateCaught, 3); // a,b,c
+  assert.equal(m.m2.blocks, 2);
+  assert.equal(m.m2.deferred, 1);
+  assert.equal(m.m2.midDiscoveryRatio, 0.25); // 1/(3+1)
+});
+
+test("computeMetrics M1: first pass 이후 churn만 계수(이전 변이 제외)", () => {
+  const evs = [
+    { at: "t1", session: "", specHash: "h", kind: "spec-add" }, // pass 이전 → 제외
+    { at: "t2", session: "A", specHash: "h", kind: "gate", decision: "pass" }, // 경계
+    { at: "t3", session: "", specHash: "h", kind: "spec-add" }, // 이후 → churn
+    { at: "t4", session: "", specHash: "h", kind: "gate-reset" }, // 이후 → churn + reset
+    { at: "t5", session: "", specHash: "h2", kind: "spec-add" }, // pass 없는 specHash → 제외
+  ];
+  const m = computeMetrics(evs);
+  assert.equal(m.m1.resets, 1);
+  assert.equal(m.m1.churnAfterPass, 2); // t3 spec-add + t4 gate-reset
+  assert.match(m.m1.note, /A-mode/);
+});
+
+test("computeMetrics M1: 빈 specHash('')는 churn에서 제외(교차세션 합산 방지)", () => {
+  // 빈-스펙 작업단위는 specHash=""로 기록됨 — 무관 세션 이벤트가 한 버킷에 합산되면 안 됨
+  const evs = [
+    { at: "t1", session: "A", specHash: "", kind: "gate", decision: "pass" },
+    { at: "t2", session: "", specHash: "", kind: "defer-add" },
+    { at: "t3", session: "", specHash: "", kind: "gate-reset" },
+    { at: "t4", session: "", specHash: "", kind: "spec-add" },
+  ];
+  const m = computeMetrics(evs);
+  assert.equal(m.m1.churnAfterPass, 0); // "" 버킷 전체 제외
+  assert.equal(m.m1.resets, 1); // resets 자체 카운트는 유지
+  // 비어있지 않은 specHash는 정상 churn 집계
+  const evs2 = [
+    { at: "t1", session: "A", specHash: "h", kind: "gate", decision: "pass" },
+    { at: "t2", session: "", specHash: "h", kind: "spec-add" },
+  ];
+  assert.equal(computeMetrics(evs2).m1.churnAfterPass, 1);
+});
+
+test("computeMetrics: 빈 입력 안전(0, 0으로 나눔 없음)", () => {
+  const m = computeMetrics([]);
+  assert.equal(m.totalEvents, 0);
+  assert.equal(m.m3.avgEditsPerUnit, 0);
+  assert.equal(m.m2.midDiscoveryRatio, 0);
+  assert.equal(m.m1.churnAfterPass, 0);
+});
+
+test("logEvent: events.jsonl에 append → parseEvents/computeMetrics 라운드트립", () => {
+  const dir = tmp();
+  try {
+    logEvent(dir, { at: "t1", session: "S", specHash: "h", kind: "gate", tool: "Edit", decision: "block", missing: ["케이스A"] });
+    logEvent(dir, { at: "t2", session: "S", specHash: "h", kind: "gate", tool: "Edit", decision: "pass" });
+    logEvent(dir, { at: "t3", session: "", specHash: "h", kind: "defer-add" });
+    const raw = readFileSync(join(dir, ".gbc", "events.jsonl"), "utf8");
+    const evs = parseEvents(raw);
+    assert.equal(evs.length, 3);
+    const m = computeMetrics(evs);
+    assert.equal(m.m3.totalEdits, 2); // gate 이벤트 2건
+    assert.equal(m.m2.gateCaught, 1); // 케이스A
+    assert.equal(m.m2.deferred, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("logEvent: GBC_NO_METRICS=1이면 기록 안 함(opt-out)", () => {
+  const dir = tmp();
+  const prev = process.env.GBC_NO_METRICS;
+  process.env.GBC_NO_METRICS = "1";
+  try {
+    logEvent(dir, { at: "t1", session: "S", specHash: "h", kind: "gate", decision: "pass" });
+    let exists = true;
+    try {
+      readFileSync(join(dir, ".gbc", "events.jsonl"), "utf8");
+    } catch {
+      exists = false;
+    }
+    assert.equal(exists, false); // 파일 미생성
+  } finally {
+    if (prev === undefined) delete process.env.GBC_NO_METRICS;
+    else process.env.GBC_NO_METRICS = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("gate-state: markGated/isGated/reset 작업단위 1회 캐시", () => {
