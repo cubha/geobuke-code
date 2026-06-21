@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { normalizeEdit, isGatedTool } from "../dist/normalize.js";
-import { parseVerdict, buildUserMessage } from "../dist/judge.js";
+import { parseVerdict, buildUserMessage, failOpenVerdict } from "../dist/judge.js";
 import { computeSpecHash } from "../dist/spec.js";
 import { addDefer, activeDeferItems, resolveDefer, unresolvedDefers } from "../dist/defer.js";
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
 import { addSpecCase, readSpecCases, clearSpec } from "../dist/spec.js";
-import { buildBlockReason } from "../dist/hook.js";
+import { buildBlockReason, shouldCacheVerdict } from "../dist/hook.js";
+import { buildPreCommand, upgradeKeylessHooks } from "../dist/install.js";
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "gbc-test-"));
@@ -59,6 +60,19 @@ test("parseVerdict: JSON 추출 + block/pass 정규화", () => {
 test("parseVerdict: 알 수 없는 verdict는 pass로", () => {
   const v = parseVerdict('{"verdict":"maybe"}');
   assert.equal(v.verdict, "pass");
+});
+
+test("failOpenVerdict: 판정 실패 시 failOpen=true pass 반환(사유 포함)", () => {
+  const v = failOpenVerdict(new Error("network down"));
+  assert.equal(v.verdict, "pass");
+  assert.equal(v.failOpen, true);
+  assert.match(v.reason, /fail-open/);
+  assert.match(v.reason, /network down/);
+});
+
+test("parseVerdict: 정상 판정 결과엔 failOpen 미설정(falsy)", () => {
+  const v = parseVerdict('{"verdict":"pass","missing":[],"reason":"ok"}');
+  assert.ok(!v.failOpen);
 });
 
 test("buildUserMessage: defer 없으면 (없음)", () => {
@@ -128,6 +142,16 @@ test("addSpecCase: 멀티라인·장문 입력을 한 줄로 정규화", () => {
   }
 });
 
+test("shouldCacheVerdict: 정상 pass만 캐시, fail-open·block은 캐시 안 함", () => {
+  assert.equal(shouldCacheVerdict({ verdict: "pass", missing: [], reason: "ok" }), true);
+  // fail-open pass는 캐시 제외 (일시 장애가 작업단위 내내 게이트 무력화 방지)
+  assert.equal(
+    shouldCacheVerdict({ verdict: "pass", missing: [], reason: "x", failOpen: true }),
+    false,
+  );
+  assert.equal(shouldCacheVerdict({ verdict: "block", missing: [], reason: "y" }), false);
+});
+
 test("buildBlockReason: 시나리오 미지정이면 도출·등록 루프를 지시", () => {
   const r = buildBlockReason(
     { verdict: "block", missing: [], reason: "시나리오 미지정" },
@@ -147,6 +171,46 @@ test("buildBlockReason: 침묵 누락이면 defer 등록을 안내", () => {
   );
   assert.match(r, /gbc defer add/);
   assert.match(r, /중복 이메일/); // 누락 케이스 표시
+});
+
+test("buildPreCommand: useKey면 $HOME 기반 키주입 prefix, 아니면 기본", () => {
+  const withKey = buildPreCommand("/x/dist/cli.js", true);
+  assert.match(withKey, /ANTHROPIC_API_KEY/);
+  assert.match(withKey, /\$HOME\/\.gbc\/api-key/); // 셸 확장 경로
+  assert.doesNotMatch(withKey, /\/home\//); // 하드코딩 홈경로 금지
+  assert.match(withKey, /hook pre-tool-use/);
+  const noKey = buildPreCommand("/x/dist/cli.js", false);
+  assert.doesNotMatch(noKey, /ANTHROPIC_API_KEY/);
+  assert.match(noKey, /hook pre-tool-use/);
+});
+
+test("buildPreCommand: cliPath의 셸 메타문자를 이스케이프(명령 인젝션 방지)", () => {
+  const cmd = buildPreCommand('/p/a"; rm -rf /; echo "/dist/cli.js', false);
+  // " 가 \" 로 이스케이프돼 더블쿼트를 벗어나지 못함
+  assert.ok(cmd.includes('\\"'));
+  assert.ok(!/[^\\]";\s*rm/.test(cmd)); // 비이스케이프 '"; rm' breakout 없음
+  // 백틱·$ 도 이스케이프
+  const cmd2 = buildPreCommand("/p/`whoami`/$X/cli.js", false);
+  assert.ok(cmd2.includes("\\`"));
+  assert.ok(cmd2.includes("\\$X"));
+});
+
+test("upgradeKeylessHooks: 기존 keyless hook을 키주입 버전으로 업그레이드(멱등)", () => {
+  const settings = {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Edit|Write|MultiEdit",
+          hooks: [{ type: "command", command: 'node "/x/dist/cli.js" hook pre-tool-use' }],
+        },
+      ],
+    },
+  };
+  const n = upgradeKeylessHooks(settings, "/x/dist/cli.js", true);
+  assert.equal(n, 1); // 1건 업그레이드
+  assert.match(settings.hooks.PreToolUse[0].hooks[0].command, /ANTHROPIC_API_KEY/);
+  // 이미 키주입됨 → 재업그레이드 안 함(멱등)
+  assert.equal(upgradeKeylessHooks(settings, "/x/dist/cli.js", true), 0);
 });
 
 test("gate-state: markGated/isGated/reset 작업단위 1회 캐시", () => {

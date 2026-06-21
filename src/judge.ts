@@ -111,12 +111,21 @@ export async function judge(
         : await judgeViaCli(GATE_SYSTEM, user);
     return parseVerdict(raw);
   } catch (e) {
-    return {
-      verdict: "pass",
-      missing: [],
-      reason: `게이트 판정 실패(fail-open): ${String(e).slice(0, 160)}`,
-    };
+    return failOpenVerdict(e);
   }
+}
+
+/**
+ * 판정 호출 실패 시의 안전 통과(fail-open) verdict.
+ * failOpen=true로 표시해 hook이 캐시 제외·계측할 수 있게 한다.
+ */
+export function failOpenVerdict(e: unknown): Verdict {
+  return {
+    verdict: "pass",
+    missing: [],
+    reason: `게이트 판정 실패(fail-open): ${String(e).slice(0, 160)}`,
+    failOpen: true,
+  };
 }
 
 export { GATE_SYSTEM, buildUserMessage, parseVerdict };

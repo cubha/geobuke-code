@@ -17,7 +17,8 @@
     "build": "tsc",
     "test": "node --test 'test/**/*.test.mjs'",
     "eval": "node dist/eval/regression.js",
-    "prepare": "tsc"
+    "prepare": "tsc",
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "claude-code",

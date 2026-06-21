@@ -9,6 +9,11 @@ export interface Verdict {
   missing: string[];
   /** 한 줄 사유 */
   reason: string;
+  /**
+   * 판정 호출 실패로 안전 통과(fail-open)된 결과인지.
+   * true면 정상 통과가 아니므로 hook이 작업단위 캐시(markGated)에서 제외하고 계측한다.
+   */
+  failOpen?: boolean;
 }
 
 /** Claude Code PreToolUse hook이 전달하는 tool_input (Edit/Write/MultiEdit) */
