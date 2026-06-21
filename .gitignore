@@ -13,3 +13,7 @@ dist/
 scratch.md
 .mvp-state.json
 .mvp-state.completed-*.json
+
+# npm 배포 시크릿 (절대 커밋 금지)
+npm_token.txt
+.npmrc
