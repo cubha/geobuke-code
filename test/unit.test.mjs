@@ -184,6 +184,17 @@ test("buildPreCommand: useKey면 $HOME 기반 키주입 prefix, 아니면 기본
   assert.match(noKey, /hook pre-tool-use/);
 });
 
+test("buildPreCommand: cliPath의 셸 메타문자를 이스케이프(명령 인젝션 방지)", () => {
+  const cmd = buildPreCommand('/p/a"; rm -rf /; echo "/dist/cli.js', false);
+  // " 가 \" 로 이스케이프돼 더블쿼트를 벗어나지 못함
+  assert.ok(cmd.includes('\\"'));
+  assert.ok(!/[^\\]";\s*rm/.test(cmd)); // 비이스케이프 '"; rm' breakout 없음
+  // 백틱·$ 도 이스케이프
+  const cmd2 = buildPreCommand("/p/`whoami`/$X/cli.js", false);
+  assert.ok(cmd2.includes("\\`"));
+  assert.ok(cmd2.includes("\\$X"));
+});
+
 test("upgradeKeylessHooks: 기존 keyless hook을 키주입 버전으로 업그레이드(멱등)", () => {
   const settings = {
     hooks: {

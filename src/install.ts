@@ -18,8 +18,17 @@ interface Settings {
  * useKey=true면 ANTHROPIC_API_KEY를 $HOME/.gbc/api-key에서 읽어 주입(빠른 haiku 경로).
  * 경로는 셸이 확장하는 $HOME을 써 머신 독립적이게 한다.
  */
+/**
+ * 더블쿼트 컨텍스트용 이스케이프. 셸이 확장하거나 따옴표를 벗어나지 못하도록
+ * `"` 백틱 `$` `\` 를 백슬래시 처리한다(settings.json 명령 인젝션 방지).
+ */
+function shDquote(s: string): string {
+  return s.replace(/(["`$\\])/g, "\\$1");
+}
+
 export function buildPreCommand(cliPath: string, useKey: boolean): string {
-  const base = `node "${cliPath}" hook pre-tool-use`;
+  const base = `node "${shDquote(cliPath)}" hook pre-tool-use`;
+  // $HOME·$(...)는 의도된 셸 확장이므로 이스케이프하지 않는다.
   return useKey ? `ANTHROPIC_API_KEY="$(cat "$HOME/.gbc/api-key")" ${base}` : base;
 }
 
