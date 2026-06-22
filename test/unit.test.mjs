@@ -11,9 +11,10 @@ import { addDefer, activeDeferItems, resolveDefer, unresolvedDefers } from "../d
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
 import { addSpecCase, readSpecCases, clearSpec } from "../dist/spec.js";
 import { buildBlockReason, shouldCacheVerdict } from "../dist/hook.js";
-import { buildPreCommand, upgradeKeylessHooks } from "../dist/install.js";
+import { buildPreCommand, normalizeHooks } from "../dist/install.js";
 import { serializeEvent, parseEvents, computeMetrics, logEvent } from "../dist/metrics.js";
-import { readFileSync } from "node:fs";
+import { resolveApiKey } from "../dist/judge.js";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "gbc-test-"));
@@ -175,44 +176,47 @@ test("buildBlockReason: 침묵 누락이면 defer 등록을 안내", () => {
   assert.match(r, /중복 이메일/); // 누락 케이스 표시
 });
 
-test("buildPreCommand: useKey면 $HOME 기반 키주입 prefix, 아니면 기본", () => {
-  const withKey = buildPreCommand("/x/dist/cli.js", true);
-  assert.match(withKey, /ANTHROPIC_API_KEY/);
-  assert.match(withKey, /\$HOME\/\.gbc\/api-key/); // 셸 확장 경로
-  assert.doesNotMatch(withKey, /\/home\//); // 하드코딩 홈경로 금지
-  assert.match(withKey, /hook pre-tool-use/);
-  const noKey = buildPreCommand("/x/dist/cli.js", false);
-  assert.doesNotMatch(noKey, /ANTHROPIC_API_KEY/);
-  assert.match(noKey, /hook pre-tool-use/);
+test("buildPreCommand: 셸 무관 순수 명령 (키 prefix·셸 확장 없음)", () => {
+  const cmd = buildPreCommand("/home/u/dist/cli.js");
+  assert.equal(cmd, 'node "/home/u/dist/cli.js" hook pre-tool-use');
+  assert.doesNotMatch(cmd, /ANTHROPIC_API_KEY/); // 셸 키주입 없음(코드가 키 해석)
+  assert.doesNotMatch(cmd, /\$\(/); // $(cat ...) 셸 확장 없음
 });
 
-test("buildPreCommand: cliPath의 셸 메타문자를 이스케이프(명령 인젝션 방지)", () => {
-  const cmd = buildPreCommand('/p/a"; rm -rf /; echo "/dist/cli.js', false);
-  // " 가 \" 로 이스케이프돼 더블쿼트를 벗어나지 못함
-  assert.ok(cmd.includes('\\"'));
-  assert.ok(!/[^\\]";\s*rm/.test(cmd)); // 비이스케이프 '"; rm' breakout 없음
-  // 백틱·$ 도 이스케이프
-  const cmd2 = buildPreCommand("/p/`whoami`/$X/cli.js", false);
-  assert.ok(cmd2.includes("\\`"));
-  assert.ok(cmd2.includes("\\$X"));
+test("buildPreCommand: Windows 경로 백슬래시 보존 (이중 이스케이프 금지)", () => {
+  // 난 WSL이라 native Windows 실행은 못 하지만, Windows 경로 입력→출력으로 요구를 검증한다.
+  const cmd = buildPreCommand("C:\\Users\\me\\dist\\cli.js");
+  assert.equal(cmd, 'node "C:\\Users\\me\\dist\\cli.js" hook pre-tool-use');
+  assert.doesNotMatch(cmd, /\\\\/); // 백슬래시가 \\로 안 깨짐 (JSON.stringify가 파일기록 시 처리)
 });
 
-test("upgradeKeylessHooks: 기존 keyless hook을 키주입 버전으로 업그레이드(멱등)", () => {
+test("normalizeHooks: 기존 hook(keyless·옛 bash 키주입)을 pure 명령으로 정규화(멱등)", () => {
   const settings = {
     hooks: {
       PreToolUse: [
         {
           matcher: "Edit|Write|MultiEdit",
-          hooks: [{ type: "command", command: 'node "/x/dist/cli.js" hook pre-tool-use' }],
+          // 옛 bash 키주입 prefix 형태
+          hooks: [
+            {
+              type: "command",
+              command:
+                'ANTHROPIC_API_KEY="$(cat "$HOME/.gbc/api-key")" node "/x/dist/cli.js" hook pre-tool-use',
+            },
+          ],
         },
       ],
     },
   };
-  const n = upgradeKeylessHooks(settings, "/x/dist/cli.js", true);
-  assert.equal(n, 1); // 1건 업그레이드
-  assert.match(settings.hooks.PreToolUse[0].hooks[0].command, /ANTHROPIC_API_KEY/);
-  // 이미 키주입됨 → 재업그레이드 안 함(멱등)
-  assert.equal(upgradeKeylessHooks(settings, "/x/dist/cli.js", true), 0);
+  const n = normalizeHooks(settings, "/x/dist/cli.js");
+  assert.equal(n, 1); // 1건 정규화
+  assert.equal(
+    settings.hooks.PreToolUse[0].hooks[0].command,
+    'node "/x/dist/cli.js" hook pre-tool-use',
+  );
+  assert.doesNotMatch(settings.hooks.PreToolUse[0].hooks[0].command, /ANTHROPIC_API_KEY/);
+  // 이미 pure → 재정규화 안 함(멱등)
+  assert.equal(normalizeHooks(settings, "/x/dist/cli.js"), 0);
 });
 
 test("serializeEvent: 한 줄 JSON으로 직렬화 + parseEvents 라운드트립", () => {
@@ -382,6 +386,45 @@ test("logEvent: GBC_NO_METRICS=1이면 기록 안 함(opt-out)", () => {
     else process.env.GBC_NO_METRICS = prev;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("resolveApiKey: env 우선 (ANTHROPIC_API_KEY 있으면 그 값)", () => {
+  const key = resolveApiKey({
+    env: { ANTHROPIC_API_KEY: "sk-env" },
+    homeDir: "/nonexistent",
+    readFile: () => {
+      throw new Error("파일 안 읽어야 함");
+    },
+  });
+  assert.equal(key, "sk-env");
+});
+
+test("resolveApiKey: env 없으면 ~/.gbc/api-key 파일에서(+ trailing newline trim)", () => {
+  const key = resolveApiKey({
+    env: {},
+    homeDir: "/home/u",
+    readFile: (p) => {
+      assert.match(p.replace(/\\/g, "/"), /\/home\/u\/\.gbc\/api-key$/);
+      return "sk-file\n"; // bash $(cat)와 달리 readFileSync는 안 벗기므로 코드가 trim
+    },
+  });
+  assert.equal(key, "sk-file"); // 개행 제거됨
+});
+
+test("resolveApiKey: env도 파일도 없으면 null (파일 읽기 실패 안전)", () => {
+  const key = resolveApiKey({
+    env: {},
+    homeDir: "/home/u",
+    readFile: () => {
+      throw new Error("ENOENT");
+    },
+  });
+  assert.equal(key, null);
+});
+
+test("resolveApiKey: 파일이 공백뿐이면 null", () => {
+  const key = resolveApiKey({ env: {}, homeDir: "/h", readFile: () => "  \n " });
+  assert.equal(key, null);
 });
 
 test("gate-state: markGated/isGated/reset 작업단위 1회 캐시", () => {

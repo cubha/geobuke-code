@@ -16,7 +16,7 @@ import { loadPlanSpec, computeSpecHash, addSpecCase, readSpecCases, clearSpec } 
 import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer } from "./defer.js";
 import { selectedTransport } from "./judge.js";
-import { buildPreCommand, upgradeKeylessHooks } from "./install.js";
+import { buildPreCommand, normalizeHooks } from "./install.js";
 import { logEvent, parseEvents, computeMetrics } from "./metrics.js";
 import type { EventKind } from "./metrics.js";
 
@@ -77,8 +77,12 @@ function cmdInit(args: string[]): void {
   1) ${settingsPath} 에 PreToolUse(Edit|Write) + Stop hook 추가 (머지·멱등)
      - 기존 settings.json 있으면 백업: settings.json.bak-<시각>
   2) ${join(skillDestDir, "SKILL.md")} 에 /gate 스킬 설치
-  3) hook 명령: ${buildPreCommand(CLI_PATH, hasApiKey())}
-
+  3) hook 명령: ${buildPreCommand(CLI_PATH)}
+${
+  hasApiKey()
+    ? "     (~/.gbc/api-key 감지됨 → 빠른 haiku API 경로로 동작)"
+    : "     (~/.gbc/api-key 없음 → claude -p 폴백. 빠른 경로 원하면 키 파일 생성)"
+}
   실행하려면: gbc init --yes
 `);
     return;
@@ -102,19 +106,18 @@ function cmdInit(args: string[]): void {
 
   const hooks = (settings.hooks ??= {}) as Record<string, unknown[]>;
   const serialized = JSON.stringify(settings);
-  const useKey = hasApiKey();
 
-  // PreToolUse (멱등). 신규면 추가, 이미 있으면 keyless→키주입 업그레이드(skip만 하지 않음).
+  // PreToolUse (멱등). 신규면 추가, 이미 있으면 옛 명령(keyless·bash 키주입)을 pure로 정규화.
   if (!serialized.includes("hook pre-tool-use")) {
     (hooks.PreToolUse ??= []).push({
       matcher: "Edit|Write|MultiEdit",
-      hooks: [{ type: "command", command: buildPreCommand(CLI_PATH, useKey) }],
+      hooks: [{ type: "command", command: buildPreCommand(CLI_PATH) }],
     });
-    console.log(`  + PreToolUse hook 추가${useKey ? " (API 키 주입)" : ""}`);
+    console.log(`  + PreToolUse hook 추가`);
   } else {
-    const n = useKey ? upgradeKeylessHooks(settings, CLI_PATH, true) : 0;
-    if (n > 0) console.log(`  ↑ PreToolUse hook 키주입 업그레이드 (${n}건)`);
-    else console.log(`  = PreToolUse hook 이미 존재 (skip)`);
+    const n = normalizeHooks(settings, CLI_PATH);
+    if (n > 0) console.log(`  ↑ PreToolUse hook 정규화 (${n}건, 셸 무관 명령으로)`);
+    else console.log(`  = PreToolUse hook 이미 표준 (skip)`);
   }
 
   // Stop (멱등)
