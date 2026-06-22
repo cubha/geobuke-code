@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -8,6 +8,15 @@ import type { Verdict } from "./types.js";
 const execFileAsync = promisify(execFile);
 
 const MODEL = process.env.GBC_MODEL ?? "claude-haiku-4-5";
+const CLI_TIMEOUT_MS = 30000; // claude -p 폴백 상한(행 방지). 초과 시 kill → fail-open.
+
+/**
+ * 모델 토큰을 셸 안전 문자로 제한한다(win32 shell:true 경로의 argv 인젝션 차단).
+ * GBC_MODEL은 사용자 env지만, 셸 경로에선 메타문자가 명령으로 새지 않게 화이트리스트만 통과.
+ */
+export function safeModel(model: string): string {
+  return /^[\w.-]+$/.test(model) ? model : "claude-haiku-4-5";
+}
 
 /** resolveApiKey 의존성 주입(테스트용). 미지정 시 실제 env/homedir/fs 사용. */
 export interface KeyResolveOpts {
@@ -115,13 +124,66 @@ async function judgeViaApi(system: string, user: string): Promise<string> {
 
 /** claude -p 폴백 (무설정 도그푸딩용, 느림). CC의 기존 인증 사용. */
 async function judgeViaCli(system: string, user: string): Promise<string> {
+  // native Windows는 claude.cmd라 별도 경로(아래) — POSIX는 검증된 경로 그대로(8/8 회귀 보존).
+  if (process.platform === "win32") return judgeViaCliWin(system, user);
   const { stdout } = await execFileAsync(
     "claude",
     ["-p", user, "--append-system-prompt", system, "--model", MODEL, "--output-format", "json"],
-    { maxBuffer: 10 * 1024 * 1024 },
+    { maxBuffer: 10 * 1024 * 1024, timeout: CLI_TIMEOUT_MS },
   );
   const env = JSON.parse(stdout);
   return env.result ?? "";
+}
+
+/**
+ * native Windows 폴백. claude는 claude.cmd(배치 shim)라 Node 18+가 shell 없이 spawn 못 한다
+ * (CVE-2024-27980 → ENOENT). shell:true로 실행하되, argv엔 동적 데이터를 절대 두지 않는다:
+ * system+user를 합쳐 stdin으로 전달 → argv는 고정 플래그뿐이라 셸 메타문자 인젝션 표면이 없다.
+ * (W3 stdin 결합은 WSL에서 claude -p 실측으로 판정 품질 동일 검증함 — POSIX/win32 양 경로의
+ *  '판정 품질'만 프롬프트 전달 방식이 다르고, 이는 가시적 fail-open으로 바운드된다.)
+ * kill-timeout 필수 — 무응답 stdin이 PreToolUse를 무한 차단하면 ENOENT보다 나쁘다 → fail-open 강제.
+ */
+function judgeViaCliWin(system: string, user: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const prompt = `${system}\n\n${user}`;
+    const child = spawn("claude", ["-p", "--model", safeModel(MODEL), "--output-format", "json"], {
+      shell: true,
+    });
+    let out = "";
+    let err = "";
+    let done = false;
+    const finish = (fn: () => void): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(() => reject(new Error(`claude -p 타임아웃(${CLI_TIMEOUT_MS}ms)`)));
+    }, CLI_TIMEOUT_MS);
+    child.stdout?.on("data", (d) => (out += String(d)));
+    child.stderr?.on("data", (d) => (err += String(d)));
+    child.on("error", (e) => finish(() => reject(e)));
+    child.on("close", (code) =>
+      finish(() => {
+        if (code !== 0) {
+          reject(new Error(`claude exited ${code}: ${err.slice(0, 200)}`));
+          return;
+        }
+        try {
+          resolve((JSON.parse(out).result as string) ?? "");
+        } catch (e) {
+          reject(e);
+        }
+      }),
+    );
+    child.stdin?.on("error", () => {
+      /* EPIPE 등은 close/error 핸들러가 처리 */
+    });
+    child.stdin?.write(prompt);
+    child.stdin?.end();
+  });
 }
 
 /**

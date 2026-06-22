@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { gbcDir, readJson, writeJson } from "./store.js";
+import { normalizeCase } from "./text.js";
 import type { DeferEntry } from "./types.js";
 
 function deferPath(cwd: string): string {
@@ -25,7 +26,7 @@ function save(cwd: string, defers: DeferEntry[]): void {
 /** 명시적으로 항목을 미룬다 (침묵 누락 차단의 유일한 정당 경로) */
 export function addDefer(cwd: string, item: string): DeferEntry {
   const defers = loadDefers(cwd);
-  const entry: DeferEntry = { item, at: nowIso(), resolved: false };
+  const entry: DeferEntry = { item: normalizeCase(item), at: nowIso(), resolved: false };
   defers.push(entry);
   save(cwd, defers);
   return entry;

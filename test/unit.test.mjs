@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { normalizeEdit, isGatedTool } from "../dist/normalize.js";
 import { parseVerdict, buildUserMessage, failOpenVerdict } from "../dist/judge.js";
@@ -16,9 +16,25 @@ import {
   normalizeHooks,
   buildSessionStartCommand,
   ensureSessionStartHook,
+  hasStalePreToolUse,
+  hasSessionStartHook,
 } from "../dist/install.js";
+import {
+  buildInitStalenessNotice,
+  wasNotified,
+  markNotified,
+  buildUpdateNotice,
+} from "../dist/notice.js";
+import {
+  compareVersions,
+  buildVersionNotice,
+  isCacheStale,
+  readVersionCache,
+  writeVersionCache,
+} from "../dist/version.js";
 import { serializeEvent, parseEvents, computeMetrics, logEvent } from "../dist/metrics.js";
-import { resolveApiKey } from "../dist/judge.js";
+import { resolveApiKey, safeModel } from "../dist/judge.js";
+import { normalizeCase, MAX_CASE } from "../dist/text.js";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 function tmp() {
@@ -137,6 +153,41 @@ test("loadPlanSpec: GBC_SPEC_FILE가 .gbc/spec.md보다 우선 (0.2.2 명시 ove
   }
 });
 
+test("loadPlanSpec: GBC_SPEC_FILE 상대경로는 cwd 기준으로 해석 (W1, hook 프로세스 cwd 아님)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gbc-spec-rel-"));
+  const prev = process.env.GBC_SPEC_FILE;
+  try {
+    // 상대 파일명을 dir 안에 둔다. 테스트 프로세스의 cwd는 프로젝트 루트라 dir과 다르다.
+    writeFileSync(join(dir, "rel-plan.md"), "상대 케이스", "utf8");
+    process.env.GBC_SPEC_FILE = "rel-plan.md"; // 상대경로
+    const r = loadPlanSpec(dir);
+    assert.equal(r.text, "상대 케이스"); // process.cwd가 아닌 인자 cwd(dir) 기준 해석
+  } finally {
+    if (prev === undefined) delete process.env.GBC_SPEC_FILE;
+    else process.env.GBC_SPEC_FILE = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadPlanSpec: cwd 밖 절대경로 GBC_SPEC_FILE은 차단 아닌 경고만(escape-hatch 보존, W1)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gbc-spec-out-"));
+  const outside = mkdtempSync(join(tmpdir(), "gbc-shared-"));
+  const shared = join(outside, "shared-plan.md");
+  const prev = process.env.GBC_SPEC_FILE;
+  try {
+    writeFileSync(shared, "공유 명세", "utf8");
+    process.env.GBC_SPEC_FILE = shared; // cwd 밖 절대경로 — 정당한 명시 지정
+    const r = loadPlanSpec(dir);
+    assert.equal(r.text, "공유 명세"); // 막지 않고 그대로 읽는다(경고만)
+    assert.equal(r.source, resolve(dir, shared));
+  } finally {
+    if (prev === undefined) delete process.env.GBC_SPEC_FILE;
+    else process.env.GBC_SPEC_FILE = prev;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("defer-registry: add → active → resolve 흐름", () => {
   const dir = tmp();
   try {
@@ -184,6 +235,29 @@ test("addSpecCase: 멀티라인·장문 입력을 한 줄로 정규화", () => {
     addSpecCase(dir, "x".repeat(1000));
     cases = readSpecCases(dir);
     assert.ok(cases[1].length <= 500);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("normalizeCase: trim + 줄바꿈→공백 + 길이 상한 절단 (단일 소스)", () => {
+  assert.equal(normalizeCase("  앞뒤 공백  "), "앞뒤 공백");
+  assert.equal(normalizeCase("줄1\n줄2\n줄3"), "줄1 줄2 줄3");
+  assert.equal(normalizeCase("a\n\n\nb"), "a b"); // 연속 개행도 단일 공백
+  assert.equal(normalizeCase("x".repeat(1000)).length, MAX_CASE); // 500자 절단
+});
+
+test("addDefer: 멀티라인·장문 입력을 한 줄로 정규화 (spec add와 대칭, W2)", () => {
+  const dir = tmp();
+  try {
+    addDefer(dir, "미룬케이스\n둘째 줄\n셋째 줄");
+    const items = activeDeferItems(dir);
+    assert.equal(items.length, 1);
+    assert.match(items[0], /미룬케이스 둘째 줄 셋째 줄/); // 줄바꿈→공백
+    assert.doesNotMatch(items[0], /\n/); // 개행 제거됨
+    // 길이 상한(500자) 절단 — spec add와 동일 상한
+    addDefer(dir, "y".repeat(1000));
+    assert.ok(activeDeferItems(dir)[1].length <= 500);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -297,6 +371,149 @@ test("normalizeHooks: 기존 hook(keyless·옛 bash 키주입)을 pure 명령으
   assert.doesNotMatch(settings.hooks.PreToolUse[0].hooks[0].command, /ANTHROPIC_API_KEY/);
   // 이미 pure → 재정규화 안 함(멱등)
   assert.equal(normalizeHooks(settings, "/x/dist/cli.js"), 0);
+});
+
+// ---------- ②init-staleness 감지 + 업데이트 안내 (ST3) ----------
+const CLI = "/x/dist/cli.js";
+function pureSettings() {
+  return {
+    hooks: {
+      PreToolUse: [
+        { matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: `node "${CLI}" hook pre-tool-use` }] },
+      ],
+      SessionStart: [
+        { matcher: "startup|resume", hooks: [{ type: "command", command: `node "${CLI}" hook session-start` }] },
+      ],
+    },
+  };
+}
+function staleSettings() {
+  // 옛 bash 키주입 PreToolUse + SessionStart 누락 (0.2.1 이하 init 코호트)
+  return {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Edit|Write|MultiEdit",
+          hooks: [
+            { type: "command", command: `ANTHROPIC_API_KEY="$(cat "$HOME/.gbc/api-key")" node "${CLI}" hook pre-tool-use` },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+test("hasStalePreToolUse / hasSessionStartHook: read-only 감지(비파괴)", () => {
+  const pure = pureSettings();
+  assert.equal(hasStalePreToolUse(pure, CLI), false);
+  assert.equal(hasSessionStartHook(pure), true);
+  const stale = staleSettings();
+  assert.equal(hasStalePreToolUse(stale, CLI), true);
+  assert.equal(hasSessionStartHook(stale), false);
+  // 감지는 settings를 수정하지 않는다(normalizeHooks와 달리)
+  assert.equal(stale.hooks.PreToolUse[0].hooks[0].command.includes("ANTHROPIC_API_KEY"), true);
+});
+
+test("buildInitStalenessNotice: 구버전/누락이면 init 재실행 안내, 최신이면 빈 문자열", () => {
+  assert.equal(buildInitStalenessNotice(pureSettings(), CLI), ""); // 최신 → 무출력
+  const n1 = buildInitStalenessNotice(staleSettings(), CLI);
+  assert.match(n1, /gbc init/);
+  assert.match(n1, /SessionStart/); // 누락 사유 명시
+  // PreToolUse는 pure지만 SessionStart만 누락된 코호트도 감지
+  const onlyMissingSession = { hooks: { PreToolUse: pureSettings().hooks.PreToolUse } };
+  assert.match(buildInitStalenessNotice(onlyMissingSession, CLI), /gbc init/);
+});
+
+test("notice dedup: 세션당 1회 (markNotified 후 같은 세션은 wasNotified=true)", () => {
+  const dir = tmp();
+  try {
+    assert.equal(wasNotified(dir, "S1"), false); // 최초
+    markNotified(dir, "S1");
+    assert.equal(wasNotified(dir, "S1"), true); // 같은 세션 → 이미 알림
+    assert.equal(wasNotified(dir, "S2"), false); // 다른 세션 → 다시 알림 대상
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildUpdateNotice: GBC_NO_UPDATE_NOTICE=1 opt-out, 아니면 staleness 포함", () => {
+  const prev = process.env.GBC_NO_UPDATE_NOTICE;
+  try {
+    process.env.GBC_NO_UPDATE_NOTICE = "1";
+    assert.equal(buildUpdateNotice(staleSettings(), CLI, "0.2.3"), ""); // opt-out
+    delete process.env.GBC_NO_UPDATE_NOTICE;
+    assert.match(buildUpdateNotice(staleSettings(), CLI, "0.2.3"), /gbc init/); // staleness 포함
+  } finally {
+    if (prev === undefined) delete process.env.GBC_NO_UPDATE_NOTICE;
+    else process.env.GBC_NO_UPDATE_NOTICE = prev;
+  }
+});
+
+// ---------- ①version notice (ST4) ----------
+test("compareVersions: major.minor.patch 숫자 비교, 비숫자는 0(거짓 안내 방지)", () => {
+  assert.equal(compareVersions("0.2.2", "0.2.3"), -1);
+  assert.equal(compareVersions("0.2.3", "0.2.3"), 0);
+  assert.equal(compareVersions("0.3.0", "0.2.9"), 1);
+  assert.equal(compareVersions("1.0.0", "0.9.9"), 1);
+  assert.equal(compareVersions("0.2.3", "0.2.3-beta.1"), 0); // prerelease 무시(코어 동일)
+  assert.equal(compareVersions("abc", "0.2.3"), 0); // 비숫자 → 비교 불가 → 0
+});
+
+test("buildVersionNotice: 캐시 최신 > 현재일 때만 안내(캐시만, 네트워크 없음)", () => {
+  assert.match(buildVersionNotice("0.2.2", { latest: "0.2.3", checkedAt: 0 }), /신버전 0\.2\.3/);
+  assert.equal(buildVersionNotice("0.2.3", { latest: "0.2.3", checkedAt: 0 }), ""); // 동일 → 무
+  assert.equal(buildVersionNotice("0.2.4", { latest: "0.2.3", checkedAt: 0 }), ""); // 상위 → 무
+  assert.equal(buildVersionNotice("0.2.2", null), ""); // 캐시 없음 → 무
+});
+
+test("isCacheStale: 캐시 없음 또는 24h 초과면 stale", () => {
+  const now = 1_000_000_000_000;
+  assert.equal(isCacheStale(null, now), true);
+  assert.equal(isCacheStale({ latest: "0.2.3", checkedAt: now }, now), false);
+  assert.equal(isCacheStale({ latest: "0.2.3", checkedAt: now - 25 * 3600 * 1000 }, now), true);
+  assert.equal(isCacheStale({ latest: "0.2.3", checkedAt: now - 1000 }, now), false);
+});
+
+test("version cache: write → read 라운드트립", () => {
+  const home = tmp();
+  try {
+    mkdirSync(join(home, ".gbc"), { recursive: true });
+    writeVersionCache({ latest: "0.9.9", checkedAt: 12345 }, home);
+    const back = readVersionCache(home);
+    assert.equal(back.latest, "0.9.9");
+    assert.equal(back.checkedAt, 12345);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("writeVersionCache: ~/.gbc 없어도 디렉토리 생성 후 기록(신규 설치 코호트, 회귀가드)", () => {
+  const home = tmp(); // .gbc 미리 만들지 않음 — api-key 없는 신규 설치 상황
+  try {
+    writeVersionCache({ latest: "1.2.3", checkedAt: 999 }, home);
+    const back = readVersionCache(home);
+    assert.ok(back, "캐시가 기록되어야 함(.gbc 자동 생성)");
+    assert.equal(back.latest, "1.2.3");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("buildUpdateNotice: 신버전 캐시 있으면 version 라인 포함(ST4 통합)", () => {
+  const home = tmp();
+  const prev = process.env.GBC_NO_UPDATE_NOTICE;
+  try {
+    delete process.env.GBC_NO_UPDATE_NOTICE;
+    mkdirSync(join(home, ".gbc"), { recursive: true });
+    writeVersionCache({ latest: "0.9.9", checkedAt: Date.now() }, home);
+    // 최신 settings(staleness 없음)인데도 version 안내는 떠야 한다
+    const n = buildUpdateNotice(pureSettings(), CLI, "0.2.3", home);
+    assert.match(n, /신버전 0\.9\.9/);
+  } finally {
+    if (prev === undefined) delete process.env.GBC_NO_UPDATE_NOTICE;
+    else process.env.GBC_NO_UPDATE_NOTICE = prev;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("serializeEvent: 한 줄 JSON으로 직렬화 + parseEvents 라운드트립", () => {
@@ -505,6 +722,15 @@ test("resolveApiKey: env도 파일도 없으면 null (파일 읽기 실패 안�
 test("resolveApiKey: 파일이 공백뿐이면 null", () => {
   const key = resolveApiKey({ env: {}, homeDir: "/h", readFile: () => "  \n " });
   assert.equal(key, null);
+});
+
+test("safeModel: 셸 안전 토큰만 통과, 메타문자는 기본값(W3 win32 argv 인젝션 차단)", () => {
+  assert.equal(safeModel("claude-haiku-4-5"), "claude-haiku-4-5");
+  assert.equal(safeModel("a.b-c_1"), "a.b-c_1"); // 영숫자/./-/_ 허용
+  assert.equal(safeModel("haiku; rm -rf /"), "claude-haiku-4-5"); // ; 공백 → 기본값
+  assert.equal(safeModel("$(whoami)"), "claude-haiku-4-5"); // 명령치환 → 기본값
+  assert.equal(safeModel("a|b"), "claude-haiku-4-5"); // 파이프 → 기본값
+  assert.equal(safeModel(""), "claude-haiku-4-5"); // 빈 값 → 기본값
 });
 
 test("gate-state: markGated/isGated/reset 작업단위 1회 캐시", () => {

@@ -5,6 +5,8 @@ import { isGatedTool, normalizeEdit } from "./normalize.js";
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated, markGated } from "./state.js";
 import { activeDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
+import { readProjectSettings, buildUpdateNotice, wasNotified, markNotified } from "./notice.js";
+import { isCacheStale, readVersionCache, refreshVersionCache } from "./version.js";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDir } from "./store.js";
@@ -102,8 +104,30 @@ function logFailOpen(cwd: string, toolName: string, reason: string): void {
   }
 }
 
+/** hook 컨텍스트 — cli.ts가 설치 경로·현재 버전을 주입(업데이트 안내용). */
+export interface HookContext {
+  cliPath?: string;
+  version?: string;
+}
+
+/**
+ * 업데이트 안내 문자열(세션당 1회). 안내는 게이트와 완전 독립 — 어떤 실패도 게이트 결정에
+ * 영향 주지 않게 전체를 try/catch로 감싼다(fail-silent). cliPath 없으면(직접 hook 호출 등) "".
+ */
+function maybeUpdateNotice(cwd: string, session: string, ctx?: HookContext): string {
+  try {
+    if (!ctx?.cliPath) return "";
+    if (wasNotified(cwd, session)) return "";
+    const notice = buildUpdateNotice(readProjectSettings(cwd), ctx.cliPath, ctx.version ?? "");
+    if (notice) markNotified(cwd, session);
+    return notice;
+  } catch {
+    return "";
+  }
+}
+
 /** PreToolUse: 코드 변경 직전 게이트 */
-export async function runPreToolUse(): Promise<void> {
+export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   let input: PreToolUseInput = {};
   try {
     const raw = await readStdin();
@@ -192,7 +216,11 @@ export async function runPreToolUse(): Promise<void> {
       decision: "pass",
       deferCount: defers.length,
     });
-    process.exit(0); // 정상 통과 (자동승인 X — 무출력)
+    // 업데이트 안내(있으면)만 비차단 노출 — systemMessage 단독은 permissionDecision 없으니
+    // 도구를 자동승인하지 않고(통과 동작 보존) 메시지만 표시한다.
+    const passNotice = maybeUpdateNotice(cwd, session, ctx);
+    if (passNotice) emit({ systemMessage: passNotice });
+    process.exit(0); // 정상 통과 (자동승인 X)
   }
 
   // block: 사람 pause (ask 기본) — 사유가 사용자에게 표시됨
@@ -211,14 +239,18 @@ export async function runPreToolUse(): Promise<void> {
   });
 
   const mode = process.env.GBC_BLOCK_MODE === "deny" ? "deny" : "ask";
-  emit({
+  const blockOut: Record<string, unknown> = {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: mode,
       permissionDecisionReason: reason,
       additionalContext: reason,
     },
-  });
+  };
+  // 업데이트 안내(있으면)를 같은 출력에 top-level systemMessage로 덧붙인다(차단 동작 불변).
+  const blockNotice = maybeUpdateNotice(cwd, session, ctx);
+  if (blockNotice) blockOut.systemMessage = blockNotice;
+  emit(blockOut);
   process.exit(0);
 }
 
@@ -275,8 +307,7 @@ export function buildSessionStartHint(unresolved: DeferEntry[]): string {
  * SessionStart: 세션 진입 시 미해결 defer를 stdout(plain text)으로 표면화 → Claude 컨텍스트 주입.
  * 잔여 없으면 무출력. GBC_NO_SESSION_HINT=1로 opt-out. 결정론적(LLM·코드비교 없음).
  */
-export async function runSessionStart(): Promise<void> {
-  if (process.env.GBC_NO_SESSION_HINT === "1") process.exit(0);
+export async function runSessionStart(ctx?: HookContext): Promise<void> {
   let input: SessionStartInput = {};
   try {
     const raw = await readStdin();
@@ -285,7 +316,31 @@ export async function runSessionStart(): Promise<void> {
     process.exit(0);
   }
   const cwd = input.cwd || process.cwd();
-  const hint = buildSessionStartHint(unresolvedDefers(cwd));
-  if (hint) process.stdout.write(hint);
+  const parts: string[] = [];
+  // 미해결 defer 알림(GBC_NO_SESSION_HINT로 opt-out — 기존 동작 보존).
+  if (process.env.GBC_NO_SESSION_HINT !== "1") {
+    const hint = buildSessionStartHint(unresolvedDefers(cwd));
+    if (hint) parts.push(hint);
+  }
+  // 업데이트 안내(staleness + version) — SessionStart 보유 코호트(0.2.3+)용. 세션 식별자가 없어
+  // 항상 표시되므로 dedup 대신 GBC_NO_UPDATE_NOTICE opt-out에 맡긴다(buildUpdateNotice 내부).
+  try {
+    if (ctx?.cliPath) {
+      const notice = buildUpdateNotice(readProjectSettings(cwd), ctx.cliPath, ctx.version ?? "");
+      if (notice) parts.push(notice);
+    }
+  } catch {
+    /* 안내 실패는 무시(fail-silent) */
+  }
+  if (parts.length > 0) process.stdout.write(parts.join("\n"));
+  // 버전 캐시 갱신은 '표시 후'에만(이번 출력은 캐시값 기준, 갱신은 다음 세션용). SessionStart는
+  // 게이트를 막지 않으므로 짧은 타임아웃 네트워크가 안전(advisor 승인). 실패는 조용히 무시.
+  try {
+    if (ctx?.cliPath && process.env.GBC_NO_UPDATE_NOTICE !== "1" && isCacheStale(readVersionCache())) {
+      await refreshVersionCache();
+    }
+  } catch {
+    /* 갱신 실패는 무시(fail-silent) */
+  }
   process.exit(0);
 }
