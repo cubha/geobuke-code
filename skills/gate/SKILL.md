@@ -63,9 +63,11 @@ defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결
 ## 명세 소스
 
 게이트는 다음 우선순위로 계획 명세를 읽는다(durable 소스만):
-`$GBC_SPEC_FILE` > `.gbc/spec.md` > `scratch.md`
+`$GBC_SPEC_FILE` > `.gbc/spec.md`
 
-명세가 비면 "시나리오 미지정"으로 모든 코드 변경이 차단된다. 작업 전 `scratch.md`에 SubTask/체크리스트를 적거나 `.gbc/spec.md`를 만든다.
+`.gbc/spec.md`가 단일 정본(canonical)이다. `scratch.md` 자동 폴백은 0.2.2에서 제거됐다(진행추적 파일을 명세로 오인하던 거짓음성 차단) — 다른 파일을 명세로 쓰려면 `$GBC_SPEC_FILE`로 명시 지정한다.
+
+명세가 비면 "시나리오 미지정"으로 모든 코드 변경이 차단된다. 보통 위 「사용 흐름」 2의 도출 루프가 `gbc spec add`로 `.gbc/spec.md`를 채운다(수기 작성 불필요).
 
 ## Known Pitfalls
 
