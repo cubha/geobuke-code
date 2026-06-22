@@ -27,7 +27,7 @@ npm install -g geobuke-code
 
 # 2) 대상 프로젝트에 게이트 설치
 cd <your-project>
-gbc init                          # .claude/settings.json에 hook + /gate skill 머지 (동의·백업)
+gbc init                          # .claude/settings.json에 hook(PreToolUse+Stop+SessionStart) + /gate skill 머지 (동의·백업)
 ```
 
 <details>
@@ -84,10 +84,22 @@ Set-Content -Path "$HOME\.gbc\api-key" -Value "sk-ant-..." -NoNewline
 phase-protocol/계획 → /plan(SubTask) → 【게이트: 구현 직전 케이스확정】 → 구현(Claude Code) → 검증
 ```
 
-게이트는 계획 명세를 다음 우선순위로 읽는다(durable 소스):
-`$GBC_SPEC_FILE` > `.gbc/spec.md` > `scratch.md`
+게이트는 계획 명세를 `.gbc/spec.md`(단일 정본)에서 읽는다. 다른 파일을 명세로 쓰려면 `$GBC_SPEC_FILE` 환경변수로 그 경로를 명시 지정한다(우선순위 `$GBC_SPEC_FILE` > `.gbc/spec.md`). gbc가 소유하지 않은 파일을 자동 폴백하지 않으므로, 진행추적 파일 등이 명세로 오인되지 않는다.
 
 코드 변경 직전 PreToolUse hook이 명세 ↔ 변경 ↔ 미룬 항목을 대조해 통과/차단을 판정한다.
+
+### 동작 시점
+
+`gbc init`이 프로젝트 `.claude/settings.json`에 아래 hook을 멱등 등록한다. gbc는 `.gbc/`만 읽으므로(다른 하네스의 메모리·진행추적 파일 미접근) 어떤 환경에서든 동일하게 동작한다.
+
+| 시점 | hook (matcher) | 동작 |
+|---|---|---|
+| **세션 시작·재개** | SessionStart (`startup\|resume`) | `.gbc/defers.json`의 미해결 항목을 표면화(이전 작업 잔여 환기). 잔여 없으면 무출력. `compact`엔 발화 안 함(노이즈 방지) |
+| **코드 변경 직전** | PreToolUse (`Edit\|Write\|MultiEdit`) | 명세 ↔ 변경 ↔ defer 대조 → 통과(침묵)/차단(시나리오 도출 지시)/fail-open |
+| **작업단위당 1회** | (PreToolUse 캐시) | 같은 명세 해시 내에선 첫 편집만 판정, 이후 통과 → 매 편집 지연 회피 |
+| **응답 종료** | Stop | 계측 flush(`events.jsonl`) |
+
+> 세션 진입 알림만 끄려면 `GBC_NO_SESSION_HINT=1`. 기존 설치(0.2.1 이하 init)는 `gbc init --yes` 재실행으로 SessionStart hook이 추가된다.
 
 ### 시나리오 도출 루프 (수기 입력 불필요)
 

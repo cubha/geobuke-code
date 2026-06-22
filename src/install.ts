@@ -45,3 +45,27 @@ export function normalizeHooks(settings: Settings, cliPath: string): number {
   }
   return changed;
 }
+
+/** SessionStart hook 명령 — 셸 무관 순수 명령(buildPreCommand와 동일 규약). */
+export function buildSessionStartCommand(cliPath: string): string {
+  return `node "${cliPath}" hook session-start`;
+}
+
+/**
+ * SessionStart hook을 멱등 등록한다. matcher "startup|resume"로 신규 진입·재개에만 발화
+ * (compact마다 반복 노이즈 방지). 이미 'hook session-start' 명령이 있으면 추가하지 않는다.
+ * settings를 제자리 수정하고, 새로 추가했으면 true(이미 있으면 false)를 반환한다.
+ */
+export function ensureSessionStartHook(settings: Settings, cliPath: string): boolean {
+  for (const entry of settings.hooks?.SessionStart ?? []) {
+    for (const h of entry.hooks ?? []) {
+      if (h.command.includes("hook session-start")) return false;
+    }
+  }
+  const hooks = (settings.hooks ??= {});
+  (hooks.SessionStart ??= []).push({
+    matcher: "startup|resume",
+    hooks: [{ type: "command", command: buildSessionStartCommand(cliPath) }],
+  });
+  return true;
+}

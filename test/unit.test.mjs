@@ -6,12 +6,17 @@ import { join } from "node:path";
 
 import { normalizeEdit, isGatedTool } from "../dist/normalize.js";
 import { parseVerdict, buildUserMessage, failOpenVerdict } from "../dist/judge.js";
-import { computeSpecHash } from "../dist/spec.js";
+import { computeSpecHash, loadPlanSpec } from "../dist/spec.js";
 import { addDefer, activeDeferItems, resolveDefer, unresolvedDefers } from "../dist/defer.js";
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
 import { addSpecCase, readSpecCases, clearSpec } from "../dist/spec.js";
-import { buildBlockReason, shouldCacheVerdict } from "../dist/hook.js";
-import { buildPreCommand, normalizeHooks } from "../dist/install.js";
+import { buildBlockReason, shouldCacheVerdict, buildSessionStartHint } from "../dist/hook.js";
+import {
+  buildPreCommand,
+  normalizeHooks,
+  buildSessionStartCommand,
+  ensureSessionStartHook,
+} from "../dist/install.js";
 import { serializeEvent, parseEvents, computeMetrics, logEvent } from "../dist/metrics.js";
 import { resolveApiKey } from "../dist/judge.js";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -93,6 +98,45 @@ test("computeSpecHash: 동일 입력 동일 해시, 변경 시 다른 해시", (
   assert.notEqual(computeSpecHash("abc"), computeSpecHash("abd"));
 });
 
+test("loadPlanSpec: scratch.md는 명세 소스에서 제외 (0.2.2 단일정본화)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gbc-spec-src-"));
+  try {
+    // scratch.md만 있어도 명세로 안 읽음 → 빈 텍스트 + source "(없음)"
+    writeFileSync(join(dir, "scratch.md"), "# 진행현황\n- 작업중", "utf8");
+    const r1 = loadPlanSpec(dir);
+    assert.equal(r1.text, "");
+    assert.match(r1.source, /없음/);
+
+    // .gbc/spec.md가 정본
+    mkdirSync(join(dir, ".gbc"), { recursive: true });
+    writeFileSync(join(dir, ".gbc", "spec.md"), "케이스 A", "utf8");
+    const r2 = loadPlanSpec(dir);
+    assert.equal(r2.text, "케이스 A");
+    assert.match(r2.source, /spec\.md/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadPlanSpec: GBC_SPEC_FILE가 .gbc/spec.md보다 우선 (0.2.2 명시 override = 유일 마이그레이션 경로)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gbc-spec-env-"));
+  const override = join(dir, "my-plan.md");
+  const prev = process.env.GBC_SPEC_FILE;
+  try {
+    mkdirSync(join(dir, ".gbc"), { recursive: true });
+    writeFileSync(join(dir, ".gbc", "spec.md"), "정본 케이스", "utf8");
+    writeFileSync(override, "override 케이스", "utf8");
+    process.env.GBC_SPEC_FILE = override;
+    const r = loadPlanSpec(dir);
+    assert.equal(r.text, "override 케이스"); // env override가 .gbc/spec.md를 이긴다
+    assert.equal(r.source, override);
+  } finally {
+    if (prev === undefined) delete process.env.GBC_SPEC_FILE;
+    else process.env.GBC_SPEC_FILE = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("defer-registry: add → active → resolve 흐름", () => {
   const dir = tmp();
   try {
@@ -145,14 +189,50 @@ test("addSpecCase: 멀티라인·장문 입력을 한 줄로 정규화", () => {
   }
 });
 
-test("shouldCacheVerdict: 정상 pass만 캐시, fail-open·block은 캐시 안 함", () => {
-  assert.equal(shouldCacheVerdict({ verdict: "pass", missing: [], reason: "ok" }), true);
+test("shouldCacheVerdict: 명세 있는 정상 pass만 캐시, fail-open·block·빈명세는 캐시 안 함", () => {
+  // 명세 있고(specEmpty=false) 정상 pass → 캐시
+  assert.equal(shouldCacheVerdict({ verdict: "pass", missing: [], reason: "ok" }, false), true);
   // fail-open pass는 캐시 제외 (일시 장애가 작업단위 내내 게이트 무력화 방지)
   assert.equal(
-    shouldCacheVerdict({ verdict: "pass", missing: [], reason: "x", failOpen: true }),
+    shouldCacheVerdict({ verdict: "pass", missing: [], reason: "x", failOpen: true }, false),
     false,
   );
-  assert.equal(shouldCacheVerdict({ verdict: "block", missing: [], reason: "y" }), false);
+  assert.equal(shouldCacheVerdict({ verdict: "block", missing: [], reason: "y" }, false), false);
+  // 빈 명세 pass는 절대 캐시 안 함 — 빈-spec hash는 상수라 캐시 시 게이트 영구 우회(06-22 결함)
+  assert.equal(shouldCacheVerdict({ verdict: "pass", missing: [], reason: "ok" }, true), false);
+});
+
+test("buildSessionStartHint: 미해결 defer 있으면 목록 표면화, 없으면 빈 문자열", () => {
+  // 잔여 없음 → 무출력(빈 문자열)
+  assert.equal(buildSessionStartHint([]), "");
+  // 미해결 항목 → 건수 + 목록
+  const hint = buildSessionStartHint([
+    { item: "케이스 X 미룸", at: "t", resolved: false },
+    { item: "케이스 Y 미룸", at: "t", resolved: false },
+  ]);
+  assert.match(hint, /미해결 defer 2건/);
+  assert.match(hint, /케이스 X 미룸/);
+  assert.match(hint, /케이스 Y 미룸/);
+});
+
+test("buildSessionStartCommand: 셸 무관 pure 명령 (session-start)", () => {
+  assert.equal(
+    buildSessionStartCommand("/x/dist/cli.js"),
+    'node "/x/dist/cli.js" hook session-start',
+  );
+});
+
+test("ensureSessionStartHook: matcher startup|resume로 멱등 등록", () => {
+  const s = {};
+  assert.equal(ensureSessionStartHook(s, "/x/dist/cli.js"), true); // 신규 추가
+  assert.equal(s.hooks.SessionStart[0].matcher, "startup|resume");
+  assert.equal(
+    s.hooks.SessionStart[0].hooks[0].command,
+    'node "/x/dist/cli.js" hook session-start',
+  );
+  // 멱등 — 두 번째 호출은 추가 안 함
+  assert.equal(ensureSessionStartHook(s, "/x/dist/cli.js"), false);
+  assert.equal(s.hooks.SessionStart.length, 1);
 });
 
 test("buildBlockReason: 시나리오 미지정이면 도출·등록 루프를 지시", () => {

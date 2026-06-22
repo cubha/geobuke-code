@@ -11,12 +11,12 @@ import {
   copyFileSync,
 } from "node:fs";
 
-import { runPreToolUse, runStop } from "./hook.js";
+import { runPreToolUse, runStop, runSessionStart } from "./hook.js";
 import { loadPlanSpec, computeSpecHash, addSpecCase, readSpecCases, clearSpec } from "./spec.js";
 import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer } from "./defer.js";
 import { selectedTransport } from "./judge.js";
-import { buildPreCommand, normalizeHooks } from "./install.js";
+import { buildPreCommand, normalizeHooks, ensureSessionStartHook } from "./install.js";
 import { logEvent, parseEvents, computeMetrics } from "./metrics.js";
 import type { EventKind } from "./metrics.js";
 
@@ -74,7 +74,7 @@ function cmdInit(args: string[]): void {
     console.log(`🐢 gbc init — 다음을 수행합니다 (프로젝트 로컬만, 전역 ~/.claude 미변경):
 
   대상 프로젝트: ${cwd}
-  1) ${settingsPath} 에 PreToolUse(Edit|Write) + Stop hook 추가 (머지·멱등)
+  1) ${settingsPath} 에 PreToolUse(Edit|Write) + Stop + SessionStart hook 추가 (머지·멱등)
      - 기존 settings.json 있으면 백업: settings.json.bak-<시각>
   2) ${join(skillDestDir, "SKILL.md")} 에 /gate 스킬 설치
   3) hook 명령: ${buildPreCommand(CLI_PATH)}
@@ -130,6 +130,13 @@ ${
     console.log(`  = Stop hook 이미 존재 (skip)`);
   }
 
+  // SessionStart (멱등) — 세션 진입(startup|resume) 시 미해결 defer 알림
+  if (ensureSessionStartHook(settings, CLI_PATH)) {
+    console.log(`  + SessionStart hook 추가`);
+  } else {
+    console.log(`  = SessionStart hook 이미 존재 (skip)`);
+  }
+
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
 
   // /gate 스킬 설치
@@ -145,7 +152,7 @@ ${
       ? "  (ANTHROPIC_API_KEY 설정 시 직접 API로 ~1–3s, 미설정 시 claude -p 폴백 ~13–20s)"
       : ""
   }
-   계획 명세는 scratch.md 또는 .gbc/spec.md 에 작성하세요(없으면 시나리오 미지정으로 차단).`);
+   계획 명세는 .gbc/spec.md 에 작성하세요(없으면 시나리오 미지정으로 차단 → 도출·검증 루프 발동: 에이전트가 요청에서 시나리오를 도출해 사용자 검증 후 'gbc spec add'로 등록).`);
 }
 
 // ---------- gbc status ----------
@@ -289,6 +296,7 @@ function usage(): void {
   gbc metrics [--json]                계측 리포트(M1~M3, B-모드 관측 프록시)
   gbc hook pre-tool-use               (내부) PreToolUse hook
   gbc hook stop                       (내부) Stop hook
+  gbc hook session-start              (내부) SessionStart hook (미해결 defer 알림)
 `);
 }
 
@@ -298,7 +306,8 @@ async function main(): Promise<void> {
     case "hook":
       if (rest[0] === "pre-tool-use") return runPreToolUse();
       if (rest[0] === "stop") return runStop();
-      console.error("사용: gbc hook <pre-tool-use|stop>");
+      if (rest[0] === "session-start") return runSessionStart();
+      console.error("사용: gbc hook <pre-tool-use|stop|session-start>");
       process.exit(1);
       break;
     case "init":
