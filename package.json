@@ -1,6 +1,6 @@
 {
   "name": "geobuke-code",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "거북이코드 — 구현 직전 강제 게이트. Claude Code PreToolUse hook으로 코드 변경 전 계획 케이스 누락·시나리오 미지정을 차단한다.",
   "type": "module",
   "bin": {

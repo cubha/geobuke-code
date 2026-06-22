@@ -14,7 +14,9 @@ const MAX_MISSING_LEN = 200;
 export type EventKind =
   | "gate"
   | "defer-add"
+  | "defer-start"
   | "defer-resolve"
+  | "defer-reopen"
   | "spec-add"
   | "spec-clear"
   | "gate-reset"

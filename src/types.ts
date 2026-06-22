@@ -25,14 +25,31 @@ export interface EditToolInput {
   edits?: Array<{ old_string: string; new_string: string }>;
 }
 
+/**
+ * defer 항목 수명주기 상태 (0.2.5+).
+ * - open: 미룸 등록·미착수 (이전 resolved:false)
+ * - in_progress: 착수해 진행 중 (신규 — start로 진입, 게이트 판정엔 open과 동일하게 '미해결'로 취급)
+ * - resolved: 사용자 점검 후 종결 (이전 resolved:true)
+ */
+export type DeferStatus = "open" | "in_progress" | "resolved";
+
 /** 명시적으로 미룬 항목 (defer-registry 엔트리) */
 export interface DeferEntry {
   /** 미룬 케이스/항목 설명 */
   item: string;
   /** 등록 시각 (ISO) */
   at: string;
-  /** 해결 여부 */
-  resolved: boolean;
+  /** 수명주기 상태 — 단일 소스(옛 resolved:boolean은 읽을 때 자동 승격, 저장은 status로 통일) */
+  status: DeferStatus;
+}
+
+/** 디스크에서 읽은 원시 엔트리 — 옛 {resolved:boolean} 포맷 하위호환 수용용 */
+export interface RawDeferEntry {
+  item: string;
+  at: string;
+  status?: DeferStatus;
+  /** @deprecated 0.2.4 이하 포맷 — 읽을 때만 status로 승격, 저장 시 제거 */
+  resolved?: boolean;
 }
 
 /** 작업단위 게이트 상태 (.gbc/state.json) */

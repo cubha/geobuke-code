@@ -271,17 +271,10 @@ export async function runStop(): Promise<void> {
   // defers.json 없으면(파일 부재) 조용히 통과
   if (loadDefers(cwd).length === 0) process.exit(0);
 
-  const un = unresolvedDefers(cwd);
-  if (un.length === 0) process.exit(0);
+  const all = loadDefers(cwd);
+  if (all.filter((d) => d.status !== "resolved").length === 0) process.exit(0);
 
-  const items = un.map((d, i) => `${i + 1}. ${d.item}`).join("\n");
-  emit({
-    decision: "block",
-    reason:
-      `🐢 미해결 defer ${un.length}건이 남아 있습니다:\n${items}\n` +
-      `해결했으면 'gbc defer resolve <번호>', 다음 세션으로 이월할 거면 의식적으로 확인하세요. ` +
-      `(이 리마인드는 1회만 표시됩니다.)`,
-  });
+  emit({ decision: "block", reason: buildStopReminder(all) });
   process.exit(0);
 }
 
@@ -291,15 +284,61 @@ interface SessionStartInput {
 }
 
 /**
- * 세션 진입(startup|resume) 시 미해결 defer 잔여를 표면화하는 알림 문자열. 없으면 "".
- * gbc 자기 소유 데이터(.gbc/defers.json)만 사용 — scratch/메모리 미접근(다른 하네스와 혼재·환각 방지).
+ * defer 전환 행동 규약 — SessionStart/Stop 알림 문자열에 임베드한다.
+ * 규약 발화 자리가 hint 문자열인 이유: SKILL.md는 skill 실행 시점에만 읽혀 자유 편집·대화 중엔
+ * dead doc이 된다. 매 세션 컨텍스트에 신뢰성 있게 규약을 주입하는 유일한 결정론 채널이 이 문자열이다.
+ * (hook엔 추론을 넣지 않는다 — 텍스트만. 자연어/대상 감지·전환 실행은 에이전트 측 책임.)
  */
-export function buildSessionStartHint(unresolved: DeferEntry[]): string {
+const DEFER_PROTOCOL =
+  "규약 — 항목 착수 시 'gbc defer start <ref>'로 진행중 표시, 사용자가 완료를 명시하면 'gbc defer resolve <ref>'로 종결(신호가 모호하면 resolve하지 말고 확인). 되돌리기는 'gbc defer reopen <ref>'. ref=번호|텍스트|all. 모든 자동 전환은 사용자에게 표면화.";
+
+/**
+ * 전체 defer 리스트에서 미해결(open+in_progress)만 골라 상태 마커와 함께 한 줄씩 포맷한다.
+ * ★ 번호는 전체-리스트 위치(인덱스+1)로 매긴다 — `gbc defer list`·`gbc defer <N>` 인덱스 ref와 동일.
+ * 부분집합 번호를 쓰면 resolved가 앞에 있을 때 표시 번호 ≠ 실제 인덱스가 되어 엉뚱한 항목을 친다.
+ */
+function formatDeferList(all: DeferEntry[]): string {
+  return all
+    .map((d, i) => ({ d, n: i + 1 }))
+    .filter((x) => x.d.status !== "resolved")
+    .map((x) => `${x.n}. ${x.d.status === "in_progress" ? "▶[진행중]" : "[미착수]"} ${x.d.item}`)
+    .join("\n");
+}
+
+/** 미해결 건수를 진행중/미착수로 분해한 머리말 조각 */
+function statusBreakdown(unresolved: DeferEntry[]): string {
+  const inProgress = unresolved.filter((d) => d.status === "in_progress").length;
+  return `진행중 ${inProgress} · 미착수 ${unresolved.length - inProgress}`;
+}
+
+/**
+ * 세션 진입(startup|resume) 시 미해결 defer 잔여를 표면화하는 알림 문자열. 없으면 "".
+ * 입력은 전체 defer 리스트(loadDefers) — 표시 번호를 전체-인덱스로 맞추기 위함(인덱스 ref 정합).
+ * gbc 자기 소유 데이터(.gbc/defers.json)만 사용 — scratch/메모리 미접근(다른 하네스와 혼재·환각 방지).
+ * in_progress를 open과 구분 표면화("진행중 N · 미착수 M") — 착수했지만 미종결 항목이 잊히지 않게.
+ */
+export function buildSessionStartHint(all: DeferEntry[]): string {
+  const unresolved = all.filter((d) => d.status !== "resolved");
   if (unresolved.length === 0) return "";
-  const items = unresolved.map((d, i) => `${i + 1}. ${d.item}`).join("\n");
   return (
-    `🐢 거북이 게이트 — 미해결 defer ${unresolved.length}건 (이전 작업 잔여):\n${items}\n` +
-    `필요하면 사용자에게 이어서 처리할지 확인하세요. 해결은 'gbc defer resolve <번호>'.`
+    `🐢 거북이 게이트 — 미해결 defer ${unresolved.length}건 (${statusBreakdown(unresolved)}, 이전 작업 잔여):\n` +
+    `${formatDeferList(all)}\n` +
+    `필요하면 사용자에게 이어서 처리할지 확인하세요. ${DEFER_PROTOCOL}`
+  );
+}
+
+/**
+ * Stop hook 리마인드 문자열. 없으면 "". 입력은 전체 defer 리스트(번호=전체-인덱스, 인덱스 ref 정합).
+ * SessionStart와 동일하게 in_progress를 차등 표면화한다 — "착수했지만 미종결" 항목이 레이더에서
+ * 사라지지 않게(resolve가 리마인드에서 항목을 떨구는 harm 완화).
+ */
+export function buildStopReminder(all: DeferEntry[]): string {
+  const unresolved = all.filter((d) => d.status !== "resolved");
+  if (unresolved.length === 0) return "";
+  return (
+    `🐢 미해결 defer ${unresolved.length}건이 남아 있습니다 (${statusBreakdown(unresolved)}):\n` +
+    `${formatDeferList(all)}\n` +
+    `${DEFER_PROTOCOL} 다음 세션으로 이월할 거면 의식적으로 확인하세요. (이 리마인드는 1회만 표시됩니다.)`
   );
 }
 
@@ -319,7 +358,7 @@ export async function runSessionStart(ctx?: HookContext): Promise<void> {
   const parts: string[] = [];
   // 미해결 defer 알림(GBC_NO_SESSION_HINT로 opt-out — 기존 동작 보존).
   if (process.env.GBC_NO_SESSION_HINT !== "1") {
-    const hint = buildSessionStartHint(unresolvedDefers(cwd));
+    const hint = buildSessionStartHint(loadDefers(cwd));
     if (hint) parts.push(hint);
   }
   // 업데이트 안내(staleness + version) — SessionStart 보유 코호트(0.2.3+)용. 세션 식별자가 없어
