@@ -17,11 +17,27 @@ import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer } from "./defer.js";
 import { selectedTransport } from "./judge.js";
 import { buildPreCommand, normalizeHooks, ensureSessionStartHook } from "./install.js";
+import {
+  isCacheStale,
+  readVersionCache,
+  refreshVersionCache,
+  buildVersionNotice,
+} from "./version.js";
 import { logEvent, parseEvents, computeMetrics } from "./metrics.js";
 import type { EventKind } from "./metrics.js";
 
 const CLI_PATH = fileURLToPath(import.meta.url);
 const PKG_ROOT = join(dirname(CLI_PATH), ".."); // dist/cli.js → 패키지 루트
+
+/** 설치된 패키지 버전(업데이트 안내 비교 기준). 읽기 실패 시 "". */
+function readPkgVersion(): string {
+  try {
+    return (JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8")).version as string) ?? "";
+  } catch {
+    return "";
+  }
+}
+const PKG_VERSION = readPkgVersion();
 
 /** ~/.gbc/api-key 존재 여부 — 있으면 hook에 키 주입(빠른 haiku 경로). */
 function hasApiKey(): boolean {
@@ -62,7 +78,7 @@ function nowStamp(): string {
 }
 
 // ---------- gbc init ----------
-function cmdInit(args: string[]): void {
+async function cmdInit(args: string[]): Promise<void> {
   const cwd = process.cwd();
   const yes = args.includes("--yes") || args.includes("-y");
   const claudeDir = join(cwd, ".claude");
@@ -153,10 +169,28 @@ ${
       : ""
   }
    계획 명세는 .gbc/spec.md 에 작성하세요(없으면 시나리오 미지정으로 차단 → 도출·검증 루프 발동: 에이전트가 요청에서 시나리오를 도출해 사용자 검증 후 'gbc spec add'로 등록).`);
+
+  // 설치 직후 버전 캐시 seed — 신버전 안내(①)가 "설치만 하고 init 안 한" 코호트에도
+  // 신뢰성 있게 동작하도록(SessionStart 없는 환경의 유일한 seed 지점일 수 있음). best-effort.
+  try {
+    if (process.env.GBC_NO_UPDATE_NOTICE !== "1" && isCacheStale(readVersionCache())) {
+      await refreshVersionCache();
+    }
+  } catch {
+    /* 갱신 실패는 무시(fail-silent) */
+  }
 }
 
 // ---------- gbc status ----------
-function cmdStatus(): void {
+async function cmdStatus(): Promise<void> {
+  // 버전 캐시가 stale면 갱신(status는 대화형이라 짧은 대기 허용). 실패는 무시.
+  try {
+    if (process.env.GBC_NO_UPDATE_NOTICE !== "1" && isCacheStale(readVersionCache())) {
+      await refreshVersionCache();
+    }
+  } catch {
+    /* 갱신 실패 무시 */
+  }
   const cwd = process.cwd();
   const { text, source } = loadPlanSpec(cwd);
   const hash = computeSpecHash(text);
@@ -165,6 +199,7 @@ function cmdStatus(): void {
   const unresolved = defers.filter((d) => !d.resolved);
 
   console.log(`🐢 거북이 게이트 상태 — ${cwd}
+  버전: ${PKG_VERSION || "(불명)"}
   트랜스포트: ${selectedTransport()}
   명세 소스: ${source} ${text ? `(${text.length}자)` : "(비어있음 → 모든 코드변경 차단)"}
   명세 해시: ${hash}
@@ -173,6 +208,8 @@ function cmdStatus(): void {
   if (unresolved.length > 0) {
     console.log(unresolved.map((d, i) => `    ${i + 1}. ${d.item}`).join("\n"));
   }
+  const verNotice = buildVersionNotice(PKG_VERSION, readVersionCache());
+  if (verNotice) console.log(`  ${verNotice}`);
 }
 
 // ---------- gbc defer ----------
@@ -304,9 +341,10 @@ async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
   switch (cmd) {
     case "hook":
-      if (rest[0] === "pre-tool-use") return runPreToolUse();
+      if (rest[0] === "pre-tool-use") return runPreToolUse({ cliPath: CLI_PATH, version: PKG_VERSION });
       if (rest[0] === "stop") return runStop();
-      if (rest[0] === "session-start") return runSessionStart();
+      if (rest[0] === "session-start")
+        return runSessionStart({ cliPath: CLI_PATH, version: PKG_VERSION });
       console.error("사용: gbc hook <pre-tool-use|stop|session-start>");
       process.exit(1);
       break;

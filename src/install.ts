@@ -52,6 +52,30 @@ export function buildSessionStartCommand(cliPath: string): string {
 }
 
 /**
+ * (read-only) PreToolUse hook 명령이 현재 표준(pure)과 다른 구버전인지. normalizeHooks의
+ * 감지부만 떼어낸 비파괴 술어 — ②init-staleness 안내가 settings를 수정하지 않고 판단하게 한다.
+ */
+export function hasStalePreToolUse(settings: Settings, cliPath: string): boolean {
+  const target = buildPreCommand(cliPath);
+  for (const entry of settings.hooks?.PreToolUse ?? []) {
+    for (const h of entry.hooks ?? []) {
+      if (h.command.includes("hook pre-tool-use") && h.command !== target) return true;
+    }
+  }
+  return false;
+}
+
+/** (read-only) SessionStart hook(session-start 명령)이 등록돼 있는지. 0.2.1 이하 init엔 없음. */
+export function hasSessionStartHook(settings: Settings): boolean {
+  for (const entry of settings.hooks?.SessionStart ?? []) {
+    for (const h of entry.hooks ?? []) {
+      if (h.command.includes("hook session-start")) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * SessionStart hook을 멱등 등록한다. matcher "startup|resume"로 신규 진입·재개에만 발화
  * (compact마다 반복 노이즈 방지). 이미 'hook session-start' 명령이 있으면 추가하지 않는다.
  * settings를 제자리 수정하고, 새로 추가했으면 true(이미 있으면 false)를 반환한다.
