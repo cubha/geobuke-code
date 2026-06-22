@@ -9,7 +9,7 @@ import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDir } from "./store.js";
 import { logEvent } from "./metrics.js";
-import type { EditToolInput, Verdict } from "./types.js";
+import type { EditToolInput, Verdict, DeferEntry } from "./types.js";
 
 /**
  * 차단 사유 메시지를 빌드한다. 두 차단 종류를 다르게 안내한다:
@@ -37,10 +37,12 @@ export function buildBlockReason(verdict: Verdict, specEmpty: boolean, source: s
 
 /**
  * pass verdict를 작업단위 캐시(markGated)에 넣어도 되는가.
- * fail-open(판정 실패 안전통과)은 제외 — 일시 장애가 작업단위 내내 게이트를 무력화하는 것을 막는다.
+ * - fail-open(판정 실패 안전통과)은 제외 — 일시 장애가 작업단위 내내 게이트를 무력화하는 것을 막는다.
+ * - 빈 명세(specEmpty)도 제외 — 빈-spec hash는 상수라 한번 캐시되면 영원히 무효화 안 됨
+ *   (= 게이트 교차세션 영구 우회, 2026-06-22 진단·수정). 빈 명세는 항상 재판정해야 한다.
  */
-export function shouldCacheVerdict(verdict: Verdict): boolean {
-  return verdict.verdict === "pass" && !verdict.failOpen;
+export function shouldCacheVerdict(verdict: Verdict, specEmpty: boolean): boolean {
+  return verdict.verdict === "pass" && !verdict.failOpen && !specEmpty;
 }
 
 interface PreToolUseInput {
@@ -127,13 +129,17 @@ export async function runPreToolUse(): Promise<void> {
 
   const { text: specText, source } = loadPlanSpec(cwd);
   const specHash = computeSpecHash(specText);
+  const specEmpty = specText.trim() === "";
   // 계측용 해시: 빈 spec은 ""(센티넬)로 기록 → M1 churn 교차세션 합산 방지.
-  // (게이트 캐시용 specHash는 그대로 — markGated/isGated 동작 불변)
-  const logHash = specText.trim() === "" ? "" : specHash;
+  const logHash = specEmpty ? "" : specHash;
 
   // 작업단위 1회: 이미 게이트 통과한 단위면 즉시 통과 (judge 미호출, 핫패스)
   // 계측: cached-skip도 기록해야 M3(작업단위당 edit 반복)이 진짜 횟수를 잡는다.
-  if (isGated(cwd, specHash)) {
+  // ⚠️ 빈 명세는 캐시를 절대 조회하지 않는다(read-side 가드) — 빈-spec hash는 상수라
+  //    한번 캐시된 pass가 영원히 무효화되지 않아 게이트가 교차세션으로 영구 무력화되던
+  //    결함(2026-06-22 진단)을 근본 차단. 빈 명세는 항상 재판정: judge [1단계] 사소한
+  //    편집 pass, [2단계]a 동작 편집 block. (기존에 오염된 state.json도 자동으로 무시됨)
+  if (!specEmpty && isGated(cwd, specHash)) {
     logEvent(cwd, {
       at: nowIso(),
       session,
@@ -152,39 +158,41 @@ export async function runPreToolUse(): Promise<void> {
   const verdict = await judge(specText, editText, defers);
 
   if (verdict.verdict === "pass") {
-    if (shouldCacheVerdict(verdict)) {
-      markGated(cwd, specHash, verdict.reason);
+    // fail-open(판정 실패) 먼저 분기 — 빈-spec 정상 pass가 fail-open으로 오분류되지 않게.
+    if (verdict.failOpen) {
+      // 판정 실패로 안전 통과. 캐시하지 않아(작업단위 무력화 방지) 다음 편집에서 재판정.
+      // 계측 + systemMessage로 사용자에게 "게이트가 검사 못 했음"을 알린다(조용한 무력화 방지).
+      logFailOpen(cwd, toolName, verdict.reason);
       logEvent(cwd, {
         at: nowIso(),
         session,
         specHash: logHash,
         kind: "gate",
         tool: toolName,
-        decision: "pass",
-        deferCount: defers.length,
+        decision: "failopen",
       });
-      process.exit(0); // 정상 통과 (자동승인 X — 무출력)
+      emit({
+        systemMessage: `🐢 거북이 게이트 — 판정 실패로 안전 통과(fail-open). 이 편집은 게이트 검사를 받지 못했습니다: ${verdict.reason}`,
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          permissionDecisionReason: verdict.reason,
+        },
+      });
+      process.exit(0);
     }
-    // fail-open: 판정 실패로 안전 통과. 캐시하지 않아(작업단위 무력화 방지) 다음 편집에서 재판정.
-    // 계측 + systemMessage로 사용자에게 "게이트가 검사 못 했음"을 알린다(조용한 무력화 방지).
-    logFailOpen(cwd, toolName, verdict.reason);
+    // 정상 pass. 단 빈 명세 pass는 절대 캐시하지 않는다(상수 hash 영구 우회 방지).
+    if (shouldCacheVerdict(verdict, specEmpty)) markGated(cwd, specHash, verdict.reason);
     logEvent(cwd, {
       at: nowIso(),
       session,
       specHash: logHash,
       kind: "gate",
       tool: toolName,
-      decision: "failopen",
+      decision: "pass",
+      deferCount: defers.length,
     });
-    emit({
-      systemMessage: `🐢 거북이 게이트 — 판정 실패로 안전 통과(fail-open). 이 편집은 게이트 검사를 받지 못했습니다: ${verdict.reason}`,
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        permissionDecisionReason: verdict.reason,
-      },
-    });
-    process.exit(0);
+    process.exit(0); // 정상 통과 (자동승인 X — 무출력)
   }
 
   // block: 사람 pause (ask 기본) — 사유가 사용자에게 표시됨
@@ -242,5 +250,42 @@ export async function runStop(): Promise<void> {
       `해결했으면 'gbc defer resolve <번호>', 다음 세션으로 이월할 거면 의식적으로 확인하세요. ` +
       `(이 리마인드는 1회만 표시됩니다.)`,
   });
+  process.exit(0);
+}
+
+interface SessionStartInput {
+  cwd?: string;
+  source?: string;
+}
+
+/**
+ * 세션 진입(startup|resume) 시 미해결 defer 잔여를 표면화하는 알림 문자열. 없으면 "".
+ * gbc 자기 소유 데이터(.gbc/defers.json)만 사용 — scratch/메모리 미접근(다른 하네스와 혼재·환각 방지).
+ */
+export function buildSessionStartHint(unresolved: DeferEntry[]): string {
+  if (unresolved.length === 0) return "";
+  const items = unresolved.map((d, i) => `${i + 1}. ${d.item}`).join("\n");
+  return (
+    `🐢 거북이 게이트 — 미해결 defer ${unresolved.length}건 (이전 작업 잔여):\n${items}\n` +
+    `필요하면 사용자에게 이어서 처리할지 확인하세요. 해결은 'gbc defer resolve <번호>'.`
+  );
+}
+
+/**
+ * SessionStart: 세션 진입 시 미해결 defer를 stdout(plain text)으로 표면화 → Claude 컨텍스트 주입.
+ * 잔여 없으면 무출력. GBC_NO_SESSION_HINT=1로 opt-out. 결정론적(LLM·코드비교 없음).
+ */
+export async function runSessionStart(): Promise<void> {
+  if (process.env.GBC_NO_SESSION_HINT === "1") process.exit(0);
+  let input: SessionStartInput = {};
+  try {
+    const raw = await readStdin();
+    input = raw ? (JSON.parse(raw) as SessionStartInput) : {};
+  } catch {
+    process.exit(0);
+  }
+  const cwd = input.cwd || process.cwd();
+  const hint = buildSessionStartHint(unresolvedDefers(cwd));
+  if (hint) process.stdout.write(hint);
   process.exit(0);
 }
