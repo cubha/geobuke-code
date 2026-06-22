@@ -36,6 +36,8 @@ import { serializeEvent, parseEvents, computeMetrics, logEvent } from "../dist/m
 import { resolveApiKey, safeModel } from "../dist/judge.js";
 import { normalizeCase, MAX_CASE } from "../dist/text.js";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "gbc-test-"));
@@ -513,6 +515,34 @@ test("buildUpdateNotice: 신버전 캐시 있으면 version 라인 포함(ST4 �
     if (prev === undefined) delete process.env.GBC_NO_UPDATE_NOTICE;
     else process.env.GBC_NO_UPDATE_NOTICE = prev;
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("cmdStatus: 신버전 나그를 출력하지 않는다 — 업데이트 안내는 SessionStart/PreToolUse 전용 (A, 0.2.4)", () => {
+  // CLI를 실제 spawn해 status 출력을 본다. fresh 캐시(checkedAt=now)라 stale-refresh가
+  // 안 돌아 네트워크 없이 결정론적. latest≫현재 → 나그 트리거 조건은 충족되지만, status는
+  // 진단 명령이라 안내를 노출하면 안 된다(안내 자리는 SessionStart·PreToolUse 자동 채널).
+  const home = tmp();
+  const proj = tmp();
+  try {
+    mkdirSync(join(home, ".gbc"), { recursive: true });
+    writeFileSync(
+      join(home, ".gbc", "version-check.json"),
+      JSON.stringify({ latest: "99.0.0", checkedAt: Date.now() }),
+    );
+    const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+    const env = { ...process.env, HOME: home, USERPROFILE: home };
+    delete env.GBC_NO_UPDATE_NOTICE; // opt-out 무관하게 status엔 나그가 없어야 함
+    const out = execFileSync(process.execPath, [cli, "status"], {
+      cwd: proj,
+      env,
+      encoding: "utf8",
+    });
+    assert.match(out, /버전:/, "설치 버전 진단 줄은 유지돼야 한다");
+    assert.doesNotMatch(out, /신버전|사용 가능/, "status에 업데이트 나그가 출력되면 안 된다");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(proj, { recursive: true, force: true });
   }
 });
 

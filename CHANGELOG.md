@@ -2,6 +2,14 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.2.4] - 2026-06-22
+
+### Changed
+- **`gbc status`에서 신버전 업데이트 나그 제거 (A)** — `cmdStatus`가 `buildVersionNotice`를 직접 호출해, 명시 진단 명령인 `gbc status`에도 신버전 안내가 노출되던 의도 이탈 수정. 업데이트 안내(①신버전/②init-staleness)의 자리는 **SessionStart·PreToolUse 자동 채널 전용**이다. 부수효과로 `gbc status`의 `GBC_NO_UPDATE_NOTICE` opt-out 누수도 닫힘. 버전 캐시 stale-refresh(SessionStart seed 신선도 목적)와 설치 버전 표시 줄은 유지.
+
+### Docs
+- **corporate Windows keyless 주의 (W3 검증 결과)** — `claude.exe`가 EDR·보안정책에 막히는 환경에선 키 없는 `claude -p` 폴백이 실패해 게이트가 조용히 fail-open(OFF)되므로, `ANTHROPIC_API_KEY` 설정으로 CLI spawn을 우회해 게이트를 유지하도록 README에 명시. **집 native Windows 검증 결과 W3 코드는 정상**(keyless에서 게이트가 fail-open 없이 LLM block 판정까지 정상 수행) — 회사 증상은 환경(EDR/정책의 `claude.exe` 차단) 탓으로 확인되어 코드 변경 불필요.
+
 ## [0.2.3] - 2026-06-22
 
 ### Added

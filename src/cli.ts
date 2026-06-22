@@ -21,7 +21,6 @@ import {
   isCacheStale,
   readVersionCache,
   refreshVersionCache,
-  buildVersionNotice,
 } from "./version.js";
 import { logEvent, parseEvents, computeMetrics } from "./metrics.js";
 import type { EventKind } from "./metrics.js";
@@ -208,8 +207,9 @@ async function cmdStatus(): Promise<void> {
   if (unresolved.length > 0) {
     console.log(unresolved.map((d, i) => `    ${i + 1}. ${d.item}`).join("\n"));
   }
-  const verNotice = buildVersionNotice(PKG_VERSION, readVersionCache());
-  if (verNotice) console.log(`  ${verNotice}`);
+  // 신버전 업데이트 안내(buildVersionNotice)는 여기서 출력하지 않는다 — 안내 자리는
+  // SessionStart·PreToolUse 자동 채널 전용이고, status는 명시 진단 명령이라 나그 부적절.
+  // (캐시 stale-refresh는 위에서 유지: SessionStart seed 신선도 목적, 표시와 무관.)
 }
 
 // ---------- gbc defer ----------
