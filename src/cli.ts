@@ -14,7 +14,7 @@ import {
 import { runPreToolUse, runStop, runSessionStart } from "./hook.js";
 import { loadPlanSpec, computeSpecHash, addSpecCase, readSpecCases, clearSpec } from "./spec.js";
 import { loadState, resetGate } from "./state.js";
-import { addDefer, loadDefers, resolveDefer } from "./defer.js";
+import { addDefer, loadDefers, resolveDefer, startDefer, reopenDefer } from "./defer.js";
 import { selectedTransport } from "./judge.js";
 import { buildPreCommand, normalizeHooks, ensureSessionStartHook } from "./install.js";
 import {
@@ -195,7 +195,8 @@ async function cmdStatus(): Promise<void> {
   const hash = computeSpecHash(text);
   const state = loadState(cwd);
   const defers = loadDefers(cwd);
-  const unresolved = defers.filter((d) => !d.resolved);
+  const unresolved = defers.filter((d) => d.status !== "resolved");
+  const inProgress = defers.filter((d) => d.status === "in_progress").length;
 
   console.log(`🐢 거북이 게이트 상태 — ${cwd}
   버전: ${PKG_VERSION || "(불명)"}
@@ -203,9 +204,13 @@ async function cmdStatus(): Promise<void> {
   명세 소스: ${source} ${text ? `(${text.length}자)` : "(비어있음 → 모든 코드변경 차단)"}
   명세 해시: ${hash}
   작업단위 게이트: ${state && state.specHash === hash && state.gated ? "통과됨(이 단위 재게이트 안 함)" : "미통과(다음 편집에서 발동)"}
-  defer: 전체 ${defers.length} / 미해결 ${unresolved.length}`);
+  defer: 전체 ${defers.length} / 미해결 ${unresolved.length} (진행중 ${inProgress} · 미착수 ${unresolved.length - inProgress})`);
   if (unresolved.length > 0) {
-    console.log(unresolved.map((d, i) => `    ${i + 1}. ${d.item}`).join("\n"));
+    console.log(
+      unresolved
+        .map((d, i) => `    ${i + 1}. ${d.status === "in_progress" ? "▶[진행중] " : ""}${d.item}`)
+        .join("\n"),
+    );
   }
   // 신버전 업데이트 안내(buildVersionNotice)는 여기서 출력하지 않는다 — 안내 자리는
   // SessionStart·PreToolUse 자동 채널 전용이고, status는 명시 진단 명령이라 나그 부적절.
@@ -231,16 +236,29 @@ function cmdDefer(args: string[]): void {
       console.log("(미룬 항목 없음)");
       return;
     }
-    defers.forEach((d, i) =>
-      console.log(`${i + 1}. [${d.resolved ? "해결" : "미해결"}] ${d.item}`),
-    );
-  } else if (sub === "resolve") {
+    const label: Record<string, string> = {
+      open: "미해결",
+      in_progress: "진행중",
+      resolved: "해결",
+    };
+    defers.forEach((d, i) => console.log(`${i + 1}. [${label[d.status]}] ${d.item}`));
+  } else if (sub === "start" || sub === "resolve" || sub === "reopen") {
     const ref = args.slice(1).join(" ").trim();
-    const r = resolveDefer(cwd, ref);
-    if (r) logCli(cwd, "defer-resolve", curHash(cwd));
-    console.log(r ? `🐢 해결 표시: ${r.item}` : `매칭되는 미룬 항목 없음: ${ref}`);
+    if (!ref) {
+      console.error(`사용: gbc defer ${sub} <번호|텍스트|all>`);
+      process.exit(1);
+    }
+    const fn = sub === "start" ? startDefer : sub === "resolve" ? resolveDefer : reopenDefer;
+    const verb = sub === "start" ? "착수" : sub === "resolve" ? "해결" : "되돌림(open)";
+    const changed = fn(cwd, ref);
+    if (changed.length > 0) {
+      logCli(cwd, `defer-${sub}`, curHash(cwd));
+      console.log(`🐢 ${verb} ${changed.length}건: ${changed.map((d) => d.item).join(", ")}`);
+    } else {
+      console.log(`매칭되는 항목 없음(0건): ${ref}`);
+    }
   } else {
-    console.error("사용: gbc defer <add|list|resolve> ...");
+    console.error("사용: gbc defer <add|list|start|resolve|reopen> ...");
     process.exit(1);
   }
 }
@@ -323,9 +341,11 @@ function usage(): void {
 사용:
   gbc init [--yes]                    프로젝트에 hook + /gate 스킬 설치
   gbc status                          게이트 상태 + 로드된 명세 확인
-  gbc defer add "<케이스>"             케이스를 명시적으로 미루기
-  gbc defer list                      미룬 항목 목록
-  gbc defer resolve <번호|텍스트>      미룬 항목 해결
+  gbc defer add "<케이스>"             케이스를 명시적으로 미루기 (→ open)
+  gbc defer list                      미룬 항목 목록 (상태: 미해결/진행중/해결)
+  gbc defer start <번호|텍스트|all>    착수 표시 (open → 진행중)
+  gbc defer resolve <번호|텍스트|all>  종결 표시 (→ 해결; 항상 사용자 점검 후)
+  gbc defer reopen <번호|텍스트|all>   백로그로 되돌리기 (→ open)
   gbc spec add "<케이스>"              승인된 시나리오를 .gbc/spec.md에 등록
   gbc spec show                       등록된 케이스 목록
   gbc spec clear                      명세 비우기(작업단위 종료)

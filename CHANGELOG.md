@@ -2,6 +2,23 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.2.5] - 2026-06-22
+
+### Added
+- **defer 3-상태 수명주기 (open / in_progress / resolved)** — 기존 2-state(등록/해소)를 3-state로 확장. 착수했지만 미종결인 항목이 "진행중"으로 구분돼, SessionStart·Stop 리마인드가 `진행중 N · 미착수 M`으로 표면화한다(착수한 채 잊히는 것 방지).
+  - 신규 명령 `gbc defer start <ref>`(open→진행중)·`gbc defer reopen <ref>`(→open). `gbc defer resolve`는 복수/`all` 전환 지원(반환 `DeferEntry[]`). `ref = 번호 | 텍스트 | all`, 복수 인덱스(`2 3`)·부분텍스트·전환별 적격 처리.
+  - **gate-neutral**: judge 입력은 open+in_progress(미해결 전부) — 차단 로직은 2-state와 **동일**하게 유지. resolved만 판정에서 제외.
+- **자연어/편집대상 감지 기반 백그라운드 전환** — 사용자가 `gbc defer …`를 직접 칠 필요 없이, 에이전트가 대화·편집 대상을 감지해 전환을 실행하고 표면화한다. 전환 행동 규약을 SessionStart/Stop hint 문자열에 임베드(매 세션 컨텍스트에 규약을 주입하는 결정론적 채널).
+
+### Changed
+- **resolve = 항상 사람의 명시 선언** — judge가 편집을 보고 resolve를 추론하지 않는다. 모호한 완료 신호는 resolve하지 말고 사용자에게 확인(resolved 항목은 리마인드에서 사라지므로 잘못 resolve하면 미완성인 채 잊힘). start만 편집 감지로 자동(보수적·실착수 시만).
+
+### Fixed
+- **hint 번호 ↔ CLI 인덱스 정합** — SessionStart/Stop 리마인드가 미해결 부분집합을 1..N으로 번호 매기던 것을, `gbc defer list`·인덱스 ref와 동일한 **전체-리스트 인덱스**로 통일. resolved 항목이 앞에 있을 때 표시 번호 ≠ 실제 인덱스가 되어 `start <표시번호>`가 엉뚱한(되살아난) 항목을 치던 버그 수정.
+
+### Internal
+- 옛 `{resolved:bool}` 데이터는 읽을 때 `status`로 자동 승격(저장은 `status` 단일 소스). 기존 데이터 판정 결과 불변(`resolved:true`→제외, `false`→open→포함). 영향 파일: `types.ts`·`defer.ts`·`cli.ts`·`hook.ts`·`metrics.ts`·`skills/gate/SKILL.md`.
+
 ## [0.2.4] - 2026-06-22
 
 ### Changed
