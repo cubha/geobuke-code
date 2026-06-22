@@ -1,10 +1,40 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { Verdict } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
 const MODEL = process.env.GBC_MODEL ?? "claude-haiku-4-5";
+
+/** resolveApiKey 의존성 주입(테스트용). 미지정 시 실제 env/homedir/fs 사용. */
+export interface KeyResolveOpts {
+  env?: Record<string, string | undefined>;
+  homeDir?: string;
+  readFile?: (path: string) => string;
+}
+
+/**
+ * API 키 해석 (크로스플랫폼, 셸 무관).
+ * 1) ANTHROPIC_API_KEY 환경변수 우선, 2) 없으면 ~/.gbc/api-key 파일.
+ * STUB
+ */
+export function resolveApiKey(opts: KeyResolveOpts = {}): string | null {
+  const env = opts.env ?? process.env;
+  const fromEnv = env.ANTHROPIC_API_KEY;
+  if (fromEnv && fromEnv.trim()) return fromEnv;
+  const home = opts.homeDir ?? homedir();
+  const read = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
+  try {
+    // bash `$(cat)`는 trailing newline을 벗기지만 readFileSync는 안 벗긴다 → 명시 trim 필수.
+    const key = read(join(home, ".gbc", "api-key")).trim();
+    return key || null;
+  } catch {
+    return null; // 파일 부재/읽기 실패 → 키 없음(claude -p 폴백)
+  }
+}
 
 /**
  * 최소 게이트 시스템 프롬프트.
@@ -59,16 +89,17 @@ function parseVerdict(raw: string): Verdict {
   };
 }
 
-/** 트랜스포트 선택 결과 (디버그/리포트용) */
+/** 트랜스포트 선택 결과 (디버그/리포트용). env 또는 키파일에 키가 있으면 api. */
 export function selectedTransport(): "api" | "cli" {
-  return process.env.ANTHROPIC_API_KEY ? "api" : "cli";
+  return resolveApiKey() ? "api" : "cli";
 }
 
 /** 직접 Anthropic API (haiku). SDK는 여기서만 lazy import → hook 핫패스 보호. */
 async function judgeViaApi(system: string, user: string): Promise<string> {
   const mod = await import("@anthropic-ai/sdk");
   const Anthropic = mod.default;
-  const client = new Anthropic(); // ANTHROPIC_API_KEY 환경변수 사용
+  // 키를 코드에서 해석(env 또는 ~/.gbc/api-key)해 명시 전달 — 셸 주입 불필요(크로스플랫폼).
+  const client = new Anthropic({ apiKey: resolveApiKey() ?? undefined });
   const resp = await client.messages.create({
     model: MODEL,
     max_tokens: 1024,
