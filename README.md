@@ -61,6 +61,8 @@ gbc init
 
 > ⚠️ **native Windows에선 API 키를 권장한다.** 키 없는 `claude -p` 폴백도 지원하지만(win32에선 `claude.cmd` 실행을 위해 셸 경유, 프롬프트는 인젝션 회피로 stdin 전달, 무응답 방지 kill-timeout), 폴백은 느리므로(~13–20s) 위 키 파일로 API 경로(~1–3s)를 쓰는 편이 빠르고 확실하다.
 
+> 🔒 **회사·보안통제(EDR/그룹정책) 환경에선 API 키가 사실상 필수다.** native Windows에서 `claude.exe`가 EDR·정책에 막히면(증상: `claude exited 1: 액세스가 거부되었습니다`), 키 없는 `claude -p` 폴백 호출이 매번 실패해 게이트가 **조용히 fail-open**된다 — 게이트가 느려지는 게 아니라 **꺼진다**(`.gbc/failopen.log`에 누적). 이때 `ANTHROPIC_API_KEY`(또는 키 파일)를 설정하면 CLI spawn을 건너뛰고 직접 API로 판정하므로 **막힌 환경에서도 게이트가 살아 있다**. 즉 이 경우 키는 속도가 아니라 **게이트 작동 자체**의 문제다. (깨끗한 native Windows에선 keyless 폴백도 정상 동작함이 검증됨 — 실패는 환경의 CLI 차단에서 비롯된다.)
+
 키 해석 순서: `ANTHROPIC_API_KEY` 환경변수 > `~/.gbc/api-key` 파일.
 
 ```bash
