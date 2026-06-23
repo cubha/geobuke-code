@@ -15,6 +15,24 @@ interface Settings {
 }
 
 /**
+ * dev(도그푸딩) 설치용 hook 경로 placeholder. `gbc init --dev`가 절대경로(CLI_PATH) 대신 이걸
+ * 구워, geobuke-code 자기 repo처럼 dist 위치가 옮겨다니는 클론에서도 hook이 깨지지 않게 한다
+ * (CC 런타임이 ${CLAUDE_PROJECT_DIR}를 프로젝트 루트로 치환). npm 전역·외부 4곳 도그푸딩은 절대경로
+ * 유지(기본동작 불변) — 이 placeholder는 명시 opt-in일 때만 쓰인다.
+ */
+export const DEV_PLACEHOLDER = "${CLAUDE_PROJECT_DIR}/dist/cli.js";
+
+/**
+ * PreToolUse hook의 *정식* 명령 집합(절대경로 + dev placeholder). stale/normalize 판정의 공통 기준.
+ * read-time(hasStalePreToolUse)은 런타임 cliPath=절대경로뿐이라 이 repo가 dev인지 모른다 → 두 정식
+ * 형태 중 하나면 stale 아님으로 봐야 placeholder를 구식으로 오판하지 않는다. substring이 아니라
+ * 완전일치 집합이라, 서브명령명이 바뀌면 placeholder 형태도 함께 갱신돼 진짜 구식 감지는 유지된다.
+ */
+function canonicalPreCommands(cliPath: string): string[] {
+  return [buildPreCommand(cliPath), buildPreCommand(DEV_PLACEHOLDER)];
+}
+
+/**
  * PreToolUse hook 명령 생성 — 셸 무관 순수 명령.
  * `node "<cliPath>" hook pre-tool-use` 형태만 생성한다. 키 주입(셸 prefix)·셸 확장 없음.
  * - cliPath는 큰따옴표로만 감싼다(공백 포함 경로 안전). 큰따옴표는 cmd.exe·POSIX sh 공통.
@@ -33,12 +51,14 @@ export function buildPreCommand(cliPath: string): string {
  * settings를 제자리 수정하고 변경 건수를 반환한다(멱등: 이미 표준이면 0건).
  */
 export function normalizeHooks(settings: Settings, cliPath: string): number {
-  const target = buildPreCommand(cliPath);
+  const canon = canonicalPreCommands(cliPath);
   let changed = 0;
   for (const entry of settings.hooks?.PreToolUse ?? []) {
     for (const h of entry.hooks ?? []) {
-      if (h.command.includes("hook pre-tool-use") && h.command !== target) {
-        h.command = target;
+      // 이미 정식(절대 or placeholder)이면 건드리지 않는다 — dev placeholder를 절대경로로 덮어
+      // 도그푸딩 설치를 깨뜨리지 않게. 진짜 구식(옛 bash 키주입 등)만 절대경로로 교체.
+      if (h.command.includes("hook pre-tool-use") && !canon.includes(h.command)) {
+        h.command = buildPreCommand(cliPath);
         changed++;
       }
     }
@@ -56,10 +76,12 @@ export function buildSessionStartCommand(cliPath: string): string {
  * 감지부만 떼어낸 비파괴 술어 — ②init-staleness 안내가 settings를 수정하지 않고 판단하게 한다.
  */
 export function hasStalePreToolUse(settings: Settings, cliPath: string): boolean {
-  const target = buildPreCommand(cliPath);
+  const canon = canonicalPreCommands(cliPath);
   for (const entry of settings.hooks?.PreToolUse ?? []) {
     for (const h of entry.hooks ?? []) {
-      if (h.command.includes("hook pre-tool-use") && h.command !== target) return true;
+      // dev placeholder도 정식이므로 stale 아님 — 절대경로 런타임에서 placeholder를 구식으로 오판해
+      // 'gbc init' 재실행을 헛권하던 false-positive 차단(B-잔여 #3의 실제 증상).
+      if (h.command.includes("hook pre-tool-use") && !canon.includes(h.command)) return true;
     }
   }
   return false;
