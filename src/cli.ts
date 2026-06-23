@@ -18,7 +18,7 @@ import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer, startDefer, reopenDefer } from "./defer.js";
 import { isStopHintMuted, setStopHintMuted } from "./config.js";
 import { selectedTransport } from "./judge.js";
-import { buildPreCommand, normalizeHooks, ensureSessionStartHook } from "./install.js";
+import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER } from "./install.js";
 import {
   isCacheStale,
   readVersionCache,
@@ -44,8 +44,8 @@ const PKG_VERSION = readPkgVersion();
 function hasApiKey(): boolean {
   return existsSync(join(homedir(), ".gbc", "api-key"));
 }
-function stopCommand(): string {
-  return `node "${CLI_PATH}" hook stop`;
+function stopCommand(hookPath: string): string {
+  return `node "${hookPath}" hook stop`;
 }
 
 function nowIso(): string {
@@ -82,6 +82,10 @@ function nowStamp(): string {
 async function cmdInit(args: string[]): Promise<void> {
   const cwd = process.cwd();
   const yes = args.includes("--yes") || args.includes("-y");
+  // --dev: hook 명령에 절대경로(CLI_PATH) 대신 ${CLAUDE_PROJECT_DIR} placeholder를 굽는다.
+  // geobuke-code 자기 repo 도그푸딩 전용(dist 위치가 옮겨다녀도 안 깨짐). 기본(false)은 절대경로.
+  const dev = args.includes("--dev");
+  const hookPath = dev ? DEV_PLACEHOLDER : CLI_PATH;
   const claudeDir = join(cwd, ".claude");
   const settingsPath = join(claudeDir, "settings.json");
   // 설치 대상 스킬들(제품소스 skills/<name>/SKILL.md → .claude/skills/<name>/SKILL.md).
@@ -94,7 +98,7 @@ async function cmdInit(args: string[]): Promise<void> {
   1) ${settingsPath} 에 PreToolUse(Edit|Write) + Stop + SessionStart hook 추가 (머지·멱등)
      - 기존 settings.json 있으면 백업: settings.json.bak-<시각>
   2) ${join(claudeDir, "skills")} 에 ${skillNames.map((n) => `/${n}`).join(", ")} 스킬 설치
-  3) hook 명령: ${buildPreCommand(CLI_PATH)}
+  3) hook 명령: ${buildPreCommand(hookPath)}${dev ? "  (--dev: ${CLAUDE_PROJECT_DIR} placeholder)" : ""}
 ${
   hasApiKey()
     ? "     (~/.gbc/api-key 감지됨 → 빠른 haiku API 경로로 동작)"
@@ -128,7 +132,7 @@ ${
   if (!serialized.includes("hook pre-tool-use")) {
     (hooks.PreToolUse ??= []).push({
       matcher: "Edit|Write|MultiEdit",
-      hooks: [{ type: "command", command: buildPreCommand(CLI_PATH) }],
+      hooks: [{ type: "command", command: buildPreCommand(hookPath) }],
     });
     console.log(`  + PreToolUse hook 추가`);
   } else {
@@ -140,7 +144,7 @@ ${
   // Stop (멱등)
   if (!serialized.includes("hook stop")) {
     (hooks.Stop ??= []).push({
-      hooks: [{ type: "command", command: stopCommand() }],
+      hooks: [{ type: "command", command: stopCommand(hookPath) }],
     });
     console.log(`  + Stop hook 추가`);
   } else {
@@ -148,7 +152,7 @@ ${
   }
 
   // SessionStart (멱등) — 세션 진입(startup|resume) 시 미해결 defer 알림
-  if (ensureSessionStartHook(settings, CLI_PATH)) {
+  if (ensureSessionStartHook(settings, hookPath)) {
     console.log(`  + SessionStart hook 추가`);
   } else {
     console.log(`  = SessionStart hook 이미 존재 (skip)`);

@@ -2,6 +2,27 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.2.8] - 2026-06-23
+
+### Fixed
+- **dev placeholder hook을 stale로 오판하던 false-positive 수정** — `gbc init`이 `${CLAUDE_PROJECT_DIR}/dist/cli.js` placeholder로 설치한 hook을, 런타임 절대경로와 글자가 다르다는 이유만으로 "구식"으로 판정해 매 세션 `gbc init --yes` 재실행을 헛권하던 버그(geobuke-code 자기 repo 도그푸딩에서 실제로 발현). `hasStalePreToolUse`(read-time)·`normalizeHooks`(write-time)가 절대경로와 placeholder **두 정식 형태를 모두 인정**하도록 `canonicalPreCommands` 공통 기준 도입. 진짜 구식(옛 bash 키주입) 감지는 유지.
+
+### Added
+- **`gbc init --dev`** — hook 명령에 절대경로 대신 `${CLAUDE_PROJECT_DIR}/dist/cli.js` placeholder를 굽는 opt-in 플래그. dist 위치가 옮겨다니는 클론(자기 repo 도그푸딩)에서도 hook이 안 깨진다. **기본(플래그 없음)은 절대경로 유지** — npm 전역·외부 도그푸딩 등 일반 동작은 완전 불변. `stopCommand`/init 프리뷰도 선택된 경로를 반영.
+
+## [0.2.7] - 2026-06-23
+
+### Added
+- **`gbc update [--dry-run]`** — `npm i -g geobuke-code@latest`로 CLI를 갱신하고, 현재 폴더가 `.gbc`를 가지면 새 바이너리로 `gbc init --yes`까지 수행하는 명령. (무음 자동 업데이트는 네트워크 차단·EACCES 권한·핫패스 fail-silent 철학·갱신 채널 소유 문제로 채택하지 않음.)
+
+### Changed
+- **신버전 안내 표시 지연 제거** — `runSessionStart`가 stale 캐시일 때 *표시 전에* 버전 캐시를 선행 refresh(≤1.5s, fail-silent)해, 신버전이 다음 세션이 아니라 그 세션에 즉시 노출된다. stale일 때만(24h당 1회) 발생.
+
+## [0.2.6] - 2026-06-22
+
+### Added
+- **defer Stop 리마인드 음소거** — `gbc defer mute`/`gbc defer unmute`와 별도 `/gbc-mute` 스킬. 미해결 defer가 있을 때 매 대화 종료(Stop hook)마다 강제 노출되던 리마인드를 토글로 끈다. **Stop 채널만** 끄고 SessionStart(startup|resume) 진입 알림은 유지. 음소거 상태는 `.gbc/config.json`에 영속(`gate reset`이 푸는 `state.json`과 분리)되어 새 defer 추가·세션 교체에도 유지된다. 상태는 SessionStart 줄·`gbc status`·`gbc defer list` 3곳에 표면화.
+
 ## [0.2.5] - 2026-06-22
 
 ### Added
