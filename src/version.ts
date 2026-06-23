@@ -71,7 +71,7 @@ export function buildVersionNotice(current: string, cache: VersionCache | null):
   if (compareVersions(current, cache.latest) >= 0) return "";
   return (
     `🐢 거북이코드 신버전 ${cache.latest} 사용 가능(현재 ${current}). ` +
-    `갱신: npm i -g geobuke-code@latest → 각 프로젝트서 gbc init --yes`
+    `갱신: 'gbc update'(전역 최신 + 현재 프로젝트 재init) 또는 수동 'npm i -g geobuke-code@latest → gbc init --yes'`
   );
 }
 

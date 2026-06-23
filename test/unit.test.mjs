@@ -472,6 +472,30 @@ test("gbc init --yes: gate + gbc-mute 스킬 둘 다 설치", () => {
   }
 });
 
+test("gbc update --dry-run: .gbc 있으면 npm 설치+init 2단계, 없으면 init 생략 안내", () => {
+  const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  const env = { ...process.env, GBC_NO_UPDATE_NOTICE: "1" };
+  const dry = (cwd) =>
+    execFileSync(process.execPath, [cli, "update", "--dry-run"], { cwd, env, encoding: "utf8" });
+  // gbc 프로젝트(.gbc 존재) → 2단계
+  const proj = tmp();
+  execFileSync(process.execPath, [cli, "defer", "add", "x"], { cwd: proj, env, encoding: "utf8" }); // .gbc 생성
+  // 비-프로젝트(.gbc 없음) → init 생략 안내
+  const bare = tmp();
+  try {
+    const a = dry(proj);
+    assert.match(a, /npm i -g geobuke-code@latest/);
+    assert.match(a, /gbc init --yes/);
+    const b = dry(bare);
+    assert.match(b, /npm i -g geobuke-code@latest/);
+    assert.doesNotMatch(b, /\$ gbc init --yes/); // init 단계 없음
+    assert.match(b, /init 생략/);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
 test("spec-store: addSpecCase → readSpecCases → clearSpec 흐름", () => {
   const dir = tmp();
   try {
