@@ -15,6 +15,7 @@ import { runPreToolUse, runStop, runSessionStart } from "./hook.js";
 import { loadPlanSpec, computeSpecHash, addSpecCase, readSpecCases, clearSpec } from "./spec.js";
 import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer, startDefer, reopenDefer } from "./defer.js";
+import { isStopHintMuted, setStopHintMuted } from "./config.js";
 import { selectedTransport } from "./judge.js";
 import { buildPreCommand, normalizeHooks, ensureSessionStartHook } from "./install.js";
 import {
@@ -82,8 +83,8 @@ async function cmdInit(args: string[]): Promise<void> {
   const yes = args.includes("--yes") || args.includes("-y");
   const claudeDir = join(cwd, ".claude");
   const settingsPath = join(claudeDir, "settings.json");
-  const skillDestDir = join(claudeDir, "skills", "gate");
-  const skillSrc = join(PKG_ROOT, "skills", "gate", "SKILL.md");
+  // 설치 대상 스킬들(제품소스 skills/<name>/SKILL.md → .claude/skills/<name>/SKILL.md).
+  const skillNames = ["gate", "gbc-mute"];
 
   if (!yes) {
     console.log(`🐢 gbc init — 다음을 수행합니다 (프로젝트 로컬만, 전역 ~/.claude 미변경):
@@ -91,7 +92,7 @@ async function cmdInit(args: string[]): Promise<void> {
   대상 프로젝트: ${cwd}
   1) ${settingsPath} 에 PreToolUse(Edit|Write) + Stop + SessionStart hook 추가 (머지·멱등)
      - 기존 settings.json 있으면 백업: settings.json.bak-<시각>
-  2) ${join(skillDestDir, "SKILL.md")} 에 /gate 스킬 설치
+  2) ${join(claudeDir, "skills")} 에 ${skillNames.map((n) => `/${n}`).join(", ")} 스킬 설치
   3) hook 명령: ${buildPreCommand(CLI_PATH)}
 ${
   hasApiKey()
@@ -103,7 +104,7 @@ ${
     return;
   }
 
-  mkdirSync(skillDestDir, { recursive: true });
+  mkdirSync(claudeDir, { recursive: true });
 
   // settings.json 머지
   let settings: Record<string, unknown> = {};
@@ -154,10 +155,15 @@ ${
 
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
 
-  // /gate 스킬 설치
-  if (existsSync(skillSrc)) {
-    copyFileSync(skillSrc, join(skillDestDir, "SKILL.md"));
-    console.log(`  + /gate 스킬 설치`);
+  // 스킬 설치 (gate + gbc-mute)
+  for (const name of skillNames) {
+    const src = join(PKG_ROOT, "skills", name, "SKILL.md");
+    if (existsSync(src)) {
+      const destDir = join(claudeDir, "skills", name);
+      mkdirSync(destDir, { recursive: true });
+      copyFileSync(src, join(destDir, "SKILL.md"));
+      console.log(`  + /${name} 스킬 설치`);
+    }
   }
 
   const transport = selectedTransport();
@@ -204,7 +210,8 @@ async function cmdStatus(): Promise<void> {
   명세 소스: ${source} ${text ? `(${text.length}자)` : "(비어있음 → 모든 코드변경 차단)"}
   명세 해시: ${hash}
   작업단위 게이트: ${state && state.specHash === hash && state.gated ? "통과됨(이 단위 재게이트 안 함)" : "미통과(다음 편집에서 발동)"}
-  defer: 전체 ${defers.length} / 미해결 ${unresolved.length} (진행중 ${inProgress} · 미착수 ${unresolved.length - inProgress})`);
+  defer: 전체 ${defers.length} / 미해결 ${unresolved.length} (진행중 ${inProgress} · 미착수 ${unresolved.length - inProgress})
+  Stop 리마인드: ${isStopHintMuted(cwd) ? "🔕 음소거 (해제: /gbc-mute)" : "🔔 켜짐"}`);
   if (unresolved.length > 0) {
     console.log(
       unresolved
@@ -230,8 +237,22 @@ function cmdDefer(args: string[]): void {
     addDefer(cwd, item);
     logCli(cwd, "defer-add", curHash(cwd));
     console.log(`🐢 미룸 등록: ${item}`);
+  } else if (sub === "mute" || sub === "unmute") {
+    const muted = sub === "mute";
+    setStopHintMuted(cwd, muted);
+    if (muted) {
+      console.log(
+        "🔕 Stop 리마인드 음소거됨 — 대화 종료마다 뜨던 defer 알림을 끕니다.\n" +
+          "   (SessionStart 진입 시엔 계속 표시 · 해제는 'gbc defer unmute')",
+      );
+    } else {
+      console.log("🔔 Stop 리마인드 음소거 해제됨 — 대화 종료 시 미해결 defer 알림이 다시 표시됩니다.");
+    }
   } else if (sub === "list") {
     const defers = loadDefers(cwd);
+    if (isStopHintMuted(cwd)) {
+      console.log("🔕 Stop 리마인드 음소거 중 (해제: gbc defer unmute)");
+    }
     if (defers.length === 0) {
       console.log("(미룬 항목 없음)");
       return;
@@ -258,7 +279,7 @@ function cmdDefer(args: string[]): void {
       console.log(`매칭되는 항목 없음(0건): ${ref}`);
     }
   } else {
-    console.error("사용: gbc defer <add|list|start|resolve|reopen> ...");
+    console.error("사용: gbc defer <add|list|start|resolve|reopen|mute|unmute> ...");
     process.exit(1);
   }
 }
@@ -346,6 +367,8 @@ function usage(): void {
   gbc defer start <번호|텍스트|all>    착수 표시 (open → 진행중)
   gbc defer resolve <번호|텍스트|all>  종결 표시 (→ 해결; 항상 사용자 점검 후)
   gbc defer reopen <번호|텍스트|all>   백로그로 되돌리기 (→ open)
+  gbc defer mute                      대화 종료(Stop)마다 뜨는 defer 알림 끄기 (영속)
+  gbc defer unmute                    Stop defer 알림 다시 켜기
   gbc spec add "<케이스>"              승인된 시나리오를 .gbc/spec.md에 등록
   gbc spec show                       등록된 케이스 목록
   gbc spec clear                      명세 비우기(작업단위 종료)
