@@ -3,6 +3,7 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   existsSync,
@@ -356,11 +357,56 @@ function cmdMetrics(args: string[]): void {
     ⚠️ ${m.m1.note}`);
 }
 
+// ---------- gbc update ----------
+/**
+ * 전역 최신 설치 + (현재 프로젝트면) 재init을 한 번에. 자동 silent 업데이트가 아니라 명시 명령 —
+ * 사용자가 nag를 보고 'gbc update' 한 줄로 갱신한다(매번 두 명령 외울 필요 제거).
+ * ★재init은 '새로 깔린' 바이너리를 fresh spawn해야 신규 스킬·hook이 반영된다(현재 실행 중인 건 구버전).
+ */
+function cmdUpdate(args: string[]): void {
+  const cwd = process.cwd();
+  const dry = args.includes("--dry-run");
+  const isProject = existsSync(join(cwd, ".gbc"));
+  const steps = ["npm i -g geobuke-code@latest", ...(isProject ? ["gbc init --yes"] : [])];
+
+  if (dry) {
+    console.log("🐢 gbc update — 실행 예정(--dry-run):");
+    steps.forEach((s) => console.log(`  $ ${s}`));
+    if (!isProject)
+      console.log("  (현재 폴더에 .gbc 없음 → init 생략. 프로젝트에서 'gbc init --yes' 실행)");
+    return;
+  }
+
+  console.log(`🐢 gbc update — 전역 최신 설치${isProject ? " + 현재 프로젝트 재init" : ""}`);
+
+  // 1) 전역 최신 설치. shell:true + 고정 명령 문자열(사용자 입력 없음 → 인젝션 무관, 크로스플랫폼).
+  const r1 = spawnSync("npm i -g geobuke-code@latest", { stdio: "inherit", shell: true });
+  if (r1.status !== 0) {
+    console.error(
+      "❌ 전역 설치 실패. 권한 문제면 관리자 권한(Windows)·sudo 또는 수동 'npm i -g geobuke-code@latest'.",
+    );
+    process.exit(1);
+  }
+
+  // 2) gbc 프로젝트면 재init — 신규 스킬(gbc-mute 등)·최신 hook 반영.
+  if (isProject) {
+    const r2 = spawnSync("gbc init --yes", { stdio: "inherit", shell: true, cwd });
+    if (r2.status !== 0) {
+      console.error("⚠️ 전역 설치는 됐으나 'gbc init --yes' 실패 — 프로젝트에서 수동 실행하세요.");
+      process.exit(1);
+    }
+  } else {
+    console.log("ℹ️ 현재 폴더는 gbc 프로젝트 아님(.gbc 없음) → 각 프로젝트에서 'gbc init --yes' 실행하세요.");
+  }
+  console.log("✅ gbc update 완료.");
+}
+
 function usage(): void {
   console.log(`🐢 gbc — 거북이코드 구현-전 게이트
 
 사용:
-  gbc init [--yes]                    프로젝트에 hook + /gate 스킬 설치
+  gbc init [--yes]                    프로젝트에 hook + /gate · /gbc-mute 스킬 설치
+  gbc update [--dry-run]              전역 최신 설치 + 현재 프로젝트 재init (한방 갱신)
   gbc status                          게이트 상태 + 로드된 명세 확인
   gbc defer add "<케이스>"             케이스를 명시적으로 미루기 (→ open)
   gbc defer list                      미룬 항목 목록 (상태: 미해결/진행중/해결)
@@ -393,6 +439,8 @@ async function main(): Promise<void> {
       break;
     case "init":
       return cmdInit(rest);
+    case "update":
+      return cmdUpdate(rest);
     case "status":
       return cmdStatus();
     case "defer":

@@ -374,8 +374,19 @@ export async function runSessionStart(ctx?: HookContext): Promise<void> {
       }
     }
   }
+  // ①신버전 안내 — 캐시가 stale이면 '표시 전에' 먼저 갱신(1.5s 상한, fail-silent)해 이번 세션에
+  // 즉시 반영한다(표시-후-갱신의 '다음 세션 지연' 제거). SessionStart는 게이트를 막지 않으므로
+  // 짧은 네트워크가 안전(advisor 승인). 갱신은 24h TTL당 1회만 발생.
+  try {
+    if (ctx?.cliPath && process.env.GBC_NO_UPDATE_NOTICE !== "1" && isCacheStale(readVersionCache())) {
+      await refreshVersionCache();
+    }
+  } catch {
+    /* 갱신 실패는 무시(fail-silent) */
+  }
   // 업데이트 안내(staleness + version) — SessionStart 보유 코호트(0.2.3+)용. 세션 식별자가 없어
   // 항상 표시되므로 dedup 대신 GBC_NO_UPDATE_NOTICE opt-out에 맡긴다(buildUpdateNotice 내부).
+  // 위에서 갱신된 캐시를 읽으므로 신버전이 뜨는 그 세션에 즉시 표시된다.
   try {
     if (ctx?.cliPath) {
       const notice = buildUpdateNotice(readProjectSettings(cwd), ctx.cliPath, ctx.version ?? "");
@@ -385,14 +396,5 @@ export async function runSessionStart(ctx?: HookContext): Promise<void> {
     /* 안내 실패는 무시(fail-silent) */
   }
   if (parts.length > 0) process.stdout.write(parts.join("\n"));
-  // 버전 캐시 갱신은 '표시 후'에만(이번 출력은 캐시값 기준, 갱신은 다음 세션용). SessionStart는
-  // 게이트를 막지 않으므로 짧은 타임아웃 네트워크가 안전(advisor 승인). 실패는 조용히 무시.
-  try {
-    if (ctx?.cliPath && process.env.GBC_NO_UPDATE_NOTICE !== "1" && isCacheStale(readVersionCache())) {
-      await refreshVersionCache();
-    }
-  } catch {
-    /* 갱신 실패는 무시(fail-silent) */
-  }
   process.exit(0);
 }
