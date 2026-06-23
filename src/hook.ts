@@ -5,6 +5,7 @@ import { isGatedTool, normalizeEdit } from "./normalize.js";
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated, markGated } from "./state.js";
 import { activeDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
+import { isStopHintMuted } from "./config.js";
 import { readProjectSettings, buildUpdateNotice, wasNotified, markNotified } from "./notice.js";
 import { isCacheStale, readVersionCache, refreshVersionCache } from "./version.js";
 import { appendFileSync } from "node:fs";
@@ -268,6 +269,10 @@ export async function runStop(): Promise<void> {
   if (input.stop_hook_active === true) process.exit(0);
 
   const cwd = input.cwd || process.cwd();
+  // 사용자가 'gbc defer mute'로 Stop 리마인드를 음소거했으면 조용히 통과(unmute 전까지 영속).
+  // SessionStart 진입 알림은 별개 채널이라 영향 없음. emit 없이 종료 = Claude 정상 stop 허용.
+  if (isStopHintMuted(cwd)) process.exit(0);
+
   // defers.json 없으면(파일 부재) 조용히 통과
   if (loadDefers(cwd).length === 0) process.exit(0);
 
@@ -359,7 +364,15 @@ export async function runSessionStart(ctx?: HookContext): Promise<void> {
   // 미해결 defer 알림(GBC_NO_SESSION_HINT로 opt-out — 기존 동작 보존).
   if (process.env.GBC_NO_SESSION_HINT !== "1") {
     const hint = buildSessionStartHint(loadDefers(cwd));
-    if (hint) parts.push(hint);
+    if (hint) {
+      parts.push(hint);
+      // Stop 리마인드 음소거 중이면 진입 시 1회 환기("꺼둔 걸 잊지 않게"). hint가 있을 때만
+      // = 미해결 defer가 있을 때만(잔여 0이면 음소거 무관·노이즈). buildSessionStartHint는
+      // 순수 유지하고 오케스트레이션에서만 한 줄 첨부(시그니처 미오염).
+      if (isStopHintMuted(cwd)) {
+        parts.push("🔕 Stop 리마인드 음소거 중 — 매 대화 종료 알림은 꺼져 있습니다 (해제: /gbc-mute).");
+      }
+    }
   }
   // 업데이트 안내(staleness + version) — SessionStart 보유 코호트(0.2.3+)용. 세션 식별자가 없어
   // 항상 표시되므로 dedup 대신 GBC_NO_UPDATE_NOTICE opt-out에 맡긴다(buildUpdateNotice 내부).

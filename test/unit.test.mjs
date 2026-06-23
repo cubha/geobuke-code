@@ -48,6 +48,7 @@ import {
 import { serializeEvent, parseEvents, computeMetrics, logEvent } from "../dist/metrics.js";
 import { resolveApiKey, safeModel } from "../dist/judge.js";
 import { normalizeCase, MAX_CASE } from "../dist/text.js";
+import { isStopHintMuted, setStopHintMuted } from "../dist/config.js";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -329,6 +330,143 @@ test("gbc defer CLI: start/resolve/reopen + list 3상태 표시 (ST3, 0.2.5)", (
     // 매칭 0건이면 안내
     const none = run("resolve", "존재안함텍스트");
     assert.match(none, /없음|0건/);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("config: isStopHintMuted 기본 false, setStopHintMuted 영속 토글 (defer mute)", () => {
+  const dir = tmp();
+  try {
+    assert.equal(isStopHintMuted(dir), false); // 파일/키 부재 → 노출(기본)
+    setStopHintMuted(dir, true);
+    assert.equal(isStopHintMuted(dir), true);
+    setStopHintMuted(dir, false);
+    assert.equal(isStopHintMuted(dir), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("gbc defer mute/unmute CLI: 토글 + list 상태표기 + 발견성 출력", () => {
+  const proj = tmp();
+  const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  const run = (...a) =>
+    execFileSync(process.execPath, [cli, "defer", ...a], {
+      cwd: proj,
+      env: { ...process.env },
+      encoding: "utf8",
+    });
+  try {
+    run("add", "케이스 하나");
+    // mute → 발견성 안내(SessionStart 유지·unmute 경로) + 영속 저장
+    const m = run("mute");
+    assert.match(m, /음소거/);
+    assert.match(m, /unmute/);
+    assert.equal(isStopHintMuted(proj), true);
+    // list가 음소거 상태를 표기
+    assert.match(run("list"), /음소거 중/);
+    // unmute → 복원
+    const u = run("unmute");
+    assert.match(u, /해제/);
+    assert.equal(isStopHintMuted(proj), false);
+    assert.doesNotMatch(run("list"), /음소거 중/);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("runStop 가드: mute 시 미해결 defer 있어도 Stop hook 무출력(침묵)", () => {
+  const proj = tmp();
+  const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  const stopInput = JSON.stringify({ cwd: proj, stop_hook_active: false });
+  const runStop = () =>
+    execFileSync(process.execPath, [cli, "hook", "stop"], {
+      cwd: proj,
+      env: { ...process.env },
+      input: stopInput,
+      encoding: "utf8",
+    });
+  try {
+    execFileSync(process.execPath, [cli, "defer", "add", "남은 작업"], {
+      cwd: proj,
+      env: { ...process.env },
+      encoding: "utf8",
+    });
+    // mute 전: Stop이 리마인드를 emit(block JSON)
+    assert.match(runStop(), /미해결 defer/);
+    // mute 후: 완전 침묵(빈 출력)
+    setStopHintMuted(proj, true);
+    assert.equal(runStop().trim(), "");
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("SessionStart 상태줄: muted + 미해결 defer면 음소거 환기 1줄, 잔여 0이면 무음", () => {
+  const proj = tmp();
+  const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  const env = { ...process.env, GBC_NO_UPDATE_NOTICE: "1" };
+  const ssOut = () =>
+    execFileSync(process.execPath, [cli, "hook", "session-start"], {
+      cwd: proj,
+      env,
+      input: JSON.stringify({ cwd: proj, source: "startup" }),
+      encoding: "utf8",
+    });
+  const add = (t) =>
+    execFileSync(process.execPath, [cli, "defer", "add", t], { cwd: proj, env, encoding: "utf8" });
+  try {
+    // 잔여 0 + muted → 음소거 환기줄 없음(노이즈 차단)
+    setStopHintMuted(proj, true);
+    assert.doesNotMatch(ssOut(), /음소거 중/);
+    // 미해결 defer 추가 + muted → hint + 음소거 환기 1줄
+    add("남은 작업");
+    const out = ssOut();
+    assert.match(out, /이전 작업 잔여/); // 기존 hint 유지
+    assert.match(out, /음소거 중/);
+    assert.match(out, /gbc-mute/);
+    // unmute → 환기줄 사라짐(hint는 유지)
+    setStopHintMuted(proj, false);
+    const out2 = ssOut();
+    assert.match(out2, /이전 작업 잔여/);
+    assert.doesNotMatch(out2, /음소거 중/);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("gbc status: Stop 리마인드 음소거 상태를 표기", () => {
+  const proj = tmp();
+  const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  const env = { ...process.env, GBC_NO_UPDATE_NOTICE: "1" };
+  const status = () =>
+    execFileSync(process.execPath, [cli, "status"], { cwd: proj, env, encoding: "utf8" });
+  try {
+    assert.match(status(), /Stop 리마인드: 🔔 켜짐/);
+    setStopHintMuted(proj, true);
+    assert.match(status(), /Stop 리마인드: 🔕 음소거/);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("gbc init --yes: gate + gbc-mute 스킬 둘 다 설치", () => {
+  const proj = tmp();
+  const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  const env = { ...process.env, GBC_NO_UPDATE_NOTICE: "1" };
+  try {
+    execFileSync(process.execPath, [cli, "init", "--yes"], { cwd: proj, env, encoding: "utf8" });
+    assert.ok(
+      readFileSync(join(proj, ".claude", "skills", "gate", "SKILL.md"), "utf8").length > 0,
+      "gate 스킬 설치",
+    );
+    assert.ok(
+      readFileSync(join(proj, ".claude", "skills", "gbc-mute", "SKILL.md"), "utf8").includes(
+        "gbc-mute",
+      ),
+      "gbc-mute 스킬 설치",
+    );
   } finally {
     rmSync(proj, { recursive: true, force: true });
   }
