@@ -23,7 +23,9 @@ import {
   shouldCacheVerdict,
   buildSessionStartHint,
   buildStopReminder,
+  buildCrossRepoHint,
 } from "../dist/hook.js";
+import { loadRepos, addRepo, removeRepo } from "../dist/repos.js";
 import {
   buildPreCommand,
   normalizeHooks,
@@ -1148,5 +1150,89 @@ test("gate-state: markGated/isGated/reset 작업단위 1회 캐시", () => {
     assert.ok(loadState(dir));
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildCrossRepoHint: 타 repo 미해결 카운트만, 현재 cwd·빈 repo·부재경로 제외 (0.2.9)", () => {
+  const here = tmp();
+  const other1 = tmp();
+  const other2 = tmp();
+  const clean = tmp();
+  try {
+    // other1: open 2 + in_progress 1
+    addDefer(other1, "A");
+    addDefer(other1, "B");
+    addDefer(other1, "C");
+    startDefer(other1, "C");
+    // other2: open 1
+    addDefer(other2, "X");
+    // here(현재 cwd): 미해결 있어도 제외
+    addDefer(here, "HERE");
+    // clean: 미해결 0 → 제외
+
+    assert.equal(buildCrossRepoHint([], here), "");
+
+    const hint = buildCrossRepoHint(
+      [here, other1, other2, clean, join(here, "no-such-path")],
+      here,
+    );
+    assert.ok(hint.startsWith("🌐 타 repo 미해결:"));
+    // 현재 cwd 제외
+    assert.ok(!hint.includes("HERE"));
+    // clean(미해결 0) 제외
+    assert.ok(!hint.includes(clean.split(/[\\/]/).pop()));
+    // other1: 진행중1·미착수2 (카운트만)
+    assert.ok(hint.includes(`${other1.split(/[\\/]/).pop()} 진행중1·미착수2`));
+    // other2: 미착수1 (진행중 토큰 없음)
+    assert.ok(hint.includes(`${other2.split(/[\\/]/).pop()} 미착수1`));
+    // 번호 리스트 미포함(카운트만) — "1." 같은 인덱스 마커 없음
+    assert.ok(!/\b\d+\.\s/.test(hint));
+  } finally {
+    for (const d of [here, other1, other2, clean]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("buildCrossRepoHint: 모든 repo 미해결 0이면 빈 문자열 (0.2.9)", () => {
+  const a = tmp();
+  const b = tmp();
+  const here = tmp();
+  try {
+    addDefer(a, "done");
+    resolveDefer(a, "done");
+    assert.equal(buildCrossRepoHint([a, b], here), "");
+  } finally {
+    for (const d of [a, b, here]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("repos registry: add(멱등)/load/remove, ~/.gbc/repos.json (0.2.9)", () => {
+  const fakeHome = tmp();
+  const realHome = process.env.HOME;
+  const realProfile = process.env.USERPROFILE;
+  process.env.HOME = fakeHome;
+  process.env.USERPROFILE = fakeHome; // win32 homedir()
+  const r1 = tmp();
+  const r2 = tmp();
+  try {
+    assert.deepEqual(loadRepos(), []);
+    addRepo(r1);
+    addRepo(r2);
+    addRepo(r1); // 멱등 — 중복 안 됨
+    const after = loadRepos();
+    assert.equal(after.length, 2);
+    assert.ok(after.includes(resolve(r1)));
+    assert.ok(after.includes(resolve(r2)));
+    // remove
+    const left = removeRepo(r1);
+    assert.equal(left.length, 1);
+    assert.ok(!left.includes(resolve(r1)));
+    // 미등록 경로 remove → 변화 없음
+    assert.equal(removeRepo(join(fakeHome, "nope")).length, 1);
+  } finally {
+    if (realHome === undefined) delete process.env.HOME;
+    else process.env.HOME = realHome;
+    if (realProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = realProfile;
+    for (const d of [fakeHome, r1, r2]) rmSync(d, { recursive: true, force: true });
   }
 });

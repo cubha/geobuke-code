@@ -2,6 +2,17 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.2.9] - 2026-06-24
+
+### Added
+- **크로스-repo defer 가시성** — 세션 진입(SessionStart) 시 현재 repo의 미해결 defer 상세에 더해, **등록된 다른 repo들의 미해결 defer 요약**을 한 줄로 환기한다(`🌐 타 repo 미해결: dev-note 진행중1·미착수1 · fa-support 미착수1`). 여러 repo를 오가며 작업할 때, 다른 repo에 걸린 미완 작업을 그 repo를 열지 않고도 인지한다.
+- **`gbc repos add|remove|list`** — 크로스-repo 레지스트리 관리. 글로벌 `~/.gbc/repos.json`에 감시 대상 repo를 등록한다(`add` 경로 생략 시 현재 폴더). `list`는 각 repo의 미해결 defer 수·gbc 설치 여부를 표시.
+
+### Notes
+- 크로스-repo 요약은 **카운트만** 표시한다 — 번호 매긴 상세 리스트는 현재 repo에만(번호가 `gbc defer <N>` 인덱스 ref와 cwd 기준으로 묶이므로, 타 repo에 번호를 주면 ref가 깨진다).
+- **SessionStart에서만** 환기한다(매 대화 종료 Stop 리마인드엔 미첨부 — 노이즈 방지). 현재 repo·미해결 0건 repo는 요약에서 제외. 끄려면 `GBC_NO_CROSS_REPO=1`(또는 세션 힌트 전체 `GBC_NO_SESSION_HINT=1`). 등록 경로 부재·읽기 실패는 repo별 조용히 무시(fail-silent).
+- 새 hook이 아니라 기존 SessionStart hook의 출력 확장이므로 **재init 불필요**(설치된 프로젝트는 CLI 갱신만으로 반영). 감시하려면 `gbc repos add`로 레지스트리만 시드.
+
 ## [0.2.8] - 2026-06-23
 
 ### Fixed
