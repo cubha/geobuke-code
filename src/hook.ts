@@ -6,10 +6,11 @@ import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated, markGated } from "./state.js";
 import { activeDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
 import { isStopHintMuted } from "./config.js";
+import { loadRepos } from "./repos.js";
 import { readProjectSettings, buildUpdateNotice, wasNotified, markNotified } from "./notice.js";
 import { isCacheStale, readVersionCache, refreshVersionCache } from "./version.js";
-import { appendFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, lstatSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { gbcDir } from "./store.js";
 import { logEvent } from "./metrics.js";
 import type { EditToolInput, Verdict, DeferEntry } from "./types.js";
@@ -333,6 +334,40 @@ export function buildSessionStartHint(all: DeferEntry[]): string {
 }
 
 /**
+ * 등록된 타 repo들의 미해결 defer 요약 한 줄(0.2.9 크로스-repo 가시성). 없으면 "".
+ * - 현재 cwd 제외(이미 buildSessionStartHint가 상세 표시), 미해결 0건 repo 제외.
+ * - 경로 부재/비-디렉터리/읽기실패는 repo별 조용히 skip(fail-silent). hook이 cwd 밖을 읽는
+ *   유일한 지점이라 방어적으로 가드한다(사용자가 명시 등록한 경로만 대상이라 위협은 낮음).
+ * - ★ 카운트만. 번호 매긴 상세 리스트는 현재 repo만(formatDeferList) — 번호는 'gbc defer <N>'
+ *   인덱스 ref와 cwd 기준으로 묶여, 타 repo에 번호를 주면 어느 repo의 N인지 ref가 깨진다.
+ */
+export function buildCrossRepoHint(repos: string[], cwd: string): string {
+  const here = resolve(cwd);
+  const segs: string[] = [];
+  for (const repo of repos) {
+    const abs = resolve(repo);
+    if (abs === here) continue;
+    let unresolved: DeferEntry[];
+    try {
+      // lstatSync(statSync 아님)로 심볼릭 링크를 거부한다 — 등록된 symlink가 가리키는 cwd 밖
+      // 임의 경로(/etc 등)의 .gbc/defers.json을 읽으려 시도하는 간접 확장을 막는다(보안검토 S3).
+      // 실디렉터리만 isDirectory()=true; symlink면 false라 skip된다.
+      if (!existsSync(abs) || !lstatSync(abs).isDirectory()) continue;
+      unresolved = loadDefers(abs).filter((d) => d.status !== "resolved");
+    } catch {
+      continue;
+    }
+    if (unresolved.length === 0) continue;
+    const ip = unresolved.filter((d) => d.status === "in_progress").length;
+    const op = unresolved.length - ip;
+    const counts = [ip ? `진행중${ip}` : "", op ? `미착수${op}` : ""].filter(Boolean).join("·");
+    const name = abs.split(/[\\/]/).filter(Boolean).pop() ?? abs;
+    segs.push(`${name} ${counts}`);
+  }
+  return segs.length ? `🌐 타 repo 미해결: ${segs.join(" · ")}` : "";
+}
+
+/**
  * Stop hook 리마인드 문자열. 없으면 "". 입력은 전체 defer 리스트(번호=전체-인덱스, 인덱스 ref 정합).
  * SessionStart와 동일하게 in_progress를 차등 표면화한다 — "착수했지만 미종결" 항목이 레이더에서
  * 사라지지 않게(resolve가 리마인드에서 항목을 떨구는 harm 완화).
@@ -372,6 +407,16 @@ export async function runSessionStart(ctx?: HookContext): Promise<void> {
       if (isStopHintMuted(cwd)) {
         parts.push("🔕 Stop 리마인드 음소거 중 — 매 대화 종료 알림은 꺼져 있습니다 (해제: /gbc-mute).");
       }
+    }
+  }
+  // 크로스-repo defer 가시성(0.2.9) — 등록된 타 repo 미해결 요약. SessionStart만(Stop엔 미첨부).
+  // opt-out 둘: GBC_NO_SESSION_HINT(세션힌트 전체) 또는 GBC_NO_CROSS_REPO(이 줄만).
+  if (process.env.GBC_NO_SESSION_HINT !== "1" && process.env.GBC_NO_CROSS_REPO !== "1") {
+    try {
+      const xr = buildCrossRepoHint(loadRepos(), cwd);
+      if (xr) parts.push(xr);
+    } catch {
+      /* 레지스트리 읽기 실패는 무시(fail-silent) */
     }
   }
   // ①신버전 안내 — 캐시가 stale이면 '표시 전에' 먼저 갱신(1.5s 상한, fail-silent)해 이번 세션에

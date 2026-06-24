@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // gbc — 거북이코드 CLI. zero-dep 인자 파싱(핫패스 보호).
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import {
@@ -16,6 +16,7 @@ import { runPreToolUse, runStop, runSessionStart } from "./hook.js";
 import { loadPlanSpec, computeSpecHash, addSpecCase, readSpecCases, clearSpec } from "./spec.js";
 import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer, startDefer, reopenDefer } from "./defer.js";
+import { loadRepos, addRepo, removeRepo } from "./repos.js";
 import { isStopHintMuted, setStopHintMuted } from "./config.js";
 import { selectedTransport } from "./judge.js";
 import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER } from "./install.js";
@@ -405,6 +406,45 @@ function cmdUpdate(args: string[]): void {
   console.log("✅ gbc update 완료.");
 }
 
+/**
+ * 크로스-repo 레지스트리 관리(0.2.9). 등록된 타 repo의 미해결 defer가 SessionStart에 환기된다.
+ * 글로벌 ~/.gbc/repos.json. 경로 생략 시 현재 폴더(cwd).
+ */
+function cmdRepos(args: string[]): void {
+  const [sub, ...rest] = args;
+  if (sub === "add") {
+    const abs = resolve(rest[0] ?? process.cwd());
+    const repos = addRepo(abs);
+    const gated = existsSync(join(abs, ".gbc"));
+    console.log(
+      `📁 등록: ${abs}${gated ? "" : "  ⚠️ (.gbc 없음 — gbc init 전이면 표면화될 defer 없음)"}`,
+    );
+    console.log(`   현재 ${repos.length}개 등록됨.`);
+  } else if (sub === "remove" || sub === "rm") {
+    const abs = resolve(rest[0] ?? process.cwd());
+    const before = loadRepos().length;
+    const repos = removeRepo(abs);
+    console.log(repos.length < before ? `🗑️  해제: ${abs}` : `(미등록 경로: ${abs})`);
+    console.log(`   현재 ${repos.length}개 등록됨.`);
+  } else if (sub === "list" || sub === undefined) {
+    const repos = loadRepos();
+    if (repos.length === 0) {
+      console.log("등록된 repo 없음. 'gbc repos add [경로]'로 추가(경로 생략 시 현재 폴더).");
+      return;
+    }
+    console.log(`📁 등록된 repo ${repos.length}개:`);
+    for (const r of repos) {
+      const exists = existsSync(r);
+      const gated = exists && existsSync(join(r, ".gbc"));
+      const unresolved = gated ? loadDefers(r).filter((d) => d.status !== "resolved").length : 0;
+      const mark = !exists ? "✗부재" : !gated ? "·gbc없음" : unresolved ? `●미해결${unresolved}` : "○깨끗";
+      console.log(`  [${mark}] ${r}`);
+    }
+  } else {
+    console.log("사용법: gbc repos [add|remove|list] [경로]");
+  }
+}
+
 function usage(): void {
   console.log(`🐢 gbc — 거북이코드 구현-전 게이트
 
@@ -424,6 +464,9 @@ function usage(): void {
   gbc spec clear                      명세 비우기(작업단위 종료)
   gbc gate reset                      작업단위 게이트 리셋
   gbc metrics [--json]                계측 리포트(M1~M3, B-모드 관측 프록시)
+  gbc repos add [경로]                크로스-repo 레지스트리에 추가(생략 시 현재 폴더)
+  gbc repos list                      등록된 repo + 미해결 defer 수
+  gbc repos remove [경로]             레지스트리에서 제거
   gbc hook pre-tool-use               (내부) PreToolUse hook
   gbc hook stop                       (내부) Stop hook
   gbc hook session-start              (내부) SessionStart hook (미해결 defer 알림)
@@ -455,6 +498,8 @@ async function main(): Promise<void> {
       return cmdGate(rest);
     case "metrics":
       return cmdMetrics(rest);
+    case "repos":
+      return cmdRepos(rest);
     case undefined:
     case "help":
     case "--help":
