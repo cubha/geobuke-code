@@ -2,6 +2,20 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.3.0] - 2026-06-24
+
+### Fixed
+- **업데이트 안내 가시성 갭 — 통과된 작업단위에서도 배너 노출** — 평상 작업은 대부분 "이미 게이트 통과한 작업단위"(cached-skip)라, 그 경로가 `maybeUpdateNotice`를 호출하지 않고 즉시 통과하던 탓에 **보이는 배너(PreToolUse `systemMessage`)가 거의 안 떴다**(SessionStart 안내는 모델 컨텍스트로만 주입돼 사용자 화면 배너가 아님). cached-skip 경로에도 업데이트 안내를 emit하도록 수정 → **매 세션 첫 편집에 배너 1회**(세션당 dedup). `permissionDecision` 없이 `systemMessage` 단독이라 통과 동작은 불변, 네트워크 없음(캐시만 읽음). 이제 신버전·재init 안내를 보려고 `gbc gate reset`을 칠 필요가 없다.
+
+### Added
+- **캐시 자동 refresh (judge 경로 piggyback)** — 사용자가 `gbc status`를 직접 치지 않아도 신버전 캐시가 최신이 되게, PreToolUse가 judge를 도는 편집(cache-miss)에서 버전 캐시가 stale이면 `refreshVersionCache()`를 **judge와 병렬로** 시작한다. judge가 네트워크·≥1.5s라 refresh는 그 안에 끝나 **편집 지연 0**이고, 같은 편집의 안내가 갱신된 캐시를 즉시 반영한다. 갱신은 24h TTL당 1회. `shouldRefreshCache` 순수 술어 신설(`GBC_NO_UPDATE_NOTICE=1`이면 비활성).
+
+### Notes
+- **핫패스(cached-skip)에는 네트워크를 절대 넣지 않는다** — refresh는 judge가 도는 비-핫패스에서만 병렬로 건다(0.2.7 "hook 핫패스 동기 네트워크 금지" 원칙 보존).
+- **검토 후 제외한 self-heal**: PreToolUse가 SessionStart hook 누락 시 `.claude/settings.json`을 자동 보정하는 안은, CC 공식 문서가 "Hooks cannot modify persistent configuration files"로 명시한 설계 원칙에 어긋나 채택하지 않았다. 대신 cached-skip 배너에 실리는 init-staleness 안내가 `gbc update`(CLI 갱신 + `gbc init --yes`로 SessionStart hook 복구)를 안정적으로 유도한다.
+- **소급 적용 아님**: 이 동작은 0.3.0 이상 머신에서만 효과. 구버전(SessionStart hook 미등록 코호트)은 1회 `gbc update`로 최신화해야 자동 refresh 채널이 복구된다.
+- 새 hook 명령이 아니라 기존 PreToolUse hook의 동작 확장이므로 **재init 불필요**(설치된 프로젝트는 CLI 갱신만으로 반영).
+
 ## [0.2.9] - 2026-06-24
 
 ### Added

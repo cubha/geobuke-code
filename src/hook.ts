@@ -8,7 +8,12 @@ import { activeDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
 import { isStopHintMuted } from "./config.js";
 import { loadRepos } from "./repos.js";
 import { readProjectSettings, buildUpdateNotice, wasNotified, markNotified } from "./notice.js";
-import { isCacheStale, readVersionCache, refreshVersionCache } from "./version.js";
+import {
+  isCacheStale,
+  readVersionCache,
+  refreshVersionCache,
+  shouldRefreshCache,
+} from "./version.js";
 import { appendFileSync, existsSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { gbcDir } from "./store.js";
@@ -174,6 +179,12 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
       tool: toolName,
       decision: "cached",
     });
+    // 업데이트 안내(있으면)를 cached-skip에서도 노출 — 평상 작업은 대부분 통과된 작업단위라
+    // 이 경로가 가장 흔하다. 여기서 빠지면 보이는 배너(PreToolUse systemMessage)가 거의 안 떴음
+    // (0.2.x 가시성 갭). maybeUpdateNotice는 세션당 1회 dedup이라 노이즈 없음(매 세션 첫 편집 1회).
+    // permissionDecision 없음 → cached-pass 통과 동작 불변. 네트워크 없음(캐시만 읽음).
+    const cachedNotice = maybeUpdateNotice(cwd, session, ctx);
+    if (cachedNotice) emit({ systemMessage: cachedNotice });
     process.exit(0);
   }
 
@@ -181,7 +192,13 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   const { judge } = await import("./judge.js");
   const editText = normalizeEdit(toolName, input.tool_input ?? {});
   const defers = activeDeferItems(cwd);
+  // ①신버전 캐시 자동 refresh(0.3.0) — 사용자가 'gbc status'를 안 쳐도 캐시가 최신이 되게.
+  // judge(네트워크·≥1.5s)와 *병렬*로만 건다 → 핫패스 지연 0. cache-miss(여기 = judge 도는
+  // 비-핫패스)에서만 stale일 때. cached-skip 핫패스엔 절대 네트워크 안 넣는다(0.2.7 원칙 보존).
+  // refreshVersionCache는 내부 fail-silent(reject 불가)라 judge 경로를 깨지 않는다.
+  const refreshP = shouldRefreshCache(Boolean(ctx?.cliPath)) ? refreshVersionCache() : null;
   const verdict = await judge(specText, editText, defers);
+  if (refreshP) await refreshP; // judge 동안 이미 완료 — 이 편집의 notice가 갱신된 캐시를 읽도록
 
   if (verdict.verdict === "pass") {
     // fail-open(판정 실패) 먼저 분기 — 빈-spec 정상 pass가 fail-open으로 오분류되지 않게.

@@ -76,6 +76,17 @@ export function buildVersionNotice(current: string, cache: VersionCache | null):
 }
 
 /**
+ * 캐시 자동 refresh를 해야 하는지(순수 술어). cliPath 없으면(직접 hook 호출) X, 안내 opt-out X,
+ * 캐시가 stale일 때만 true. PreToolUse cache-miss(judge 경로)에서 judge와 병렬 refresh를 거는
+ * 게이트 — 핫패스(cached-skip)는 절대 호출 안 함. env·파일 의존이라 테스트는 home/now 주입.
+ */
+export function shouldRefreshCache(hasCliPath: boolean, home?: string, now: number = Date.now()): boolean {
+  if (!hasCliPath) return false;
+  if (process.env.GBC_NO_UPDATE_NOTICE === "1") return false;
+  return isCacheStale(readVersionCache(home), now);
+}
+
+/**
  * npm 레지스트리에서 최신 버전을 받아 캐시에 쓴다(짧은 타임아웃, 비차단·fail-silent).
  * spawn(npm) 대신 fetch — Windows .cmd 실행 문제를 피한다. 실패·타임아웃은 조용히 무시.
  */

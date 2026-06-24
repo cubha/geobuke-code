@@ -47,6 +47,7 @@ import {
   isCacheStale,
   readVersionCache,
   writeVersionCache,
+  shouldRefreshCache,
 } from "../dist/version.js";
 import { serializeEvent, parseEvents, computeMetrics, logEvent } from "../dist/metrics.js";
 import { resolveApiKey, safeModel } from "../dist/judge.js";
@@ -454,6 +455,43 @@ test("gbc status: Stop 리마인드 음소거 상태를 표기", () => {
   }
 });
 
+test("cached-skip(0.3.0): 통과된 작업단위 편집에도 업데이트 배너 emit + 세션당 dedup", () => {
+  const proj = tmp();
+  const home = tmp();
+  const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  try {
+    // 비어있지 않은 명세 + 그 해시를 gated로 시드 → cached-skip 경로 강제(judge=SDK 미호출).
+    const specText = "로그인 빈 자격증명 거부";
+    const specFile = join(proj, "plan.md");
+    writeFileSync(specFile, specText);
+    markGated(proj, computeSpecHash(specText), "이미 통과");
+    // HOME에 신버전 캐시(신선) → version 안내 발화 조건(설치<9.9.9).
+    mkdirSync(join(home, ".gbc"), { recursive: true });
+    writeVersionCache({ latest: "9.9.9", checkedAt: Date.now() }, home);
+    const env = { ...process.env, HOME: home, USERPROFILE: home, GBC_SPEC_FILE: specFile };
+    delete env.GBC_NO_UPDATE_NOTICE;
+    const run = (session) =>
+      execFileSync(process.execPath, [cli, "hook", "pre-tool-use"], {
+        cwd: proj,
+        env,
+        input: JSON.stringify({
+          tool_name: "Edit",
+          cwd: proj,
+          session_id: session,
+          tool_input: { file_path: join(proj, "a.txt"), old_string: "x", new_string: "y" },
+        }),
+        encoding: "utf8",
+      });
+    // 통과된 단위(cached-skip)인데도 배너가 떠야 한다(0.2.x 가시성 갭 수정).
+    assert.match(run("sess-A"), /신버전 9\.9\.9/);
+    // 같은 세션 재실행 → dedup(세션당 1회) → 무음.
+    assert.doesNotMatch(run("sess-A"), /신버전 9\.9\.9/);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("gbc init --yes: gate + gbc-mute 스킬 둘 다 설치", () => {
   const proj = tmp();
   const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
@@ -844,6 +882,33 @@ test("isCacheStale: 캐시 없음 또는 24h 초과면 stale", () => {
   assert.equal(isCacheStale({ latest: "0.2.3", checkedAt: now }, now), false);
   assert.equal(isCacheStale({ latest: "0.2.3", checkedAt: now - 25 * 3600 * 1000 }, now), true);
   assert.equal(isCacheStale({ latest: "0.2.3", checkedAt: now - 1000 }, now), false);
+});
+
+test("shouldRefreshCache(0.3.0): cliPath 없으면·opt-out·신선캐시면 X, stale면 O", () => {
+  const now = 1_000_000_000_000;
+  const home = tmp();
+  const prev = process.env.GBC_NO_UPDATE_NOTICE;
+  try {
+    delete process.env.GBC_NO_UPDATE_NOTICE;
+    // cliPath 없으면 직접 hook 호출 등 → 항상 false (캐시 무관)
+    assert.equal(shouldRefreshCache(false, home, now), false);
+    // 캐시 없음 = stale → true
+    assert.equal(shouldRefreshCache(true, home, now), true);
+    // 신선 캐시(24h 이내) → false
+    mkdirSync(join(home, ".gbc"), { recursive: true });
+    writeVersionCache({ latest: "0.9.9", checkedAt: now - 1000 }, home);
+    assert.equal(shouldRefreshCache(true, home, now), false);
+    // 24h 초과 → 다시 stale → true
+    writeVersionCache({ latest: "0.9.9", checkedAt: now - 25 * 3600 * 1000 }, home);
+    assert.equal(shouldRefreshCache(true, home, now), true);
+    // opt-out이면 stale이어도 false
+    process.env.GBC_NO_UPDATE_NOTICE = "1";
+    assert.equal(shouldRefreshCache(true, home, now), false);
+  } finally {
+    if (prev === undefined) delete process.env.GBC_NO_UPDATE_NOTICE;
+    else process.env.GBC_NO_UPDATE_NOTICE = prev;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("version cache: write → read 라운드트립", () => {
