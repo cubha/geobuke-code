@@ -98,7 +98,7 @@ async function cmdInit(args: string[]): Promise<void> {
   const claudeDir = join(cwd, ".claude");
   const settingsPath = join(claudeDir, "settings.json");
   // 설치 대상 스킬들(제품소스 skills/<name>/SKILL.md → .claude/skills/<name>/SKILL.md).
-  const skillNames = ["gate", "gbc-mute"];
+  const skillNames = ["gate", "gbc-mute", "gbc-monitor"];
 
   if (!yes) {
     console.log(`🐢 gbc init — 다음을 수행합니다 (프로젝트 로컬만, 전역 ~/.claude 미변경):
@@ -719,7 +719,7 @@ function usage(): void {
   console.log(`🐢 gbc — 거북이코드 구현-전 게이트
 
 사용:
-  gbc init [--yes] [--no-register]    프로젝트에 hook + /gate · /gbc-mute 스킬 설치
+  gbc init [--yes] [--no-register]    프로젝트에 hook + /gate · /gbc-mute · /gbc-monitor 스킬 설치
                                       (--no-register: 크로스-repo 레지스트리 자동등록 생략)
   gbc update [--dry-run]              전역 최신 설치 + 현재 프로젝트 재init (한방 갱신)
   gbc status                          게이트 상태 + 로드된 명세 확인
