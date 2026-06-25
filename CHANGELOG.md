@@ -2,6 +2,17 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.4.1] - 2026-06-25
+
+게이트 운영 현황을 한 곳에서 조회·해석하는 읽기전용 관측 스킬을 추가한다. 0.4.0이 깐 운영층 명령들(`metrics --all`·`repos list`·`gate snapshot`)이 세션 안에서 발견가능성(discoverability)이 없어 매번 외워 치거나 요청해야 했던 갭을 메운다.
+
+### Added
+- **`/gbc-monitor` 스킬 — 운영 현황 관측** — `gbc status`·`gbc metrics --all`·`gbc repos list`·`gbc gate snapshot status`를 묶어 조회하고, 숫자가 정상/주의/행동필요 중 무엇인지 **해석**한다(예: `repos ✗부재`=게이트가 조용히 죽은 상태 → `gbc init` 재실행 안내, `M1 churn`=약신호 proxy라 결함 수로 과대해석 금지, 빈 spec 차단=버그 아닌 정상 동작). 단순 명령 별칭이 아니라 4개 묶음 + 판정이 가치다. `gbc init`이 `/gate`·`/gbc-mute`와 함께 설치한다.
+
+### Notes
+- **읽기전용 경계** — `/gbc-monitor`는 관측하고 액션을 *가리킨다*, 직접 실행하지 않는다. 판정 기준은 "그 명령이 상태를 바꾸거나(mutate) API를 쓰는가?" — 그렇다면 `/gate`의 영역(미루기·리셋·캡처 토글·`snapshot replay`). 이 분리 덕에 모니터링은 부작용 걱정 없이 언제든 안전하게 부를 수 있다.
+- **재init 필요** — 새 스킬이 추가됐다. 설치된 프로젝트는 `gbc update`(또는 `npm i -g geobuke-code@latest && gbc init --yes`)로 갱신한다.
+
 ## [0.4.0] - 2026-06-25
 
 도그푸딩으로 검증한 게이트 운영층 5기능을 한 번에 발행한다. 멀티에이전트 시너지 검토(install-safe·12후보→5생존)로 "현재 하네스와 충돌 없이 도그푸딩 가능 + 게이트와 상승효과"를 만족하는 기능만 선별했다. 전부 기존 `.gbc/`·`~/.gbc/` 네임스페이스에만 쓰고 공유 `.claude/settings.json`은 건드리지 않는다(install verdict=safe).
