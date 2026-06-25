@@ -27,12 +27,21 @@ import {
 } from "../dist/hook.js";
 import { loadRepos, addRepo, removeRepo } from "../dist/repos.js";
 import {
+  selectCases,
+  resolveRefs,
+  writePendingReview,
+  readPendingReview,
+  clearPendingReview,
+} from "../dist/review.js";
+import {
   buildPreCommand,
   normalizeHooks,
   buildSessionStartCommand,
   ensureSessionStartHook,
   hasStalePreToolUse,
   hasSessionStartHook,
+  hasPreToolUseGate,
+  assessRepoHealth,
   DEV_PLACEHOLDER,
 } from "../dist/install.js";
 import {
@@ -49,7 +58,8 @@ import {
   writeVersionCache,
   shouldRefreshCache,
 } from "../dist/version.js";
-import { serializeEvent, parseEvents, computeMetrics, logEvent } from "../dist/metrics.js";
+import { serializeEvent, parseEvents, computeMetrics, logEvent, tagEventsWithRepo } from "../dist/metrics.js";
+import { goldenCaseId, diffVerdict, upsertGolden, summarizeReplay } from "../dist/golden.js";
 import { resolveApiKey, safeModel } from "../dist/judge.js";
 import { normalizeCase, MAX_CASE } from "../dist/text.js";
 import { isStopHintMuted, setStopHintMuted } from "../dist/config.js";
@@ -694,6 +704,7 @@ test("buildBlockReason: 침묵 누락이면 defer 등록을 안내", () => {
   );
   assert.match(r, /gbc defer add/);
   assert.match(r, /중복 이메일/); // 누락 케이스 표시
+  assert.match(r, /gbc gate review/); // A1: 일괄 분류 체크리스트 경로 안내
 });
 
 test("buildPreCommand: 셸 무관 순수 명령 (키 prefix·셸 확장 없음)", () => {
@@ -832,6 +843,29 @@ test("DEV_PLACEHOLDER: CC가 치환하는 ${CLAUDE_PROJECT_DIR} 형식", () => {
   assert.equal(DEV_PLACEHOLDER, "${CLAUDE_PROJECT_DIR}/dist/cli.js");
   // buildPreCommand로 감싸면 셸 무관 순수 명령(절대경로와 동일 규약)
   assert.equal(buildPreCommand(DEV_PLACEHOLDER), 'node "${CLAUDE_PROJECT_DIR}/dist/cli.js" hook pre-tool-use');
+});
+
+// ---------- B1: 크로스-repo 게이트 건강성(cliPath 무관 술어) ----------
+test("hasPreToolUseGate: 게이트 hook 존재 여부만(cliPath 무관, stale도 true)", () => {
+  assert.equal(hasPreToolUseGate(pureSettings()), true);
+  // stale(옛 bash prefix)도 'hook pre-tool-use'는 들어있으므로 게이트 존재 = true
+  assert.equal(hasPreToolUseGate(staleSettings()), true);
+  // PreToolUse 자체가 없으면 게이트 죽음 = false
+  assert.equal(hasPreToolUseGate({ hooks: { SessionStart: pureSettings().hooks.SessionStart } }), false);
+  assert.equal(hasPreToolUseGate({}), false);
+});
+
+test("assessRepoHealth: gateDead/missingSession 플래그(isGbcProject 게이트)", () => {
+  // 정상 gbc 프로젝트 — 둘 다 건강
+  assert.deepEqual(assessRepoHealth(pureSettings(), true), { gateDead: false, missingSession: false });
+  // SessionStart만 누락(0.2.1↓ 코호트)
+  const onlyMissingSession = { hooks: { PreToolUse: pureSettings().hooks.PreToolUse } };
+  assert.deepEqual(assessRepoHealth(onlyMissingSession, true), { gateDead: false, missingSession: true });
+  // 게이트 hook 자체 부재(게이트 조용히 죽음) + SessionStart도 없음
+  assert.deepEqual(assessRepoHealth({}, true), { gateDead: true, missingSession: true });
+  // .gbc 없음(게이트 대상 아님) → 둘 다 false, 설정과 무관
+  assert.deepEqual(assessRepoHealth({}, false), { gateDead: false, missingSession: false });
+  assert.deepEqual(assessRepoHealth(staleSettings(), false), { gateDead: false, missingSession: false });
 });
 
 test("notice dedup: 세션당 1회 (markNotified 후 같은 세션은 wasNotified=true)", () => {
@@ -1104,6 +1138,30 @@ test("computeMetrics M1: 빈 specHash('')는 churn에서 제외(교차세션 합
   assert.equal(computeMetrics(evs2).m1.churnAfterPass, 1);
 });
 
+// ---------- B2: 크로스-repo 태깅(--all 집계 해시충돌 차단) ----------
+test("tagEventsWithRepo: 비어있지 않은 specHash만 repo 태깅, 빈 센티넬 보존", () => {
+  const evs = [
+    { at: "t1", session: "s", specHash: "X", kind: "gate", decision: "pass" },
+    { at: "t2", session: "", specHash: "", kind: "spec-add" }, // 빈 센티넬
+  ];
+  const tagged = tagEventsWithRepo(evs, "/repo/A");
+  assert.equal(tagged[0].specHash, "/repo/A::X");
+  assert.equal(tagged[1].specHash, ""); // 센티넬 보존(교차세션 제외 가드 유지)
+  // 원본 불변(map 복사)
+  assert.equal(evs[0].specHash, "X");
+});
+
+test("tagEventsWithRepo: 크로스-repo 동일 specHash 충돌로 인한 churn 교차오염 차단", () => {
+  // repo A: specHash X에서 pass(t1). repo B: 같은 boilerplate specHash X에서 spec-add(t2>t1).
+  const a = [{ at: "t1", session: "sa", specHash: "X", kind: "gate", decision: "pass" }];
+  const b = [{ at: "t2", session: "sb", specHash: "X", kind: "spec-add" }];
+  // 태깅 없이 순진 병합 → firstPass[X]=t1, B의 spec-add@t2가 통과후 churn으로 오집계(오염 입증)
+  assert.equal(computeMetrics([...a, ...b]).m1.churnAfterPass, 1);
+  // 태깅 후 → A::X엔 pass, B::X엔 pass 없음 → churn 0(오염 제거)
+  const tagged = [...tagEventsWithRepo(a, "A"), ...tagEventsWithRepo(b, "B")];
+  assert.equal(computeMetrics(tagged).m1.churnAfterPass, 0);
+});
+
 test("computeMetrics: 빈 입력 안전(0, 0으로 나눔 없음)", () => {
   const m = computeMetrics([]);
   assert.equal(m.totalEvents, 0);
@@ -1300,4 +1358,119 @@ test("repos registry: add(멱등)/load/remove, ~/.gbc/repos.json (0.2.9)", () =>
     else process.env.USERPROFILE = realProfile;
     for (const d of [fakeHome, r1, r2]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+// ── A1: 펜딩-검토 모델 (review.ts) ──
+const M = ["중복 이메일", "비밀번호 길이", "이메일 형식"];
+
+test("selectCases: all → 전부 복제", () => {
+  const r = selectCases(M, "all");
+  assert.deepEqual(r, M);
+  assert.notEqual(r, M); // 복제본(원본 보호)
+});
+
+test("selectCases: 단일/복수 정수 인덱스(1-base), 범위밖·중복 무시", () => {
+  assert.deepEqual(selectCases(M, "1"), ["중복 이메일"]);
+  assert.deepEqual(selectCases(M, "1 3"), ["중복 이메일", "이메일 형식"]);
+  assert.deepEqual(selectCases(M, "3 1 3"), ["이메일 형식", "중복 이메일"]); // 중복 1회만, 순서 보존
+  assert.deepEqual(selectCases(M, "9"), []); // 범위 밖
+});
+
+test("selectCases: 텍스트 부분매칭 1건 / 빈 ref → []", () => {
+  assert.deepEqual(selectCases(M, "비밀번호"), ["비밀번호 길이"]);
+  assert.deepEqual(selectCases(M, ""), []);
+  assert.deepEqual(selectCases(M, "   "), []);
+  assert.deepEqual(selectCases(M, "없는케이스"), []);
+});
+
+test("resolveRefs: spec/defer 분류 + spec 우선 dedup", () => {
+  // 1,3 → spec / 2 → defer (서로소)
+  assert.deepEqual(resolveRefs(M, "1 3", "2"), {
+    toSpec: ["중복 이메일", "이메일 형식"],
+    toDefer: ["비밀번호 길이"],
+  });
+  // 겹치면 spec 우선 — 1이 양쪽에 걸려도 toDefer에서 제외
+  assert.deepEqual(resolveRefs(M, "1", "1 2"), {
+    toSpec: ["중복 이메일"],
+    toDefer: ["비밀번호 길이"],
+  });
+  // 한쪽만
+  assert.deepEqual(resolveRefs(M, "all", ""), { toSpec: M, toDefer: [] });
+  assert.deepEqual(resolveRefs(M, "", "all"), { toSpec: [], toDefer: M });
+});
+
+test("pending-review: write→read 라운드트립 + clear(멱등)", () => {
+  const cwd = tmp();
+  try {
+    assert.equal(readPendingReview(cwd), null); // 부재
+    const rec = { missing: M, reason: "침묵 누락", source: ".gbc/spec.md", at: "2026-06-25T00:00:00Z" };
+    writePendingReview(cwd, rec);
+    assert.deepEqual(readPendingReview(cwd), rec);
+    clearPendingReview(cwd);
+    assert.equal(readPendingReview(cwd), null);
+    clearPendingReview(cwd); // 부재에도 무동작(idempotent) — throw 없어야
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// ---------- A2: 골든셋 드리프트 회귀락(순수 코어) ----------
+test("goldenCaseId: 같은 입력=같은 id, 다른 입력=다른 id, 필드경계 모호성 차단", () => {
+  const a = goldenCaseId("Edit", "bc", "spec");
+  assert.equal(a, goldenCaseId("Edit", "bc", "spec")); // 결정론
+  assert.notEqual(a, goldenCaseId("Edit", "bd", "spec")); // edit 다름
+  assert.notEqual(a, goldenCaseId("Write", "bc", "spec")); // tool 다름
+  assert.notEqual(a, goldenCaseId("Edit", "bc", "spec2")); // spec 다름
+  // ("a","bc") vs ("ab","c") 필드 경계 충돌 방지
+  assert.notEqual(goldenCaseId("a", "bc", "s"), goldenCaseId("ab", "c", "s"));
+  assert.ok(a.length > 0);
+});
+
+test("diffVerdict: decisionFlip=하드, missingChanged=정보용, match", () => {
+  const exp = { verdict: "block", missing: ["X", "Y"], reason: "r" };
+  // 완전 일치
+  assert.deepEqual(diffVerdict(exp, { verdict: "block", missing: ["Y", "X"] }), {
+    decisionFlip: false,
+    missingChanged: false,
+    match: true,
+  });
+  // 판정 뒤집힘(하드)
+  const flip = diffVerdict(exp, { verdict: "pass", missing: [] });
+  assert.equal(flip.decisionFlip, true);
+  assert.equal(flip.match, false);
+  // missing만 변함(정보용) — decisionFlip=false라 회귀락은 통과
+  const mc = diffVerdict(exp, { verdict: "block", missing: ["X"] });
+  assert.equal(mc.decisionFlip, false);
+  assert.equal(mc.missingChanged, true);
+  assert.equal(mc.match, false);
+  // 중복은 집합 비교라 무시
+  assert.equal(diffVerdict(exp, { verdict: "block", missing: ["X", "Y", "Y"] }).missingChanged, false);
+});
+
+test("upsertGolden: 같은 id 교체(최신 expected), 다른 id 추가", () => {
+  const base = [{ id: "1", expected: { verdict: "pass" } }, { id: "2", expected: { verdict: "block" } }];
+  // 교체
+  const u = upsertGolden(base, { id: "1", expected: { verdict: "block" } });
+  assert.equal(u.length, 2);
+  assert.equal(u.find((c) => c.id === "1").expected.verdict, "block");
+  // 추가
+  const a = upsertGolden(base, { id: "3", expected: { verdict: "pass" } });
+  assert.equal(a.length, 3);
+  // 원본 불변
+  assert.equal(base.length, 2);
+});
+
+test("summarizeReplay: 플립/정보용변화/일치 집계 + 플립 목록", () => {
+  const outcomes = [
+    { id: "1", tool: "Edit", expected: "block", actual: "block", diff: { decisionFlip: false, missingChanged: false, match: true } },
+    { id: "2", tool: "Edit", expected: "block", actual: "pass", diff: { decisionFlip: true, missingChanged: true, match: false } },
+    { id: "3", tool: "Write", expected: "block", actual: "block", diff: { decisionFlip: false, missingChanged: true, match: false } },
+  ];
+  const s = summarizeReplay(outcomes);
+  assert.equal(s.total, 3);
+  assert.equal(s.matched, 1);
+  assert.equal(s.flips, 1);
+  assert.equal(s.missingOnly, 1);
+  assert.equal(s.flipped.length, 1);
+  assert.equal(s.flipped[0].id, "2");
 });

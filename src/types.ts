@@ -52,6 +52,50 @@ export interface RawDeferEntry {
   resolved?: boolean;
 }
 
+/**
+ * 펜딩-검토 레코드 (.gbc/pending-review.json) — 게이트 block이 도출한 침묵-누락 케이스를
+ * 사람-승인 체크리스트로 회수하기 위해 기록. `gbc gate review`가 읽어 번호 체크리스트로 제시.
+ */
+export interface PendingReview {
+  /** block으로 도출된 누락 케이스들(체크리스트 항목, 1-base 번호로 표시) */
+  missing: string[];
+  /** block 사유 한 줄(판정 reason) */
+  reason: string;
+  /** 명세 소스(.gbc/spec.md 등) */
+  source: string;
+  /** 기록 시각 (ISO) */
+  at: string;
+}
+
+/** 골든셋 케이스의 기대 판정(캡처 시점 judge 출력) */
+export interface GoldenExpected {
+  verdict: VerdictKind;
+  missing: string[];
+  reason: string;
+}
+
+/**
+ * 골든셋 케이스 (.gbc/golden.json) — 게이트 판정 드리프트 회귀락(A2)의 단위.
+ * ⚠️ edit는 정규화된 *편집 본문*이다 — events.jsonl이 privacy 불변식으로 절대 저장 안 하는 내용을
+ *    여기엔 opt-in으로 로컬 저장한다(.gbc/는 gitignore). 커밋=본문 노출이라 로컬 pre-flight 전용.
+ */
+export interface GoldenCase {
+  /** tool+edit+spec 안정 해시(upsert 디둑 키) */
+  id: string;
+  /** 캡처 시각 (ISO) */
+  at: string;
+  /** Edit/Write/MultiEdit */
+  tool: string;
+  /** 정규화된 편집 본문(judge 재실행 입력) */
+  edit: string;
+  /** 캡처 시점 명세 스냅샷 */
+  spec: string;
+  /** 캡처 시점 활성 defer 스냅샷 */
+  defers: string[];
+  /** 캡처 시점 judge 출력(드리프트 비교 기준) */
+  expected: GoldenExpected;
+}
+
 /** 작업단위 게이트 상태 (.gbc/state.json) */
 export interface GateState {
   /** 현재 작업단위를 식별하는 계획 명세 해시 */

@@ -5,8 +5,10 @@ import { isGatedTool, normalizeEdit } from "./normalize.js";
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated, markGated } from "./state.js";
 import { activeDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
-import { isStopHintMuted } from "./config.js";
+import { isStopHintMuted, isGoldenCapture } from "./config.js";
 import { loadRepos } from "./repos.js";
+import { writePendingReview } from "./review.js";
+import { addGoldenCase, goldenCaseId } from "./golden.js";
 import { readProjectSettings, buildUpdateNotice, wasNotified, markNotified } from "./notice.js";
 import {
   isCacheStale,
@@ -37,10 +39,12 @@ export function buildBlockReason(verdict: Verdict, specEmpty: boolean, source: s
   }
   const missingLine =
     verdict.missing.length > 0 ? `\n누락(침묵): ${verdict.missing.join(", ")}` : "";
+  // 누락 케이스는 .gbc/pending-review.json에 기록돼 있어 'gbc gate review'로 번호 체크리스트
+  // 일괄 분류(승인→spec / 미룸→defer)가 가능하다. 개별 처리(직접 구현·gbc defer add)도 유효.
   return (
     `🐢 거북이 게이트 — ${verdict.reason}${missingLine}\n` +
-    `→ 지금 이 변경에서 다루거나, 의도적으로 미룰 거면 'gbc defer add "<케이스>"'로 명시 등록 후 진행하세요.` +
-    ` (명세 소스: ${source})`
+    `→ 누락 케이스를 'gbc gate review'로 한 번에 분류(승인→spec / 미룸→defer)하거나, 지금 이 변경에서 직접 다루세요.` +
+    ` 개별로 미룰 거면 'gbc defer add "<케이스>"'. (명세 소스: ${source})`
   );
 }
 
@@ -200,6 +204,25 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   const verdict = await judge(specText, editText, defers);
   if (refreshP) await refreshP; // judge 동안 이미 완료 — 이 편집의 notice가 갱신된 캐시를 읽도록
 
+  // 골든셋 캡처(A2, opt-in) — judge가 실제 평가한 cache-miss edit만, fail-open 제외(실판정 아님).
+  // editText(편집 본문)는 events.jsonl이 절대 저장 안 하는 내용 → 캡처는 .gbc/golden.json에 로컬만.
+  // 캡처 실패는 게이트를 막지 않는다(fail-silent). cached-skip 경로는 위에서 이미 return돼 도달 안 함.
+  if (!verdict.failOpen && isGoldenCapture(cwd)) {
+    try {
+      addGoldenCase(cwd, {
+        id: goldenCaseId(toolName, editText, specText),
+        at: nowIso(),
+        tool: toolName,
+        edit: editText,
+        spec: specText,
+        defers,
+        expected: { verdict: verdict.verdict, missing: verdict.missing, reason: verdict.reason },
+      });
+    } catch {
+      /* 캡처 실패는 무시(fail-silent) */
+    }
+  }
+
   if (verdict.verdict === "pass") {
     // fail-open(판정 실패) 먼저 분기 — 빈-spec 정상 pass가 fail-open으로 오분류되지 않게.
     if (verdict.failOpen) {
@@ -245,6 +268,22 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   // block: 사람 pause (ask 기본) — 사유가 사용자에게 표시됨
   // 시나리오 미지정(명세 빈약)과 침묵 누락을 다르게 안내한다.
   const reason = buildBlockReason(verdict, specText.trim() === "", source);
+
+  // 침묵-누락 케이스(missing[])를 펜딩-검토에 기록 → 'gbc gate review'가 번호 체크리스트로 회수.
+  // judge의 missing[]가 buildBlockReason prose로만 평탄화돼 사라지던 seam 보존(A1). missing 없으면
+  // (시나리오 미지정 등) 기록 안 함 = 검토할 케이스 없음. 쓰기 실패는 게이트를 깨지 않는다(fail-silent).
+  if (verdict.missing.length > 0) {
+    try {
+      writePendingReview(cwd, {
+        missing: verdict.missing,
+        reason: verdict.reason,
+        source,
+        at: nowIso(),
+      });
+    } catch {
+      /* 펜딩 기록 실패는 무시 — 안내(reason)는 이미 미룸/직접처리 경로를 담고 있다 */
+    }
+  }
 
   logEvent(cwd, {
     at: nowIso(),

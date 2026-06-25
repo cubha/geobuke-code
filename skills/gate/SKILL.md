@@ -46,12 +46,19 @@ defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결
 | 등록된 케이스 목록 | `gbc spec show` |
 | 명세 비우기(작업단위 종료) | `gbc spec clear` |
 | 작업단위 게이트 리셋(다음 편집에서 재발동) | `gbc gate reset` |
+| block이 도출한 누락 케이스 체크리스트 보기 | `gbc gate review` |
+| 누락 케이스 일괄 분류(승인→spec / 미룸→defer) | `gbc gate review --spec <번호\|텍스트\|all> --defer <번호\|텍스트\|all>` |
+| 판정 골든셋 캡처 토글·조회 | `gbc gate snapshot <on\|off\|status\|list\|clear>` |
+| 골든 케이스 재판정·드리프트 점검(temp 0, 뒤집힘 시 exit 1) | `gbc gate snapshot replay [--samples N]` |
 
 ## 사용 흐름
 
-1. **게이트가 변경을 차단했을 때**: hook이 사유와 누락 케이스를 알려준다. 두 갈래로 해소한다:
-   - (a) 누락 케이스를 **지금 이 변경에서 다룬다** → 다시 시도하면 통과.
-   - (b) 의도적으로 나중에 할 케이스면 **`gbc defer add "케이스"`로 명시 등록** → 통과. (절대 주석으로만 미루지 말 것)
+1. **게이트가 침묵 누락으로 차단했을 때**: hook이 사유와 누락 케이스를 알려주고, 그 케이스들은 `.gbc/pending-review.json`에 기록된다. 케이스가 여러 개면 하나씩 `gbc spec add`/`gbc defer add`를 반복하지 말고 **체크리스트로 일괄 분류**한다:
+   1. `gbc gate review` — 도출된 누락 케이스를 번호 목록으로 본다.
+   2. 사용자에게 제시·검증받는다(승인할 케이스 / 미룰 케이스 구분).
+   3. `gbc gate review --spec <승인 번호들> --defer <미룸 번호들>` — 한 번에 승인은 spec.md 등록, 미룸은 defer 등록(겹치면 spec 우선). 펜딩은 비워진다.
+   4. 재시도하면 등록 기준으로 재판정 → 통과.
+   - 단건이면 종전대로 (a) 지금 이 변경에서 직접 다루거나 (b) `gbc defer add "케이스"`로 미뤄도 된다. (절대 주석으로만 미루지 말 것)
 2. **시나리오 미지정으로 차단됐을 때 — 에이전트 도출 루프**: 사용자가 명세를 수기로 쓰지 않는다. 에이전트가 다음을 수행한다:
    1. 사용자 요청에서 의도·동작 시나리오와 형제 케이스를 **도출**한다.
    2. 도출한 케이스를 사용자에게 **제시하고 검증받는다** — **사용자 승인 없이 자동 등록·구현 금지**(같은 에이전트가 도출+구현하면 고무도장이 됨).
@@ -73,4 +80,6 @@ defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결
 
 - **주석 defer는 defer가 아니다.** `// 비밀번호 검증은 다음에` 같은 코드 주석은 게이트가 침묵 누락으로 본다. 반드시 `gbc defer add`로 레지스트리에 등록해야 한다.
 - **게이트는 작업단위당 1회만 발동한다.** 명세가 바뀌거나 명세 밖 파일을 편집할 때 재발동한다. 강제로 다시 점검하려면 `gbc gate reset`.
+- **게이트가 한 repo에서 아예 안 먹는다면** hook이 미등록·구식일 수 있다. `gbc repos list`가 등록된 각 repo의 게이트 건강성(`⚠️게이트hook부재`/`⚠️SessionStart누락`)을 표시한다 — 떴으면 그 repo에서 `gbc init --yes` 재실행. (크로스-repo는 hook 등록 여부만 검사하고 명령 freshness는 각 repo `gbc status`로 확인.)
 - **`--no-gate` / `GBC_NO_GATE=1` 우회는 계측된다.** 우회 자체가 게이트 가치 측정 데이터가 된다.
+- **판정 드리프트가 의심되면**(모델/gbc 업그레이드 후 게이트가 전과 다르게 군다) `gbc gate snapshot on`으로 한동안 캡처하고, 나중에 `gbc gate snapshot replay`로 재판정해 pass↔block 뒤집힘을 점검한다. 골든셋은 **편집 본문을 로컬 `.gbc/golden.json`에만** 저장한다(gitignore·로컬 pre-flight 전용 — 커밋하면 privacy 불변식 위반).

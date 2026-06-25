@@ -104,7 +104,7 @@ export function selectedTransport(): "api" | "cli" {
 }
 
 /** 직접 Anthropic API (haiku). SDK는 여기서만 lazy import → hook 핫패스 보호. */
-async function judgeViaApi(system: string, user: string): Promise<string> {
+async function judgeViaApi(system: string, user: string, temperature?: number): Promise<string> {
   const mod = await import("@anthropic-ai/sdk");
   const Anthropic = mod.default;
   // 키를 코드에서 해석(env 또는 ~/.gbc/api-key)해 명시 전달 — 셸 주입 불필요(크로스플랫폼).
@@ -112,6 +112,9 @@ async function judgeViaApi(system: string, user: string): Promise<string> {
   const resp = await client.messages.create({
     model: MODEL,
     max_tokens: 1024,
+    // temperature는 replay(회귀락)에서만 0으로 핀해 결정성을 높인다. 핫패스는 undefined=API 기본
+    // (기존 판정 분포 보존). undefined면 키 자체를 안 보내 SDK 기본을 쓴다.
+    ...(temperature !== undefined ? { temperature } : {}),
     system,
     messages: [{ role: "user", content: user }],
   });
@@ -194,13 +197,15 @@ export async function judge(
   planSpec: string,
   editText: string,
   defers: string[] = [],
+  opts: { temperature?: number } = {},
 ): Promise<Verdict> {
   const user = buildUserMessage(planSpec, editText, defers);
   const transport = selectedTransport();
   try {
+    // claude -p 폴백은 temperature 플래그가 없어 핀 불가 → CLI-transport replay는 best-effort.
     const raw =
       transport === "api"
-        ? await judgeViaApi(GATE_SYSTEM, user)
+        ? await judgeViaApi(GATE_SYSTEM, user, opts.temperature)
         : await judgeViaCli(GATE_SYSTEM, user);
     return parseVerdict(raw);
   } catch (e) {

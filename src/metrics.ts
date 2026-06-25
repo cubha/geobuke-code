@@ -87,6 +87,16 @@ export function parseEvents(raw: string): GateEvent[] {
   return out;
 }
 
+/**
+ * 크로스-repo 집계용 — 비어있지 않은 specHash만 'repoTag::specHash'로 태깅한다. 빈 specHash("")는
+ * 센티넬(작업단위 식별 불가)이라 그대로 둬 computeMetrics의 교차세션 제외 가드를 유지한다. repo간
+ * 동일/boilerplate spec 해시가 firstPassAt·groupKey(session 없는 CLI 이벤트)에서 충돌해 churn을
+ * 교차오염시키는 것을 막는다(session-UUID 키인 M2/M3 hook 이벤트는 원래 안전).
+ */
+export function tagEventsWithRepo(events: GateEvent[], repoTag: string): GateEvent[] {
+  return events.map((e) => (e.specHash ? { ...e, specHash: `${repoTag}::${e.specHash}` } : e));
+}
+
 /** M1~M3 집계 결과 (thin reporter용) */
 export interface Metrics {
   totalEvents: number;

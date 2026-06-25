@@ -9,6 +9,8 @@ import { gbcDir, readJson, writeJson } from "./store.js";
 interface GbcConfig {
   /** Stop hook(대화 종료마다 발화) defer 리마인드 음소거. SessionStart 진입 알림은 영향 없음. */
   stopHintMuted?: boolean;
+  /** 골든셋 캡처 모드(A2). on이면 hook이 judge 출력을 .gbc/golden.json에 기록(opt-in, 로컬). */
+  captureGolden?: boolean;
 }
 
 function configPath(cwd: string): string {
@@ -28,5 +30,17 @@ export function isStopHintMuted(cwd: string): boolean {
 export function setStopHintMuted(cwd: string, muted: boolean): void {
   const cfg = readConfig(cwd);
   cfg.stopHintMuted = muted;
+  writeJson(configPath(cwd), cfg);
+}
+
+/** 골든셋 캡처 모드인지. 파일/키 부재 시 false(기본=캡처 안 함). */
+export function isGoldenCapture(cwd: string): boolean {
+  return readConfig(cwd).captureGolden === true;
+}
+
+/** 골든셋 캡처 모드 토글을 영속 저장(수동 off 전까지 유지). */
+export function setGoldenCapture(cwd: string, on: boolean): void {
+  const cfg = readConfig(cwd);
+  cfg.captureGolden = on;
   writeJson(configPath(cwd), cfg);
 }
