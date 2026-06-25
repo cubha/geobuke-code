@@ -2,6 +2,22 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.4.0] - 2026-06-25
+
+도그푸딩으로 검증한 게이트 운영층 5기능을 한 번에 발행한다. 멀티에이전트 시너지 검토(install-safe·12후보→5생존)로 "현재 하네스와 충돌 없이 도그푸딩 가능 + 게이트와 상승효과"를 만족하는 기능만 선별했다. 전부 기존 `.gbc/`·`~/.gbc/` 네임스페이스에만 쓰고 공유 `.claude/settings.json`은 건드리지 않는다(install verdict=safe).
+
+### Added
+- **`gbc gate review` — 누락 케이스 일괄 분류 (A1)** — 게이트가 차단하며 도출한 형제 케이스(`missing[]`)가 그동안 차단 사유 문장으로만 평탄화돼 사라졌다. 이제 `.gbc/pending-review.json`에 구조 보존되어, `gbc gate review`로 번호 체크리스트를 보고 `gbc gate review --spec <번호|텍스트|all> --defer <번호|텍스트|all>`로 한 번에 승인(→spec.md)/미룸(→defer)으로 분류한다(겹치면 spec 우선). 케이스가 여럿일 때 `gbc spec add`/`gbc defer add`를 반복할 필요가 없다.
+- **`gbc init` 크로스-repo 레지스트리 자동등록 (B0)** — `gbc init` 시 현재 repo를 `~/.gbc/repos.json`에 멱등 자동등록한다(0.2.9가 깐 레지스트리가 비어 dormant이던 결함 충전). opt-out: `gbc init --no-register`.
+- **`gbc repos list` 게이트 건강성 롤업 (B1)** — 각 등록 repo의 `.claude/settings.json`을 읽어 게이트 hook 부재(`⚠️게이트hook부재`)·SessionStart hook 누락(`⚠️SessionStart누락`)을 표시한다("회사 repo에서 게이트가 조용히 안 먹는다"를 한 명령으로 진단). 검사 대상은 hook **등록 여부**뿐 — 명령 freshness는 각 repo 설치경로가 달라(cliPath 의존) 크로스-repo로는 false-positive라 검사하지 않는다(각 repo `gbc status`로 확인).
+- **`gbc metrics --all` 교차-repo 집계 (B2)** — 등록된 repo들의 `events.jsonl`을 병합 집계한다. 병합 시 각 이벤트의 `specHash`를 repo 경로로 태깅해 repo간 boilerplate 명세 해시 충돌을 막는다(태깅 없이 합치면 한 repo의 통과 뒤 다른 repo의 변이가 M1 churn으로 오집계; M2/M3는 세션 UUID 키라 원래 안전). symlink 등록 경로는 거부.
+- **`gbc gate snapshot` 판정 드리프트 회귀락 (A2)** — 게이트 판정(LLM haiku)을 골든셋으로 캡처(`snapshot on`)해두고, 모델/프롬프트/SDK 변화 후 `snapshot replay`로 재판정해 pass↔block 뒤집힘(드리프트)을 잡는다. 하드 신호는 판정 뒤집힘만(하나라도 있으면 exit 1) — `missing[]` 변화는 LLM 자유서술이라 정보용. replay는 `temperature 0`으로 재판정(핫패스 게이트는 불변), `--samples N`(홀수 강제) 모달로 잔여 비결정을 흡수한다.
+
+### Notes
+- **드리프트 회귀락은 로컬 전용(privacy)** — `golden.json`은 정규화된 **편집 본문**을 담는다(`events.jsonl`이 불변식으로 절대 저장하지 않는 내용). `.gbc/`는 gitignore이므로 로컬 드리프트 점검이지 커밋되는 CI 스위트가 아니다. 캡처는 opt-in이며, judge가 실제 평가한 cache-miss 편집만 기록된다(cached-skip·fail-open 제외).
+- **재init 필요** — A1이 PreToolUse hook 출력(차단 사유에 `gbc gate review` 안내)과 펜딩 기록 동작을 확장하고, 새 스킬 명령이 추가됐다. 설치된 프로젝트는 `gbc update`(또는 `npm i -g geobuke-code@latest && gbc init --yes`)로 갱신한다.
+- **경계 재정의** — 게이트 심화·크로스-repo 조정은 B-커널(hook-게스트)에서 도그푸딩 가능하므로 B로 귀속하고, A(public)는 standalone TUI + 엔진 래핑 + 진짜 사후대조 M1로 순수화했다.
+
 ## [0.3.0] - 2026-06-24
 
 ### Fixed

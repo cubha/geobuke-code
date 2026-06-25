@@ -98,6 +98,40 @@ export function hasSessionStartHook(settings: Settings): boolean {
 }
 
 /**
+ * (read-only) PreToolUse 게이트 hook('hook pre-tool-use' 명령)이 등록돼 있는지 — cliPath 무관.
+ * hasStalePreToolUse가 *명령 freshness*(cliPath 의존)를 보는 반면, 이건 *존재 자체*만 본다.
+ * 크로스-repo 건강성 판정에 쓴다: 타 repo의 정식 cliPath를 알 수 없으므로(각 설치경로 상이) freshness는
+ * 검사 불가지만, '게이트 hook이 아예 없음'(=게이트 조용히 죽음)은 cliPath 없이도 결정론적으로 잡힌다.
+ */
+export function hasPreToolUseGate(settings: Settings): boolean {
+  for (const entry of settings.hooks?.PreToolUse ?? []) {
+    for (const h of entry.hooks ?? []) {
+      if (h.command.includes("hook pre-tool-use")) return true;
+    }
+  }
+  return false;
+}
+
+/** repo 건강성 — gateDead=gbc 프로젝트인데 게이트 hook 부재, missingSession=SessionStart hook 부재. */
+export interface RepoHealth {
+  gateDead: boolean;
+  missingSession: boolean;
+}
+
+/**
+ * 크로스-repo 게이트 건강성을 settings로 판정(cliPath 무관·결정론적). isGbcProject=false(.gbc 없음)면
+ * 게이트 대상이 아니라 둘 다 false. 명령 freshness(stale)는 *의도적으로* 검사하지 않는다 — 각 repo
+ * 설치경로가 달라 현재 런타임 cliPath로 타 repo를 stale 판정하면 false-positive가 된다(B1 트림 결정).
+ */
+export function assessRepoHealth(settings: Settings, isGbcProject: boolean): RepoHealth {
+  if (!isGbcProject) return { gateDead: false, missingSession: false };
+  return {
+    gateDead: !hasPreToolUseGate(settings),
+    missingSession: !hasSessionStartHook(settings),
+  };
+}
+
+/**
  * SessionStart hook을 멱등 등록한다. matcher "startup|resume"로 신규 진입·재개에만 발화
  * (compact마다 반복 노이즈 방지). 이미 'hook session-start' 명령이 있으면 추가하지 않는다.
  * settings를 제자리 수정하고, 새로 추가했으면 true(이미 있으면 false)를 반환한다.
