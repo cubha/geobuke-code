@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 const PKG = "geobuke-code";
-const TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const TTL_MS = 12 * 60 * 60 * 1000; // 12h
 const FETCH_TIMEOUT_MS = 1500;
 
 export interface VersionCache {
@@ -56,7 +56,7 @@ export function writeVersionCache(cache: VersionCache, home?: string): void {
   }
 }
 
-/** 캐시가 없거나 TTL(24h) 초과면 stale. now는 주입 가능(테스트). */
+/** 캐시가 없거나 TTL(12h) 초과면 stale. now는 주입 가능(테스트). */
 export function isCacheStale(cache: VersionCache | null, now: number = Date.now()): boolean {
   if (!cache) return true;
   return now - cache.checkedAt > TTL_MS;
