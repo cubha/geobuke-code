@@ -4,7 +4,7 @@
 import { isGatedTool, normalizeEdit } from "./normalize.js";
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated, markGated } from "./state.js";
-import { activeDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
+import { activeDeferItems, resolvedDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
 import { isStopHintMuted, isGoldenCapture } from "./config.js";
 import { loadRepos } from "./repos.js";
 import { writePendingReview } from "./review.js";
@@ -196,12 +196,15 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   const { judge } = await import("./judge.js");
   const editText = normalizeEdit(toolName, input.tool_input ?? {});
   const defers = activeDeferItems(cwd);
+  // 완료된 케이스를 judge에 [이미 완료된 항목]으로 함께 전달 → 과거 작업단위의 resolved 케이스를
+  // "미처리 형제"로 오인해 재차단하던 드리프트 완화(2026-06-26). active와 상호배타(filter 분리).
+  const resolved = resolvedDeferItems(cwd);
   // ①신버전 캐시 자동 refresh(0.3.0) — 사용자가 'gbc status'를 안 쳐도 캐시가 최신이 되게.
   // judge(네트워크·≥1.5s)와 *병렬*로만 건다 → 핫패스 지연 0. cache-miss(여기 = judge 도는
   // 비-핫패스)에서만 stale일 때. cached-skip 핫패스엔 절대 네트워크 안 넣는다(0.2.7 원칙 보존).
   // refreshVersionCache는 내부 fail-silent(reject 불가)라 judge 경로를 깨지 않는다.
   const refreshP = shouldRefreshCache(Boolean(ctx?.cliPath)) ? refreshVersionCache() : null;
-  const verdict = await judge(specText, editText, defers);
+  const verdict = await judge(specText, editText, defers, resolved);
   if (refreshP) await refreshP; // judge 동안 이미 완료 — 이 편집의 notice가 갱신된 캐시를 읽도록
 
   // 골든셋 캡처(A2, opt-in) — judge가 실제 평가한 cache-miss edit만, fail-open 제외(실판정 아님).
@@ -216,6 +219,7 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
         edit: editText,
         spec: specText,
         defers,
+        resolved,
         expected: { verdict: verdict.verdict, missing: verdict.missing, reason: verdict.reason },
       });
     } catch {
@@ -352,7 +356,7 @@ interface SessionStartInput {
  * (hook엔 추론을 넣지 않는다 — 텍스트만. 자연어/대상 감지·전환 실행은 에이전트 측 책임.)
  */
 const DEFER_PROTOCOL =
-  "규약 — 항목 착수 시 'gbc defer start <ref>'로 진행중 표시, 사용자가 완료를 명시하면 'gbc defer resolve <ref>'로 종결(신호가 모호하면 resolve하지 말고 확인). 되돌리기는 'gbc defer reopen <ref>'. ref=번호|텍스트|all. 모든 자동 전환은 사용자에게 표면화.";
+  "규약 — 항목 착수 시 'gbc defer start <ref>'로 진행중 표시, 사용자가 완료를 명시하면 'gbc defer resolve <ref>'로 종결(신호가 모호하면 resolve하지 말고 확인). 되돌리기는 'gbc defer reopen <ref>'. ref=번호|텍스트|all. 모든 자동 전환은 사용자에게 표면화. 작업단위(현재 명세) 전체가 끝나면 'gbc done'으로 명시 종료 — 명세를 아카이브·비우고 게이트를 리셋한다(이걸 안 하면 옛 케이스가 다음 작업단위에 형제로 부활).";
 
 /**
  * 전체 defer 리스트에서 미해결(open+in_progress)만 골라 상태 마커와 함께 한 줄씩 포맷한다.

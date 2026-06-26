@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { gbcDir } from "./store.js";
@@ -64,15 +64,22 @@ function specPath(cwd: string): string {
  * 케이스 한 줄을 .gbc/spec.md에 append. 파일 없으면 헤더와 함께 생성.
  * 입력은 한 줄로 정규화한다: 줄바꿈→공백(readSpecCases 단일라인 매칭과 정합),
  * 길이 상한 절단(에이전트가 멀티라인/장문 출력을 그대로 add해도 안전).
+ *
+ * 중복 감지(ST2): 정규화 텍스트가 기존 케이스와 동일하면 등록하지 않고 false 반환
+ * (drift 진단 2026-06-26의 2차 증상 — 같은 케이스가 시점만 달리 더미에 누적되던 것 차단).
+ * @returns 새로 등록했으면 true, 정규화 동일 케이스가 이미 있어 skip했으면 false.
  */
-export function addSpecCase(cwd: string, item: string): void {
+export function addSpecCase(cwd: string, item: string): boolean {
+  const normalized = normalizeCase(item);
+  if (readSpecCases(cwd).some((c) => c === normalized)) return false;
   const path = specPath(cwd);
-  const line = `- [ ] ${normalizeCase(item)}\n`;
+  const line = `- [ ] ${normalized}\n`;
   if (existsSync(path)) {
     appendFileSync(path, line, "utf8");
   } else {
     writeFileSync(path, `# 작업 명세\n\n${line}`, "utf8");
   }
+  return true;
 }
 
 /** 현재 spec.md의 케이스(체크리스트 라인) 텍스트만 추출. */
@@ -90,4 +97,35 @@ export function readSpecCases(cwd: string): string[] {
 /** 작업단위 완료 시 spec.md를 비운다 (다음 작업단위로 깨끗이 넘어가기). */
 export function clearSpec(cwd: string): void {
   writeFileSync(specPath(cwd), "", "utf8");
+}
+
+/** 파일명 안전 타임스탬프(ISO의 ':' '.'을 '-'로). Date 금지 환경 방어(빈 문자열 폴백). */
+function nowStamp(): string {
+  try {
+    return new Date().toISOString().replace(/[:.]/g, "-");
+  } catch {
+    return "nodate";
+  }
+}
+
+/**
+ * 작업단위 종료(ST3 — gbc done): spec.md 본문을 .gbc/spec.archive/<specHash>-<stamp>.md로
+ * 보존한 뒤 비운다. 본문이 비어 있으면 아카이브할 것이 없어 null 반환(clearSpec도 생략).
+ *
+ * drift 근본수정(2026-06-26): 시스템에 작업단위 "완료" 이벤트가 없어 spec.md가 append 전용으로
+ * 영구 누적되고, 과거 완료 케이스가 새 작업단위 등록 시 형제로 부활하던 결함을 닫는다. 이 함수가
+ * 그 명시적 완료 이벤트의 데이터 동작이다(게이트 리셋은 호출부 cmdDone이 별도로 — resetGate 불변).
+ * @returns 아카이브 파일 경로(보존했으면), 비울 본문이 없으면 null.
+ */
+export function archiveSpec(cwd: string): string | null {
+  const path = specPath(cwd);
+  if (!existsSync(path)) return null;
+  const raw = readFileSync(path, "utf8");
+  if (raw.trim() === "") return null;
+  const dir = join(gbcDir(cwd), "spec.archive");
+  mkdirSync(dir, { recursive: true });
+  const archivePath = join(dir, `${computeSpecHash(raw)}-${nowStamp()}.md`);
+  writeFileSync(archivePath, raw, "utf8");
+  clearSpec(cwd);
+  return archivePath;
 }

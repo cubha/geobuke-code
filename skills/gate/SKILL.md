@@ -1,6 +1,6 @@
 ---
 name: gate
-description: 거북이코드 구현-전 게이트를 관리한다. 로드된 계획 명세 확인, 미룬(defer) 항목 등록·조회·해결, 작업단위 게이트 리셋. PreToolUse hook이 코드 변경을 차단했을 때 이 스킬로 케이스를 명시적으로 미루거나 게이트 상태를 점검한다. '/gate', '게이트 상태', '케이스 미루기', 'defer 등록', '게이트 리셋', '게이트가 막아' 등 언급 시 호출.
+description: 거북이코드 구현-전 게이트를 관리한다. 로드된 계획 명세 확인, 미룬(defer) 항목 등록·조회·해결, 작업단위 게이트 리셋, 작업단위 명시 종료(gbc done). PreToolUse hook이 코드 변경을 차단했을 때 이 스킬로 케이스를 명시적으로 미루거나 게이트 상태를 점검한다. '/gate', '게이트 상태', '케이스 미루기', 'defer 등록', '게이트 리셋', '작업단위 종료', 'gbc done', '게이트가 막아' 등 언급 시 호출.
 ---
 
 # /gate — 구현-전 게이트 관리
@@ -44,8 +44,9 @@ defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결
 | 백로그로 되돌리기 (→ open) | `gbc defer reopen <번호\|텍스트\|all>` |
 | 승인된 시나리오를 명세에 등록 | `gbc spec add "<케이스>"` |
 | 등록된 케이스 목록 | `gbc spec show` |
-| 명세 비우기(작업단위 종료) | `gbc spec clear` |
-| 작업단위 게이트 리셋(다음 편집에서 재발동) | `gbc gate reset` |
+| 명세 비우기(아카이브 없이) | `gbc spec clear` |
+| **작업단위 명시 종료**(명세 아카이브→비움 + 게이트 리셋) | `gbc done` |
+| 작업단위 게이트만 리셋(명세 보존·같은 단위 재게이트) | `gbc gate reset` |
 | block이 도출한 누락 케이스 체크리스트 보기 | `gbc gate review` |
 | 누락 케이스 일괄 분류(승인→spec / 미룸→defer) | `gbc gate review --spec <번호\|텍스트\|all> --defer <번호\|텍스트\|all>` |
 | 판정 골든셋 캡처 토글·조회 | `gbc gate snapshot <on\|off\|status\|list\|clear>` |
@@ -66,6 +67,7 @@ defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결
    4. 재시도하면 통과한다.
    > 시나리오 도출은 코딩 에이전트 본체(Opus)가 대화 맥락으로, 게이트 판정은 haiku가 — 두 작업/두 모델 분리(gbc는 모델 계층을 소유하지 않는다).
 3. **세션 종료 시**: Stop hook이 미해결 defer를 "진행중 N · 미착수 M"으로 구분 리마인드한다. `gbc defer list`로 확인하고, 사용자 완료 선언이 있었으면 resolve, 아니면 다음 세션으로 의식적으로 이월한다(진행중 항목은 in_progress 그대로 남아 다음 SessionStart에 표면화).
+4. **작업단위(현재 명세) 전체가 끝났을 때 — `gbc done`으로 명시 종료**: 명세(`.gbc/spec.md`)를 `.gbc/spec.archive/`로 보존한 뒤 비우고 게이트를 리셋한다. **이걸 하지 않으면** 며칠 뒤 무관한 새 작업을 시작할 때 옛 명세의 미체크 케이스가 "현재 작업의 형제 케이스"로 부활해 침묵 누락 오탐을 낸다(2026-06-26 진단·근본수정). `gbc spec clear`는 아카이브 없이 비우기만, `gbc gate reset`은 명세를 **보존**한 채 같은 단위를 재게이트하는 별개 동작이다 — 작업단위를 끝낼 땐 `gbc done`을 쓴다.
 
 ## 명세 소스
 
@@ -80,6 +82,8 @@ defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결
 
 - **주석 defer는 defer가 아니다.** `// 비밀번호 검증은 다음에` 같은 코드 주석은 게이트가 침묵 누락으로 본다. 반드시 `gbc defer add`로 레지스트리에 등록해야 한다.
 - **게이트는 작업단위당 1회만 발동한다.** 명세가 바뀌거나 명세 밖 파일을 편집할 때 재발동한다. 강제로 다시 점검하려면 `gbc gate reset`.
+- **작업단위를 끝내면 `gbc done`을 호출한다 — 안 하면 옛 케이스가 부활한다.** 명세는 append로만 누적되고 작업단위 "완료" 이벤트가 없어, 끝난 케이스가 `.gbc/spec.md`에 미체크로 남으면 다음 작업단위 등록 시 형제 케이스로 재차단된다(드리프트 오탐). `gbc done`이 명세를 아카이브·비워 이 누적을 끊는다. (완화책으로 0.4.2부터 resolved된 defer는 judge에 `[이미 완료된 항목]`으로 전달돼 재플래그를 줄이지만, 근본 정리는 `gbc done`이다.)
+- **같은 케이스 중복 등록은 자동 skip된다(0.4.2).** `gbc spec add`/`gbc defer add`/`gbc gate review`가 정규화 동일 케이스(미해결)를 다시 등록하려 하면 "중복 등록 skip"으로 알리고 더미를 키우지 않는다. resolved된 항목의 동일 텍스트 재등록은 정당한 재-defer로 허용된다.
 - **게이트가 한 repo에서 아예 안 먹는다면** hook이 미등록·구식일 수 있다. `gbc repos list`가 등록된 각 repo의 게이트 건강성(`⚠️게이트hook부재`/`⚠️SessionStart누락`)을 표시한다 — 떴으면 그 repo에서 `gbc init --yes` 재실행. (크로스-repo는 hook 등록 여부만 검사하고 명령 freshness는 각 repo `gbc status`로 확인.)
 - **`--no-gate` / `GBC_NO_GATE=1` 우회는 계측된다.** 우회 자체가 게이트 가치 측정 데이터가 된다.
 - **판정 드리프트가 의심되면**(모델/gbc 업그레이드 후 게이트가 전과 다르게 군다) `gbc gate snapshot on`으로 한동안 캡처하고, 나중에 `gbc gate snapshot replay`로 재판정해 pass↔block 뒤집힘을 점검한다. 골든셋은 **편집 본문을 로컬 `.gbc/golden.json`에만** 저장한다(gitignore·로컬 pre-flight 전용 — 커밋하면 privacy 불변식 위반).
