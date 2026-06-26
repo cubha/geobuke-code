@@ -31,6 +31,8 @@ import { loadGolden, clearGolden, diffVerdict, summarizeReplay } from "./golden.
 import type { ReplayOutcome } from "./golden.js";
 import type { VerdictKind } from "./types.js";
 import { selectedTransport } from "./judge.js";
+import { runVerify } from "./verify.js";
+import type { CaseVerdict } from "./types.js";
 import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER, assessRepoHealth } from "./install.js";
 import { readProjectSettings } from "./notice.js";
 import {
@@ -377,6 +379,60 @@ function cmdDone(): void {
     console.log("🐢 작업단위 종료 — 비울 명세가 없습니다(이미 비어 있음).");
   }
   console.log("   게이트 리셋 완료. 다음 작업단위는 새 명세로 시작하세요('gbc spec add').");
+}
+
+// ---------- gbc verify ----------
+/** 케이스 판정 1줄 심볼. */
+function verifySymbol(c: CaseVerdict): string {
+  if (c.level === "verified") return c.status === "pass" ? "✅ verified" : "❌ verified·실패";
+  if (c.level === "reviewed") return c.status === "pass" ? "🟡 reviewed" : "🟠 reviewed·미충족";
+  return "⚪ unverifiable";
+}
+
+/**
+ * 사후 결과검증(post-impl verify) — spec 케이스를 증거와 대조해 판정 사다리로 리포트한다.
+ * gbc는 테스트를 *실행하지 않고* 표준 결과(JUnit XML)를 읽거나 LLM 독해(reviewed)로 판정한다.
+ * failed·unverifiable 케이스는 defer 후보로 *제안만* 한다 — 자동 등록·pending-review 재사용 안 함
+ * (자동 defer는 누적병 재발+"defer=사람 선언" 원칙 위반 → 사람이 분류).
+ */
+async function cmdVerify(): Promise<void> {
+  const cwd = process.cwd();
+  const report = await runVerify(cwd);
+  logCli(cwd, "verify", curHash(cwd));
+
+  if (report.cases.length === 0) {
+    console.log(
+      "🐢 검증할 spec 케이스가 없습니다.\n" +
+        "   .gbc/spec.md에 케이스 등록 후 검증 바인딩을 붙이세요: '<케이스> ::test <테스트명>' 또는 '::file <경로>'.",
+    );
+    return;
+  }
+
+  const by = (l: CaseVerdict["level"]) => report.cases.filter((c) => c.level === l).length;
+  console.log(`🐢 사후 결과검증 — ${cwd}
+  케이스 ${report.cases.length} · ✅verified ${by("verified")} · 🟡reviewed ${by("reviewed")} · ⚪unverifiable ${by("unverifiable")}`);
+  if (by("verified") > 0) {
+    // verified는 디스크의 결과파일을 그대로 읽는다(신선도 검사 없음) — 옛 결과에 대한 거짓 통과 방지.
+    console.log("  ⓘ verified는 현재 .gbc/verify-results.xml 기준 — 코드 변경 후 러너를 재실행하고 verify하세요.");
+  }
+  console.log("");
+  for (const c of report.cases) {
+    console.log(`  ${verifySymbol(c)}  ${c.case}\n      └ ${c.evidence}`);
+  }
+
+  // 미해결 후보 = 실패(verified·fail / reviewed·미충족) + 미검증(unverifiable). 제안만.
+  const candidates = report.cases.filter((c) => c.status === "fail" || c.level === "unverifiable");
+  if (candidates.length === 0) {
+    console.log("\n✅ 모든 케이스가 verified/reviewed 통과.");
+    return;
+  }
+  console.log(`\n→ 미해결 후보 ${candidates.length}건 — 자동 등록 안 함(사람이 분류):`);
+  // 케이스에 쌍따옴표가 있으면 복붙 시 셸 따옴표 파싱이 깨진다(security-auditor S3) → 이스케이프.
+  for (const c of candidates) console.log(`    gbc defer add "${c.case.replace(/"/g, '\\"')}"`);
+  console.log(
+    "  (검증 강화: 케이스에 '::test <테스트명>'[러너 결과] 또는 '::file <경로>'[코드 독해] 바인딩 추가)\n" +
+      "  ⚠️ reviewed/unverifiable는 동작 증명이 아니다 — verified만 테스트 실행으로 증명된 통과.",
+  );
 }
 
 // ---------- gbc gate ----------
@@ -783,6 +839,8 @@ function usage(): void {
   gbc spec show                       등록된 케이스 목록
   gbc spec clear                      명세 비우기(아카이브 없이)
   gbc done                            작업단위 명시 종료(명세 아카이브→비움 + 게이트 리셋)
+  gbc verify                          사후 결과검증(verified>reviewed>unverifiable) — 케이스↔증거 대조
+                                      (바인딩: '<케이스> ::test <테스트명>' / '::file <경로>')
   gbc gate reset                      작업단위 게이트만 리셋(명세 보존·같은 단위 재게이트)
   gbc gate review                     block이 도출한 누락 케이스 체크리스트 보기
   gbc gate review --spec <ref> --defer <ref>
@@ -826,6 +884,8 @@ async function main(): Promise<void> {
       return cmdGate(rest);
     case "done":
       return cmdDone();
+    case "verify":
+      return cmdVerify();
     case "metrics":
       return cmdMetrics(rest);
     case "repos":

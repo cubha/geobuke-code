@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Verdict } from "./types.js";
+import type { Verdict, ReviewVerdict } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -236,4 +236,85 @@ export function failOpenVerdict(e: unknown): Verdict {
   };
 }
 
-export { GATE_SYSTEM, buildUserMessage, parseVerdict };
+// ===== reviewed 경로 (사후 결과검증, 러너 없는 경량) =====
+// 게이트(구현 *전*)와 달리 reviewed는 구현 *후* 최종 코드를 독해해 케이스 주소화를 판정한다.
+// 별도 프롬프트(refute-first)·독립 호출. fail-open은 'pass'가 아니라 'unverifiable'로 매핑한다.
+
+const MAX_REVIEW_CODE = 12000; // 코드 본문 절단(프롬프트 비대 방지)
+
+/**
+ * reviewed 시스템 프롬프트 — refute-first. 기본값을 '미충족(fail)'에 두고, 코드에서 명확한 근거를
+ * 찾았을 때만 pass. *독해 판정이지 동작 증명이 아님*을 명시(테스트 실행=verified와 구분).
+ */
+const REVIEW_SYSTEM = `너는 구현이 끝난 *뒤* 동작하는 코드 검토자다. [검증할 케이스]와 [최종 코드]를 보고
+이 코드가 그 케이스를 실제로 다루는지 판정하라.
+
+규칙:
+- 기본값은 **fail(미충족)**이다. 코드에서 이 케이스가 구현됐다는 *명확한 근거*를 찾았을 때만 pass.
+- 추측·선의 해석·"아마 될 것" 금지. 근거가 코드에 안 보이면 fail.
+- 이것은 코드 *독해* 판정이다 — 테스트 실행이 아니다. 동작의 정확성(런타임 버그·경계조건)은 보증하지 못한다.
+- 케이스와 무관한 코드면 fail(이 케이스를 다루지 않음).
+
+오직 아래 JSON만 출력(설명·마크다운 펜스 금지):
+{"status":"pass"|"fail","reason":"한 줄 사유"}`;
+
+/** reviewed 사용자 메시지 — [검증할 케이스] / [최종 코드]. */
+export function buildReviewMessage(caseText: string, fileContent: string): string {
+  const code =
+    fileContent.length > MAX_REVIEW_CODE
+      ? fileContent.slice(0, MAX_REVIEW_CODE) + "\n…(절단됨)"
+      : fileContent;
+  return `[검증할 케이스]
+${caseText.trim() || "(케이스 없음)"}
+
+[최종 코드]
+${code}`;
+}
+
+/**
+ * reviewed 응답 파싱(순수). status가 pass/fail이면 그대로, 그 외/파싱불가는 **unverifiable**.
+ * ⚠️ 어떤 실패 경로도 'pass'로 떨어지지 않는다(거짓 확신 차단) — 모르면 'unverifiable'.
+ */
+export function parseReviewVerdict(raw: string): ReviewVerdict {
+  try {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return { status: "unverifiable", reason: "검토 응답에서 JSON 미발견" };
+    const j = JSON.parse(m[0]);
+    const reason = typeof j.reason === "string" ? j.reason : "";
+    if (j.status === "pass") return { status: "pass", reason };
+    if (j.status === "fail") return { status: "fail", reason };
+    // pass/fail 외(누락·block 등)는 신뢰 불가 → unverifiable(절대 pass로 떨구지 않음).
+    return { status: "unverifiable", reason: reason || "알 수 없는 status" };
+  } catch {
+    return { status: "unverifiable", reason: "검토 응답 JSON 파싱 실패" };
+  }
+}
+
+/** transport 무관 호출자 시그니처(테스트 주입용). */
+export type ReviewInvoke = (system: string, user: string) => Promise<string>;
+
+/**
+ * reviewed 판정. 케이스 + 최종 코드 본문을 모델에 독해시켜 pass/fail. 호출 실패·타임아웃은
+ * **unverifiable**로 매핑한다(failOpenVerdict의 'pass'를 복사하지 않는다 — reviewed의 핵심 가드).
+ * STUB(ST3 RED).
+ */
+export async function judgeReviewed(
+  caseText: string,
+  fileContent: string,
+  opts: { invoke?: ReviewInvoke } = {},
+): Promise<ReviewVerdict> {
+  const user = buildReviewMessage(caseText, fileContent);
+  // 기본 호출자: 게이트와 동일 transport 선택(api 우선, 없으면 claude -p 폴백).
+  const invoke: ReviewInvoke =
+    opts.invoke ??
+    ((system, u) =>
+      selectedTransport() === "api" ? judgeViaApi(system, u) : judgeViaCli(system, u));
+  try {
+    return parseReviewVerdict(await invoke(REVIEW_SYSTEM, user));
+  } catch (e) {
+    // ⚠️ fail-open을 'pass'가 아닌 'unverifiable'로 — 검증 못 했으면 거짓 확신 대신 정직하게 모름.
+    return { status: "unverifiable", reason: `검토 호출 실패(미검증): ${String(e).slice(0, 120)}` };
+  }
+}
+
+export { GATE_SYSTEM, buildUserMessage, parseVerdict, REVIEW_SYSTEM };

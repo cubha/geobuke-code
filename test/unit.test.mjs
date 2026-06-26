@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 
 import { normalizeEdit, isGatedTool } from "../dist/normalize.js";
 import { parseVerdict, buildUserMessage, failOpenVerdict, GATE_SYSTEM } from "../dist/judge.js";
+import { parseReviewVerdict, judgeReviewed, buildReviewMessage } from "../dist/judge.js";
 import { computeSpecHash, loadPlanSpec } from "../dist/spec.js";
 import {
   addDefer,
@@ -64,7 +65,10 @@ import { goldenCaseId, diffVerdict, upsertGolden, summarizeReplay } from "../dis
 import { resolveApiKey, safeModel } from "../dist/judge.js";
 import { normalizeCase, MAX_CASE } from "../dist/text.js";
 import { isStopHintMuted, setStopHintMuted } from "../dist/config.js";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { parseBinding } from "../dist/verify.js";
+import { parseJUnit, readVerifyResults, JUNIT_DEFAULT_REL } from "../dist/junit.js";
+import { runVerify } from "../dist/verify.js";
+import { readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -1562,4 +1566,454 @@ test("summarizeReplay: 플립/정보용변화/일치 집계 + 플립 목록", ()
   assert.equal(s.missingOnly, 1);
   assert.equal(s.flipped.length, 1);
   assert.equal(s.flipped[0].id, "2");
+});
+
+// ===== ST1: parseBinding (사후검증 바인딩 파서) =====
+
+test("parseBinding: ::test 바인딩 — 본문/종류/ref 분리", () => {
+  const b = parseBinding("빈 자격증명 거부 ::test login_empty_creds");
+  assert.equal(b.kind, "test");
+  assert.equal(b.text, "빈 자격증명 거부");
+  assert.equal(b.ref, "login_empty_creds");
+});
+
+test("parseBinding: ::file 바인딩 — 경로 ref", () => {
+  const b = parseBinding("로그인 검증 ::file src/auth.ts");
+  assert.equal(b.kind, "file");
+  assert.equal(b.text, "로그인 검증");
+  assert.equal(b.ref, "src/auth.ts");
+});
+
+test("parseBinding: 바인딩 없음 → none, 원문 보존", () => {
+  const b = parseBinding("그냥 케이스 설명");
+  assert.equal(b.kind, "none");
+  assert.equal(b.text, "그냥 케이스 설명");
+  assert.equal(b.ref, "");
+});
+
+test("parseBinding: 마커 앞 공백 없어도 파싱(케이스::test x)", () => {
+  const b = parseBinding("케이스::test x");
+  assert.equal(b.kind, "test");
+  assert.equal(b.text, "케이스");
+  assert.equal(b.ref, "x");
+});
+
+test("parseBinding: ref 없는 빈 마커는 바인딩으로 보지 않음(none)", () => {
+  const b = parseBinding("케이스 ::test");
+  assert.equal(b.kind, "none");
+  assert.equal(b.text, "케이스 ::test");
+});
+
+test("parseBinding: ref 앞뒤 공백·본문 trim", () => {
+  const b = parseBinding("케이스 본문   ::file   path/to/x.ts  ");
+  assert.equal(b.kind, "file");
+  assert.equal(b.text, "케이스 본문");
+  assert.equal(b.ref, "path/to/x.ts");
+});
+
+test("parseBinding: 마지막 트레일링 바인딩이 이긴다(단일토큰 end-anchored)", () => {
+  // 도그푸딩 정정: ref는 줄 끝 단일 토큰 → 앞의 '::test a'는 산문, 트레일링 '::file b'가 바인딩.
+  const b = parseBinding("케이스 ::test a ::file b");
+  assert.equal(b.kind, "file");
+  assert.equal(b.ref, "b");
+  assert.equal(b.text, "케이스 ::test a");
+});
+
+test("parseBinding: 산문 중간 '::test 본문...'은 바인딩 아님(none) — 도그푸딩 회귀", () => {
+  // 케이스 본문이 마커 단어를 서술적으로 포함하고 뒤에 토큰이 더 이어지면 트레일링 바인딩 아님.
+  const b = parseBinding("verify가 spec 케이스의 ::test 바인딩을 결과와 매칭해 판정한다");
+  assert.equal(b.kind, "none");
+  assert.equal(b.text, "verify가 spec 케이스의 ::test 바인딩을 결과와 매칭해 판정한다");
+});
+
+test("parseBinding: 따옴표 ref로 공백 포함 테스트명(BDD)", () => {
+  const b = parseBinding('빈 자격증명 ::test "should reject empty creds"');
+  assert.equal(b.kind, "test");
+  assert.equal(b.ref, "should reject empty creds");
+  assert.equal(b.text, "빈 자격증명");
+});
+
+// readSpecCases가 반환한 케이스에 바인딩 접미사가 그대로 실려 옴을 확인(접미사 누수 회귀)
+test("parseBinding: readSpecCases 출력의 접미사를 분리할 수 있다", () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "비밀번호 8자 검증 ::test pw_len");
+    const cases = readSpecCases(dir);
+    assert.equal(cases.length, 1);
+    const b = parseBinding(cases[0]);
+    assert.equal(b.kind, "test");
+    assert.equal(b.text, "비밀번호 8자 검증");
+    assert.equal(b.ref, "pw_len");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===== ST2: parseJUnit / readVerifyResults (JUnit 리더, verified 경로) =====
+
+const JUNIT_SAMPLE = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="auth" tests="4" failures="1" errors="1" skipped="1">
+    <testcase name="login_empty_creds" classname="auth" time="0.01"/>
+    <testcase name="login_pwlen" classname="auth" time="0.02">
+      <failure message="expected reject">AssertionError</failure>
+    </testcase>
+    <testcase name="login_boom" classname="auth">
+      <error message="threw">TypeError</error>
+    </testcase>
+    <testcase name="login_todo" classname="auth">
+      <skipped/>
+    </testcase>
+  </testsuite>
+</testsuites>`;
+
+test("parseJUnit: self-closed testcase = pass", () => {
+  const m = parseJUnit(JUNIT_SAMPLE);
+  assert.equal(m.get("login_empty_creds"), "pass");
+});
+
+test("parseJUnit: <failure> 자식 = fail", () => {
+  const m = parseJUnit(JUNIT_SAMPLE);
+  assert.equal(m.get("login_pwlen"), "fail");
+});
+
+test("parseJUnit: <error> 자식 = fail", () => {
+  const m = parseJUnit(JUNIT_SAMPLE);
+  assert.equal(m.get("login_boom"), "fail");
+});
+
+test("parseJUnit: <skipped> 자식 = skipped", () => {
+  const m = parseJUnit(JUNIT_SAMPLE);
+  assert.equal(m.get("login_todo"), "skipped");
+});
+
+test("parseJUnit: 빈/깨진 XML → 빈 맵(throw 안 함)", () => {
+  assert.equal(parseJUnit("").size, 0);
+  assert.equal(parseJUnit("not xml <broken").size, 0);
+});
+
+test("parseJUnit: 작은따옴표 속성 + XML 엔티티 디코드", () => {
+  const xml = `<testsuite><testcase name='a&amp;b &lt;x&gt;'/></testsuite>`;
+  const m = parseJUnit(xml);
+  assert.equal(m.get("a&b <x>"), "pass");
+});
+
+test("parseJUnit: 동일 이름 중복 시 fail이 sticky(재시도 1pass 1fail → fail)", () => {
+  const xml = `<testsuite>
+    <testcase name="flaky"/>
+    <testcase name="flaky"><failure/></testcase>
+  </testsuite>`;
+  assert.equal(parseJUnit(xml).get("flaky"), "fail");
+});
+
+test("parseJUnit: ::testing 같은 단어내부는 testcase 아님(name만 추출)", () => {
+  // testcase 태그만 인식 — testsuite 속성 등은 무시
+  const xml = `<testsuite name="suite_x" tests="1"><testcase name="real_one"/></testsuite>`;
+  const m = parseJUnit(xml);
+  assert.equal(m.size, 1);
+  assert.equal(m.get("real_one"), "pass");
+});
+
+test("readVerifyResults: .gbc/verify-results.xml 읽어 파싱", () => {
+  const dir = tmp();
+  try {
+    mkdirSync(join(dir, ".gbc"), { recursive: true });
+    writeFileSync(join(dir, JUNIT_DEFAULT_REL), JUNIT_SAMPLE, "utf8");
+    const m = readVerifyResults(dir);
+    assert.ok(m);
+    assert.equal(m.get("login_empty_creds"), "pass");
+    assert.equal(m.get("login_pwlen"), "fail");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readVerifyResults: 파일 부재 → null", () => {
+  const dir = tmp();
+  try {
+    assert.equal(readVerifyResults(dir), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readVerifyResults: relPath가 cwd 밖이면 컨테인먼트로 null (security S3)", () => {
+  const dir = tmp();
+  try {
+    // 트래버설 경로 → cwd 밖 → 읽지 않고 null(파일 존재 여부와 무관하게 거부).
+    assert.equal(readVerifyResults(dir, "../../../etc/passwd"), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===== ST3: reviewed judge (LLM 독해·경량). fail-open→unverifiable 가드 =====
+
+test("parseReviewVerdict: pass JSON → pass", () => {
+  const v = parseReviewVerdict('{"status":"pass","reason":"빈 자격증명 분기 존재"}');
+  assert.equal(v.status, "pass");
+  assert.equal(v.reason, "빈 자격증명 분기 존재");
+});
+
+test("parseReviewVerdict: fail JSON → fail", () => {
+  const v = parseReviewVerdict('{"status":"fail","reason":"분기 없음"}');
+  assert.equal(v.status, "fail");
+});
+
+test("parseReviewVerdict: 파싱 불가 → unverifiable (pass 아님!)", () => {
+  const v = parseReviewVerdict("그냥 텍스트 응답");
+  assert.equal(v.status, "unverifiable");
+  assert.notEqual(v.status, "pass");
+});
+
+test("parseReviewVerdict: 알 수 없는 status → unverifiable", () => {
+  const v = parseReviewVerdict('{"status":"block","reason":"x"}');
+  assert.equal(v.status, "unverifiable");
+});
+
+test("parseReviewVerdict: status 누락 → unverifiable", () => {
+  const v = parseReviewVerdict('{"reason":"x"}');
+  assert.equal(v.status, "unverifiable");
+});
+
+test("judgeReviewed: 주입된 pass 응답 → pass", async () => {
+  const v = await judgeReviewed("케이스", "function f(){}", {
+    invoke: async () => '{"status":"pass","reason":"ok"}',
+  });
+  assert.equal(v.status, "pass");
+});
+
+test("judgeReviewed: 주입된 fail 응답 → fail", async () => {
+  const v = await judgeReviewed("케이스", "code", {
+    invoke: async () => '{"status":"fail","reason":"no"}',
+  });
+  assert.equal(v.status, "fail");
+});
+
+// ★ 핵심 가드 — 호출 실패(throw)는 절대 pass로 떨어지지 않고 unverifiable이어야 한다.
+test("judgeReviewed: invoke가 throw → unverifiable (NOT pass)", async () => {
+  const v = await judgeReviewed("케이스", "code", {
+    invoke: async () => {
+      throw new Error("API 다운");
+    },
+  });
+  assert.equal(v.status, "unverifiable");
+  assert.notEqual(v.status, "pass");
+});
+
+test("judgeReviewed: 주입된 garbage 응답 → unverifiable", async () => {
+  const v = await judgeReviewed("케이스", "code", {
+    invoke: async () => "보장 없는 잡음",
+  });
+  assert.equal(v.status, "unverifiable");
+});
+
+test("buildReviewMessage: 케이스·코드 본문 포함 + 긴 코드 절단", () => {
+  const msg = buildReviewMessage("내 케이스", "X".repeat(20000));
+  assert.match(msg, /내 케이스/);
+  assert.match(msg, /최종 코드/);
+  assert.match(msg, /절단됨/);
+});
+
+// ===== ST4: runVerify 오케스트레이터 (바인딩별 라우팅) =====
+
+const PASS_REVIEWER = async () => ({ status: "pass", reason: "독해 충족" });
+const FAIL_REVIEWER = async () => ({ status: "fail", reason: "독해 미충족" });
+const UNVER_REVIEWER = async () => ({ status: "unverifiable", reason: "검토 실패" });
+
+function writeJunit(dir, xml) {
+  mkdirSync(join(dir, ".gbc"), { recursive: true });
+  writeFileSync(join(dir, JUNIT_DEFAULT_REL), xml, "utf8");
+}
+
+test("runVerify: ::test 통과 → verified/pass", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "빈 자격증명 거부 ::test t_empty");
+    writeJunit(dir, `<testsuite><testcase name="t_empty"/></testsuite>`);
+    const r = await runVerify(dir, { now: "T" });
+    assert.equal(r.cases.length, 1);
+    assert.equal(r.cases[0].level, "verified");
+    assert.equal(r.cases[0].status, "pass");
+    assert.equal(r.cases[0].case, "빈 자격증명 거부");
+    assert.equal(r.at, "T");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: ::test 실패 → verified/fail", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "비번 길이 ::test t_pw");
+    writeJunit(dir, `<testsuite><testcase name="t_pw"><failure/></testcase></testsuite>`);
+    const r = await runVerify(dir);
+    assert.equal(r.cases[0].level, "verified");
+    assert.equal(r.cases[0].status, "fail");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: ::test 결과파일 없음 → unverifiable(junit:none)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "케이스 ::test t_x");
+    const r = await runVerify(dir);
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].source, "junit:none");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: ::test 결과에 해당 테스트 없음 → unverifiable(junit:miss)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "케이스 ::test t_missing");
+    writeJunit(dir, `<testsuite><testcase name="other"/></testsuite>`);
+    const r = await runVerify(dir);
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].source, "junit:miss");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: ::test skip → unverifiable(미실행)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "케이스 ::test t_skip");
+    writeJunit(dir, `<testsuite><testcase name="t_skip"><skipped/></testcase></testsuite>`);
+    const r = await runVerify(dir);
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].source, "junit:skipped");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: ::file 독해 충족 → reviewed/pass (주입 reviewer)", async () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "auth.ts"), "function login(){}", "utf8");
+    addSpecCase(dir, "로그인 ::file auth.ts");
+    const r = await runVerify(dir, { reviewer: PASS_REVIEWER });
+    assert.equal(r.cases[0].level, "reviewed");
+    assert.equal(r.cases[0].status, "pass");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: ::file 독해 미충족 → reviewed/fail", async () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "auth.ts"), "x", "utf8");
+    addSpecCase(dir, "로그인 ::file auth.ts");
+    const r = await runVerify(dir, { reviewer: FAIL_REVIEWER });
+    assert.equal(r.cases[0].level, "reviewed");
+    assert.equal(r.cases[0].status, "fail");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: ::file reviewer가 unverifiable(fail-open) → unverifiable (NOT pass)", async () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "auth.ts"), "x", "utf8");
+    addSpecCase(dir, "로그인 ::file auth.ts");
+    const r = await runVerify(dir, { reviewer: UNVER_REVIEWER });
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.notEqual(r.cases[0].status, "pass");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: ::file 파일 없음 → unverifiable(review:nofile), reviewer 미호출", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "로그인 ::file 없는파일.ts");
+    let called = false;
+    const r = await runVerify(dir, {
+      reviewer: async () => {
+        called = true;
+        return { status: "pass", reason: "x" };
+      },
+    });
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].source, "review:nofile");
+    assert.equal(called, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: ::file이 cwd 밖 가리키면 거부 → unverifiable(review:outside), 미읽음", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "유출 시도 ::file ../../../etc/passwd");
+    let called = false;
+    const r = await runVerify(dir, {
+      reviewer: async () => {
+        called = true;
+        return { status: "pass", reason: "x" };
+      },
+    });
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].source, "review:outside");
+    assert.equal(called, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: cwd 내부 심링크가 밖을 가리켜도 거부(읽지 않음) — scope-critic 高", async () => {
+  const dir = tmp();
+  try {
+    // dir/leak → /etc/hostname(cwd 밖). 어휘 컨테인먼트는 통과(경로는 dir 안)하지만 lstat이 거부.
+    const link = join(dir, "leak");
+    try {
+      symlinkSync("/etc/hostname", link);
+    } catch {
+      return; // 심링크 미지원 환경(권한 등) → skip
+    }
+    addSpecCase(dir, "유출 ::file leak");
+    let called = false;
+    const r = await runVerify(dir, {
+      reviewer: async () => {
+        called = true;
+        return { status: "pass", reason: "x" };
+      },
+    });
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].source, "review:nofile");
+    assert.equal(called, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: 바인딩 없는 케이스 → unverifiable(none)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "바인딩 없는 케이스");
+    const r = await runVerify(dir);
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].source, "none");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: 케이스 없음 → 빈 리포트", async () => {
+  const dir = tmp();
+  try {
+    const r = await runVerify(dir);
+    assert.equal(r.cases.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

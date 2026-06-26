@@ -21,6 +21,7 @@ export type EventKind =
   | "spec-clear"
   | "gate-reset"
   | "done"
+  | "verify"
   | "bypass";
 
 export type GateDecision = "pass" | "block" | "failopen" | "cached";
