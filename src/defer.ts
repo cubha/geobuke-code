@@ -36,13 +36,22 @@ function save(cwd: string, defers: DeferEntry[]): void {
   writeJson(deferPath(cwd), defers);
 }
 
-/** 명시적으로 항목을 미룬다 (침묵 누락 차단의 유일한 정당 경로) */
-export function addDefer(cwd: string, item: string): DeferEntry {
+/**
+ * 명시적으로 항목을 미룬다 (침묵 누락 차단의 유일한 정당 경로).
+ * 중복 감지(ST2): 정규화 텍스트가 **미해결(open+in_progress)** 항목과 동일하면 새로 추가하지 않고
+ * 기존 엔트리를 added:false로 반환한다 — 같은 '무관' defer가 시점만 달리 누적되던 증상(2026-06-26 진단) 차단.
+ * resolved된 동일 텍스트는 막지 않는다(완료 후 같은 케이스가 정당히 재발할 수 있음 → 재-defer 허용).
+ * @returns { entry, added } — added=false면 entry는 기존(미해결) 항목.
+ */
+export function addDefer(cwd: string, item: string): { entry: DeferEntry; added: boolean } {
   const defers = loadDefers(cwd);
-  const entry: DeferEntry = { item: normalizeCase(item), at: nowIso(), status: "open" };
+  const normalized = normalizeCase(item);
+  const dup = defers.find((d) => d.status !== "resolved" && d.item === normalized);
+  if (dup) return { entry: dup, added: false };
+  const entry: DeferEntry = { item: normalized, at: nowIso(), status: "open" };
   defers.push(entry);
   save(cwd, defers);
-  return entry;
+  return { entry, added: true };
 }
 
 /**
@@ -58,6 +67,17 @@ export function activeDeferItems(cwd: string): string[] {
 /** 미해결(open+in_progress) defer 엔트리 (Stop hook·SessionStart 리마인드용) */
 export function unresolvedDefers(cwd: string): DeferEntry[] {
   return loadDefers(cwd).filter((d) => d.status !== "resolved");
+}
+
+/**
+ * 완료(resolved) defer 항목 텍스트만 (게이트 judge에 [이미 완료된 항목]으로 전달).
+ * activeDeferItems가 resolved를 제외해 judge에 안 보이던 갭을 메운다 — judge가 완료 케이스를
+ * "계획됨+미defer 형제"로 오인해 며칠 지난 케이스를 침묵누락 차단하던 드리프트(2026-06-26 진단) 완화.
+ */
+export function resolvedDeferItems(cwd: string): string[] {
+  return loadDefers(cwd)
+    .filter((d) => d.status === "resolved")
+    .map((d) => d.item);
 }
 
 /**

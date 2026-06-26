@@ -1,15 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { normalizeEdit, isGatedTool } from "../dist/normalize.js";
-import { parseVerdict, buildUserMessage, failOpenVerdict } from "../dist/judge.js";
+import { parseVerdict, buildUserMessage, failOpenVerdict, GATE_SYSTEM } from "../dist/judge.js";
 import { computeSpecHash, loadPlanSpec } from "../dist/spec.js";
 import {
   addDefer,
   activeDeferItems,
+  resolvedDeferItems,
   resolveDefer,
   unresolvedDefers,
   loadDefers,
@@ -17,7 +18,7 @@ import {
   reopenDefer,
 } from "../dist/defer.js";
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
-import { addSpecCase, readSpecCases, clearSpec } from "../dist/spec.js";
+import { addSpecCase, readSpecCases, clearSpec, archiveSpec } from "../dist/spec.js";
 import {
   buildBlockReason,
   shouldCacheVerdict,
@@ -137,6 +138,42 @@ test("buildUserMessage: defer 없으면 (없음)", () => {
 test("buildUserMessage: defer 항목 나열", () => {
   const m = buildUserMessage("plan", "edit", ["케이스A"]);
   assert.match(m, /- 케이스A/);
+});
+
+test("buildUserMessage: resolved 항목이 [이미 완료된 항목] 블록에 나열 (ST1)", () => {
+  const m = buildUserMessage("plan", "edit", ["미룸X"], ["완료된케이스Y"]);
+  assert.match(m, /\[이미 완료된 항목\]/);
+  assert.match(m, /- 완료된케이스Y/);
+  // 미룸과 완료가 다른 블록에 분리돼야 한다(judge가 둘을 구분)
+  assert.match(m, /- 미룸X/);
+});
+
+test("buildUserMessage: resolved 없으면 [이미 완료된 항목] 블록도 (없음) (ST1)", () => {
+  const m = buildUserMessage("plan", "edit", [], []);
+  assert.match(m, /\[이미 완료된 항목\]\n\(없음\)/);
+});
+
+test("buildUserMessage: resolved 인자 생략 시 하위호환(블록은 있되 없음) (ST1)", () => {
+  const m = buildUserMessage("plan", "edit", []);
+  assert.match(m, /\[이미 완료된 항목\]/);
+});
+
+test("resolvedDeferItems: status=resolved만 반환 (ST1)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gbc-resolved-"));
+  try {
+    addDefer(dir, "A 완료대상");
+    addDefer(dir, "B 미해결");
+    resolveDefer(dir, "1"); // A만 resolve
+    assert.deepEqual(resolvedDeferItems(dir), ["A 완료대상"]);
+    // active(미해결)와 상호배타: B만 active
+    assert.deepEqual(activeDeferItems(dir), ["B 미해결"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("GATE_SYSTEM: 이미 완료된 항목 제외 규칙 포함 (ST1)", () => {
+  assert.match(GATE_SYSTEM, /이미 완료된 항목/);
 });
 
 test("computeSpecHash: 동일 입력 동일 해시, 변경 시 다른 해시", () => {
@@ -575,6 +612,58 @@ test("addSpecCase: 멀티라인·장문 입력을 한 줄로 정규화", () => {
     addSpecCase(dir, "x".repeat(1000));
     cases = readSpecCases(dir);
     assert.ok(cases[1].length <= 500);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("archiveSpec: 본문 아카이브 후 spec 비움, 빈 spec은 null (ST3)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gbc-done-"));
+  try {
+    // 빈 spec → 아카이브할 것 없음
+    assert.equal(archiveSpec(dir), null);
+    addSpecCase(dir, "케이스1 완료");
+    addSpecCase(dir, "케이스2 완료");
+    const archivePath = archiveSpec(dir);
+    assert.ok(archivePath, "아카이브 경로 반환");
+    assert.match(archivePath, /spec\.archive/);
+    assert.ok(existsSync(archivePath), "아카이브 파일 생성됨");
+    assert.match(readFileSync(archivePath, "utf8"), /케이스1 완료/);
+    // spec 본문 비워짐 = 다음 작업단위로 깨끗이
+    assert.equal(readSpecCases(dir).length, 0);
+    // 비운 뒤 재호출은 다시 null
+    assert.equal(archiveSpec(dir), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("addSpecCase: 정규화 동일 케이스 중복 등록 skip (ST2)", () => {
+  const dir = tmp();
+  try {
+    assert.equal(addSpecCase(dir, "중복 이메일 검증"), true); // 최초=등록
+    assert.equal(addSpecCase(dir, "  중복 이메일 검증  "), false); // 정규화 동일=skip
+    assert.equal(readSpecCases(dir).length, 1);
+    assert.equal(addSpecCase(dir, "다른 케이스"), true); // 다른 건 등록
+    assert.equal(readSpecCases(dir).length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("addDefer: 미해결 동일 항목 중복 등록 skip, resolved는 재등록 허용 (ST2)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gbc-dedup-"));
+  try {
+    const r1 = addDefer(dir, "C4 무관");
+    assert.equal(r1.added, true);
+    const r2 = addDefer(dir, " C4 무관 "); // 정규화 동일 + 미해결 → skip
+    assert.equal(r2.added, false);
+    assert.equal(loadDefers(dir).length, 1);
+    // resolve 후 같은 텍스트 재등록은 허용(정당한 재-defer)
+    resolveDefer(dir, "1");
+    const r3 = addDefer(dir, "C4 무관");
+    assert.equal(r3.added, true);
+    assert.equal(loadDefers(dir).length, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

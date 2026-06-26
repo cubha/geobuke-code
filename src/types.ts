@@ -92,6 +92,8 @@ export interface GoldenCase {
   spec: string;
   /** 캡처 시점 활성 defer 스냅샷 */
   defers: string[];
+  /** 캡처 시점 완료(resolved) defer 스냅샷 — judge [이미 완료된 항목] 입력 재현용(선택, 하위호환) */
+  resolved?: string[];
   /** 캡처 시점 judge 출력(드리프트 비교 기준) */
   expected: GoldenExpected;
 }

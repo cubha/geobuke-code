@@ -61,10 +61,11 @@ const GATE_SYSTEM = `너는 코드 구현 직전에 동작하는 "게이트"다.
 
 [2단계 — 동작 편집일 때만 검사]
 (a) [계획 명세]가 없거나 빈약해서 이 동작의 의도·시나리오가 미지정인 채 구현되고 있는가? → **block** (시나리오 미지정).
-(b) 계획 명세가 있다면: 이 편집이 작성/수정하는 *바로 그 기능*에 대해 계획에 적힌 형제 케이스 중, 이 편집에서도 안 다뤄지고 [명시적으로 미룬 항목]에도 없는 것이 있는가? → **block** (침묵 누락).
+(b) 계획 명세가 있다면: 이 편집이 작성/수정하는 *바로 그 기능*에 대해 계획에 적힌 형제 케이스 중, 이 편집에서도 안 다뤄지고 [명시적으로 미룬 항목]에도 [이미 완료된 항목]에도 없는 것이 있는가? → **block** (침묵 누락).
     - 예: 로그인 검증 함수를 쓰면서 계획의 로그인 검증 케이스(중복 이메일·비밀번호 길이 등)를 언급·등록 없이 빠뜨림.
     - 코드 주석으로 "나중에"라고만 적고 미룬 항목에 등록 안 한 것도 침묵 누락이다.
     - 계획이 요구한 동작 형태(예: 인라인 에러 메시지)를 충족 못 하고 다른 형태(예: bool만 반환)로 빠뜨린 것도 누락이다.
+    - ★ [이미 완료된 항목]에 있는 케이스는 **이전 작업단위에서 이미 처리된 것**이다. 형제 후보에서 제외하고 절대 누락으로 다시 차단(re-flag)하지 마라. 이 편집과 무관한 과거 완료 케이스를 침묵누락이라 막는 것은 오탐이다.
 (c) 위에 해당 없으면 → **pass**.
 
 핵심 균형:
@@ -74,13 +75,21 @@ const GATE_SYSTEM = `너는 코드 구현 직전에 동작하는 "게이트"다.
 오직 아래 JSON만 출력(설명·마크다운 펜스 금지):
 {"verdict":"block"|"pass","missing":["누락된 케이스"],"reason":"한 줄 사유"}`;
 
-function buildUserMessage(planSpec: string, editText: string, defers: string[]): string {
-  const deferText = defers.length > 0 ? defers.map((d) => `- ${d}`).join("\n") : "(없음)";
+function buildUserMessage(
+  planSpec: string,
+  editText: string,
+  defers: string[],
+  resolved: string[] = [],
+): string {
+  const fmt = (xs: string[]): string => (xs.length > 0 ? xs.map((d) => `- ${d}`).join("\n") : "(없음)");
   return `[계획 명세]
 ${planSpec.trim() || "(계획 명세 없음 — 개발자가 곧바로 구현을 시작함)"}
 
 [명시적으로 미룬 항목]
-${deferText}
+${fmt(defers)}
+
+[이미 완료된 항목]
+${fmt(resolved)}
 
 [현재 편집]
 ${editText}`;
@@ -197,9 +206,10 @@ export async function judge(
   planSpec: string,
   editText: string,
   defers: string[] = [],
+  resolved: string[] = [],
   opts: { temperature?: number } = {},
 ): Promise<Verdict> {
-  const user = buildUserMessage(planSpec, editText, defers);
+  const user = buildUserMessage(planSpec, editText, defers, resolved);
   const transport = selectedTransport();
   try {
     // claude -p 폴백은 temperature 플래그가 없어 핀 불가 → CLI-transport replay는 best-effort.

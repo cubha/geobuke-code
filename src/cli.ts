@@ -14,7 +14,14 @@ import {
 } from "node:fs";
 
 import { runPreToolUse, runStop, runSessionStart } from "./hook.js";
-import { loadPlanSpec, computeSpecHash, addSpecCase, readSpecCases, clearSpec } from "./spec.js";
+import {
+  loadPlanSpec,
+  computeSpecHash,
+  addSpecCase,
+  readSpecCases,
+  clearSpec,
+  archiveSpec,
+} from "./spec.js";
 import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer, startDefer, reopenDefer } from "./defer.js";
 import { loadRepos, addRepo, removeRepo } from "./repos.js";
@@ -263,9 +270,12 @@ function cmdDefer(args: string[]): void {
       console.error('사용: gbc defer add "<케이스 설명>"');
       process.exit(1);
     }
-    addDefer(cwd, item);
-    logCli(cwd, "defer-add", curHash(cwd));
-    console.log(`🐢 미룸 등록: ${item}`);
+    if (addDefer(cwd, item).added) {
+      logCli(cwd, "defer-add", curHash(cwd));
+      console.log(`🐢 미룸 등록: ${item}`);
+    } else {
+      console.log(`🐢 이미 미해결로 미룬 항목 — 중복 등록 skip: ${item}`);
+    }
   } else if (sub === "mute" || sub === "unmute") {
     const muted = sub === "mute";
     setStopHintMuted(cwd, muted);
@@ -324,9 +334,12 @@ function cmdSpec(args: string[]): void {
       process.exit(1);
     }
     const beforeHash = curHash(cwd); // 변이 전 해시 = 수정 대상 작업단위와 상관
-    addSpecCase(cwd, item);
-    logCli(cwd, "spec-add", beforeHash);
-    console.log(`🐢 명세 등록: ${item}`);
+    if (addSpecCase(cwd, item)) {
+      logCli(cwd, "spec-add", beforeHash);
+      console.log(`🐢 명세 등록: ${item}`);
+    } else {
+      console.log(`🐢 이미 등록된 케이스 — 중복 등록 skip: ${item}`);
+    }
   } else if (sub === "show") {
     const cases = readSpecCases(cwd);
     if (cases.length === 0) {
@@ -343,6 +356,27 @@ function cmdSpec(args: string[]): void {
     console.error("사용: gbc spec <add|show|clear> ...");
     process.exit(1);
   }
+}
+
+// ---------- gbc done ----------
+/**
+ * 작업단위 명시 종료(ST3). spec.md 본문을 아카이브→비우고 게이트를 리셋한다.
+ * drift 근본수정: "완료" 이벤트 부재로 옛 케이스가 누적·부활하던 것을, 명시적 완료 신호로 닫는다.
+ * gate reset 로직(resetGate)은 변경하지 않고 그대로 호출만 한다(재게이트 의미 보존).
+ * defer는 건드리지 않는다 — 미해결 defer는 작업단위를 넘어 이월되는 별도 수명주기다.
+ */
+function cmdDone(): void {
+  const cwd = process.cwd();
+  const beforeHash = curHash(cwd);
+  const archived = archiveSpec(cwd);
+  logCli(cwd, "done", beforeHash);
+  resetGate(cwd);
+  if (archived) {
+    console.log(`🐢 작업단위 종료 — 명세 아카이브: ${archived}`);
+  } else {
+    console.log("🐢 작업단위 종료 — 비울 명세가 없습니다(이미 비어 있음).");
+  }
+  console.log("   게이트 리셋 완료. 다음 작업단위는 새 명세로 시작하세요('gbc spec add').");
 }
 
 // ---------- gbc gate ----------
@@ -432,7 +466,7 @@ async function cmdGateSnapshotReplay(cwd: string, args: string[]): Promise<void>
     const votes: Record<VerdictKind, number> = { pass: 0, block: 0 };
     let lastMissing: string[] = [];
     for (let i = 0; i < samples; i++) {
-      const v = await judge(c.spec, c.edit, c.defers, { temperature: 0 });
+      const v = await judge(c.spec, c.edit, c.defers, c.resolved ?? [], { temperature: 0 });
       votes[v.verdict]++;
       lastMissing = v.missing;
     }
@@ -511,18 +545,33 @@ function cmdGateReview(cwd: string, args: string[]): void {
   }
 
   const beforeHash = curHash(cwd); // 변이 전 해시 = 게이트된 작업단위와 상관(M1 churn)
+  const specAdded: string[] = [];
+  const specDup: string[] = [];
   for (const c of toSpec) {
-    addSpecCase(cwd, c);
-    logCli(cwd, "spec-add", beforeHash);
+    if (addSpecCase(cwd, c)) {
+      logCli(cwd, "spec-add", beforeHash);
+      specAdded.push(c);
+    } else {
+      specDup.push(c);
+    }
   }
+  const deferAdded: string[] = [];
+  const deferDup: string[] = [];
   for (const c of toDefer) {
-    addDefer(cwd, c);
-    logCli(cwd, "defer-add", beforeHash);
+    if (addDefer(cwd, c).added) {
+      logCli(cwd, "defer-add", beforeHash);
+      deferAdded.push(c);
+    } else {
+      deferDup.push(c);
+    }
   }
   clearPendingReview(cwd);
 
-  if (toSpec.length > 0) console.log(`🐢 명세 등록 ${toSpec.length}건: ${toSpec.join(", ")}`);
-  if (toDefer.length > 0) console.log(`🐢 미룸 등록 ${toDefer.length}건: ${toDefer.join(", ")}`);
+  if (specAdded.length > 0) console.log(`🐢 명세 등록 ${specAdded.length}건: ${specAdded.join(", ")}`);
+  if (deferAdded.length > 0) console.log(`🐢 미룸 등록 ${deferAdded.length}건: ${deferAdded.join(", ")}`);
+  if (specDup.length + deferDup.length > 0) {
+    console.log(`🐢 중복 skip ${specDup.length + deferDup.length}건: ${[...specDup, ...deferDup].join(", ")}`);
+  }
   console.log("→ 검토 완료(펜딩 비움). 같은 편집을 재시도하면 등록된 케이스 기준으로 재판정됩니다.");
 }
 
@@ -732,8 +781,9 @@ function usage(): void {
   gbc defer unmute                    Stop defer 알림 다시 켜기
   gbc spec add "<케이스>"              승인된 시나리오를 .gbc/spec.md에 등록
   gbc spec show                       등록된 케이스 목록
-  gbc spec clear                      명세 비우기(작업단위 종료)
-  gbc gate reset                      작업단위 게이트 리셋
+  gbc spec clear                      명세 비우기(아카이브 없이)
+  gbc done                            작업단위 명시 종료(명세 아카이브→비움 + 게이트 리셋)
+  gbc gate reset                      작업단위 게이트만 리셋(명세 보존·같은 단위 재게이트)
   gbc gate review                     block이 도출한 누락 케이스 체크리스트 보기
   gbc gate review --spec <ref> --defer <ref>
                                       누락 케이스 일괄 분류(승인→spec / 미룸→defer)
@@ -774,6 +824,8 @@ async function main(): Promise<void> {
       return cmdSpec(rest);
     case "gate":
       return cmdGate(rest);
+    case "done":
+      return cmdDone();
     case "metrics":
       return cmdMetrics(rest);
     case "repos":
