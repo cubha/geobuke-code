@@ -98,6 +98,59 @@ export interface GoldenCase {
   expected: GoldenExpected;
 }
 
+/**
+ * 사후 결과검증(post-impl verify) 판정 강도 — 사다리.
+ * - verified: 테스트 실행 결과(JUnit)가 케이스를 통과/실패로 증명(강).
+ * - reviewed: 러너 없이 LLM이 최종 코드를 독해해 케이스 주소화를 판정(경량·약). *동작 증명 아님*.
+ * - unverifiable: 증거(테스트결과/파일)가 없어 정직하게 미검증(바닥) — 거짓 pass/block 금지.
+ *   (게이트 fail-open 철학의 미러: 모르면 통과시키지도 막지도 않고 '모름'을 보고한다.)
+ */
+export type VerifyLevel = "verified" | "reviewed" | "unverifiable";
+
+/** spec 케이스↔증거 바인딩 종류 (케이스 접미사 ::test/::file 파싱 결과) */
+export type BindingKind = "test" | "file" | "none";
+
+/**
+ * reviewed 경로(LLM 최종코드 독해) 판정.
+ * - pass/fail: 모델이 코드를 읽고 케이스 주소화 여부를 판정(독해, *동작 증명 아님*).
+ * - unverifiable: 검토 호출 실패·응답 파싱 불가 → 정직하게 미검증.
+ *   ⚠️ 게이트의 failOpenVerdict(verdict:"pass")를 절대 복사하지 않는다 — reviewed의 fail-open은
+ *   'pass'가 아니라 'unverifiable'이어야 거짓 확신을 막는다(사다리 핵심 가드).
+ */
+export interface ReviewVerdict {
+  status: "pass" | "fail" | "unverifiable";
+  reason: string;
+}
+
+/** spec 케이스의 검증 바인딩 — `<케이스 본문> ::test <테스트명>` 또는 `... ::file <경로>` 파싱 결과 */
+export interface CaseBinding {
+  /** 바인딩 접미사를 제거한 케이스 본문 */
+  text: string;
+  kind: BindingKind;
+  /** test명 또는 file 경로 (kind==="none"이면 "") */
+  ref: string;
+}
+
+/** 한 케이스의 사후검증 판정 */
+export interface CaseVerdict {
+  /** 케이스 본문(바인딩 접미사 제거) */
+  case: string;
+  level: VerifyLevel;
+  /** verified/reviewed일 때 pass|fail, unverifiable이면 none */
+  status: "pass" | "fail" | "none";
+  /** 판정 근거 한 줄(매칭된 test명·파일·사유) */
+  evidence: string;
+  /** 증거 소스 (예: "junit:results.xml", "review:src/x.ts", "none") */
+  source: string;
+}
+
+/** 사후검증 리포트 (.gbc/verify-results.xml 등 증거를 읽어 케이스별 판정한 집계) */
+export interface VerifyReport {
+  cases: CaseVerdict[];
+  /** 생성 시각 (ISO) */
+  at: string;
+}
+
 /** 작업단위 게이트 상태 (.gbc/state.json) */
 export interface GateState {
   /** 현재 작업단위를 식별하는 계획 명세 해시 */
