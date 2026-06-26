@@ -2,6 +2,11 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [Unreleased]
+
+### Changed
+- **업데이트 안내 캐시 TTL 24h → 12h** — 신버전 출시 후 기존 설치처가 더 빨리 인지하도록 `~/.gbc/version-check.json` 캐시 만료를 절반으로 단축(`src/version.ts`). refresh는 비-핫패스(SessionStart stale·PreToolUse judge 병렬)에서만 일어나므로 핫패스 부담 없음. ⚠️ **소급 안 됨** — TTL은 설치된 코드에 컴파일돼 있어, 기존 설치처는 이 버전을 받은 *다음부터* 12h가 적용된다. 현재 신버전을 못 받은 설치처는 수동 `npm i -g geobuke-code@latest`로 1회 갱신해야 한다.
+
 ## [0.4.1] - 2026-06-25
 
 게이트 운영 현황을 한 곳에서 조회·해석하는 읽기전용 관측 스킬을 추가한다. 0.4.0이 깐 운영층 명령들(`metrics --all`·`repos list`·`gate snapshot`)이 세션 안에서 발견가능성(discoverability)이 없어 매번 외워 치거나 요청해야 했던 갭을 메운다.
