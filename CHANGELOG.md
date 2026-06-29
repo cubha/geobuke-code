@@ -4,8 +4,18 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-29
+
+순수 대화 세션(코드 편집 없이 대화만)에서 업데이트 안내가 사용자에게 영영 안 보이던 가시성 갭을 닫는다. 0.3.0이 PreToolUse(편집) 경로의 배너는 고쳤지만, 도구 호출이 0인 세션은 PreToolUse가 안 떠서 SessionStart 채널만 남는데 그게 모델 컨텍스트로만 주입돼 사용자 화면엔 안 떴다.
+
+### Fixed
+- **SessionStart 업데이트 안내 — 사용자에게 직접 배너 렌더 (3층 갭)** — SessionStart hook 출력을 plaintext stdout(= CC가 `additionalContext`로 모델 컨텍스트에만 주입)에서 **JSON 청중분리**로 바꿨다: defer/크로스repo 힌트는 `hookSpecificOutput.additionalContext`(Claude용)로 유지하되, **업데이트 안내는 top-level `systemMessage`로 분리**해 사용자 화면에 `⎿ SessionStart:startup says:` 배너로 직접 표시한다(`src/hook.ts` `buildSessionStartPayload`). 실제 CC TUI 도그푸딩으로 렌더 확인. 이제 "안녕"만 치고 끝내는 세션에서도 신버전·재init 안내가 LLM의 자발적 relay에 의존하지 않고 항상 보인다. 비차단(exit 0)·결정론적·기존 opt-out(`GBC_NO_SESSION_HINT`/`GBC_NO_UPDATE_NOTICE`) 보존.
+
 ### Changed
 - **업데이트 안내 캐시 TTL 24h → 12h** — 신버전 출시 후 기존 설치처가 더 빨리 인지하도록 `~/.gbc/version-check.json` 캐시 만료를 절반으로 단축(`src/version.ts`). refresh는 비-핫패스(SessionStart stale·PreToolUse judge 병렬)에서만 일어나므로 핫패스 부담 없음. ⚠️ **소급 안 됨** — TTL은 설치된 코드에 컴파일돼 있어, 기존 설치처는 이 버전을 받은 *다음부터* 12h가 적용된다. 현재 신버전을 못 받은 설치처는 수동 `npm i -g geobuke-code@latest`로 1회 갱신해야 한다.
+
+### Notes
+- **재init 불필요** — SessionStart hook의 출력 형식이 바뀌었지만 hook **명령** 자체는 동일하므로 settings.json 재등록은 불필요하다. 다만 기존 설치처는 새 동작(JSON 청중분리)을 받으려면 전역 패키지를 갱신해야 한다: `gbc update`(또는 `npm i -g geobuke-code@latest`). 로컬 dist 경유 도그푸딩 설치처는 재빌드로 반영된다.
 
 ## [0.4.1] - 2026-06-25
 
