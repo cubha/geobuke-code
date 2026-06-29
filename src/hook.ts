@@ -443,8 +443,28 @@ export function buildStopReminder(all: DeferEntry[]): string {
 }
 
 /**
- * SessionStart: 세션 진입 시 미해결 defer를 stdout(plain text)으로 표면화 → Claude 컨텍스트 주입.
- * 잔여 없으면 무출력. GBC_NO_SESSION_HINT=1로 opt-out. 결정론적(LLM·코드비교 없음).
+ * SessionStart 출력 직렬화 — 청중분리(2026-06-29, project_update_notice_visibility_gap 3층 갭).
+ * contextParts(defer/크로스repo 힌트)는 hookSpecificOutput.additionalContext로 Claude 컨텍스트에,
+ * userNotice(업데이트 안내)는 top-level systemMessage로 사용자에게 직접 배너 표시한다
+ * (실측 확정: SessionStart systemMessage는 `⎿ SessionStart:startup says:` 배너로 렌더됨).
+ * 둘 다 비면 ""(무출력 — 현행 동작 보존). permissionDecision 없음 = 비차단.
+ */
+export function buildSessionStartPayload(contextParts: string[], userNotice: string): string {
+  const out: {
+    hookSpecificOutput?: { hookEventName: "SessionStart"; additionalContext: string };
+    systemMessage?: string;
+  } = {};
+  const ctx = contextParts.filter((p) => p && p.trim()).join("\n");
+  if (ctx) out.hookSpecificOutput = { hookEventName: "SessionStart", additionalContext: ctx };
+  if (userNotice && userNotice.trim()) out.systemMessage = userNotice;
+  return Object.keys(out).length ? JSON.stringify(out) : "";
+}
+
+/**
+ * SessionStart: 세션 진입 시 출력을 JSON으로 청중분리(Option X, project_update_notice_visibility_gap).
+ * defer/크로스repo 힌트 → additionalContext(Claude 컨텍스트), 업데이트 안내 → systemMessage(사용자
+ * 직접 배너). 둘 다 없으면 무출력. GBC_NO_SESSION_HINT·GBC_NO_UPDATE_NOTICE로 각각 opt-out.
+ * 결정론적(LLM·코드비교 없음)·비차단(exit 0).
  */
 export async function runSessionStart(ctx?: HookContext): Promise<void> {
   let input: SessionStartInput = {};
@@ -455,17 +475,20 @@ export async function runSessionStart(ctx?: HookContext): Promise<void> {
     process.exit(0);
   }
   const cwd = input.cwd || process.cwd();
-  const parts: string[] = [];
+  // 청중분리(Option X): contextParts는 additionalContext(Claude 컨텍스트), userNotice는
+  // systemMessage(사용자 직접 배너). buildSessionStartPayload가 JSON 직렬화.
+  const contextParts: string[] = [];
+  let userNotice = "";
   // 미해결 defer 알림(GBC_NO_SESSION_HINT로 opt-out — 기존 동작 보존).
   if (process.env.GBC_NO_SESSION_HINT !== "1") {
     const hint = buildSessionStartHint(loadDefers(cwd));
     if (hint) {
-      parts.push(hint);
+      contextParts.push(hint);
       // Stop 리마인드 음소거 중이면 진입 시 1회 환기("꺼둔 걸 잊지 않게"). hint가 있을 때만
       // = 미해결 defer가 있을 때만(잔여 0이면 음소거 무관·노이즈). buildSessionStartHint는
       // 순수 유지하고 오케스트레이션에서만 한 줄 첨부(시그니처 미오염).
       if (isStopHintMuted(cwd)) {
-        parts.push("🔕 Stop 리마인드 음소거 중 — 매 대화 종료 알림은 꺼져 있습니다 (해제: /gbc-mute).");
+        contextParts.push("🔕 Stop 리마인드 음소거 중 — 매 대화 종료 알림은 꺼져 있습니다 (해제: /gbc-mute).");
       }
     }
   }
@@ -474,7 +497,7 @@ export async function runSessionStart(ctx?: HookContext): Promise<void> {
   if (process.env.GBC_NO_SESSION_HINT !== "1" && process.env.GBC_NO_CROSS_REPO !== "1") {
     try {
       const xr = buildCrossRepoHint(loadRepos(), cwd);
-      if (xr) parts.push(xr);
+      if (xr) contextParts.push(xr);
     } catch {
       /* 레지스트리 읽기 실패는 무시(fail-silent) */
     }
@@ -495,11 +518,14 @@ export async function runSessionStart(ctx?: HookContext): Promise<void> {
   try {
     if (ctx?.cliPath) {
       const notice = buildUpdateNotice(readProjectSettings(cwd), ctx.cliPath, ctx.version ?? "");
-      if (notice) parts.push(notice);
+      if (notice) userNotice = notice;
     }
   } catch {
     /* 안내 실패는 무시(fail-silent) */
   }
-  if (parts.length > 0) process.stdout.write(parts.join("\n"));
+  // 청중분리 직렬화: 힌트→additionalContext(Claude), 안내→systemMessage(사용자 직접 배너).
+  // 둘 다 비면 무출력(현행 동작 보존). 비차단(exit 0) 유지.
+  const payload = buildSessionStartPayload(contextParts, userNotice);
+  if (payload) process.stdout.write(payload);
   process.exit(0);
 }

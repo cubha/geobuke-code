@@ -26,6 +26,7 @@ import {
   buildSessionStartHint,
   buildStopReminder,
   buildCrossRepoHint,
+  buildSessionStartPayload,
 } from "../dist/hook.js";
 import { loadRepos, addRepo, removeRepo } from "../dist/repos.js";
 import {
@@ -2016,4 +2017,29 @@ test("runVerify: 케이스 없음 → 빈 리포트", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── buildSessionStartPayload: SessionStart 출력 청중분리(Option X) ──────────
+test("buildSessionStartPayload: 힌트+안내 둘 다 → additionalContext + systemMessage 분리", () => {
+  const out = JSON.parse(buildSessionStartPayload(["🐢 defer 2건", "🌐 타 repo"], "🐢 신버전 0.5.0"));
+  assert.equal(out.hookSpecificOutput.hookEventName, "SessionStart");
+  assert.equal(out.hookSpecificOutput.additionalContext, "🐢 defer 2건\n🌐 타 repo");
+  assert.equal(out.systemMessage, "🐢 신버전 0.5.0");
+});
+
+test("buildSessionStartPayload: 힌트만 → additionalContext만, systemMessage 생략", () => {
+  const out = JSON.parse(buildSessionStartPayload(["🐢 defer 2건"], ""));
+  assert.equal(out.hookSpecificOutput.additionalContext, "🐢 defer 2건");
+  assert.ok(!("systemMessage" in out), "systemMessage 키가 없어야 함");
+});
+
+test("buildSessionStartPayload: 안내만 → systemMessage만, additionalContext 생략", () => {
+  const out = JSON.parse(buildSessionStartPayload([], "🐢 신버전 0.5.0"));
+  assert.equal(out.systemMessage, "🐢 신버전 0.5.0");
+  assert.ok(!("hookSpecificOutput" in out), "hookSpecificOutput 키가 없어야 함");
+});
+
+test("buildSessionStartPayload: 둘 다 없음 → 빈 문자열(무출력, 현행 동작 보존)", () => {
+  assert.equal(buildSessionStartPayload([], ""), "");
+  assert.equal(buildSessionStartPayload(["", "  "], ""), "", "빈/공백 파트만 있으면 무출력");
 });
