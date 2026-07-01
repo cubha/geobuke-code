@@ -27,6 +27,7 @@ import {
   buildStopReminder,
   buildCrossRepoHint,
   buildSessionStartPayload,
+  formatScopeFindings,
 } from "../dist/hook.js";
 import { loadRepos, addRepo, removeRepo } from "../dist/repos.js";
 import {
@@ -2333,4 +2334,32 @@ test("collectGrepContext: 매치 없음 → filesWithContext 비고 컨텍스트
   const { context, filesWithContext } = await collectGrepContext(".", entries, { grep });
   assert.equal(context, "");
   assert.equal(filesWithContext.size, 0, "컨텍스트 없음 → 하드가드가 unknown 처리하게 됨");
+});
+
+// ===== SubTask 5: hook.ts formatScopeFindings (표면화 포맷) =====
+
+function sv(over = {}) {
+  return { file: "src/a.ts", axisA: "ok", axisAReason: "", rung: "none", rungReason: "", degraded: false, ...over };
+}
+
+test("formatScopeFindings: 액션 없음(ok+none) → 빈 문자열(불필요한 표면화 안 함)", () => {
+  assert.equal(formatScopeFindings([sv()], false), "");
+  assert.equal(formatScopeFindings([sv({ axisA: "unknown", rung: "unknown", degraded: true })], true), "");
+});
+
+test("formatScopeFindings: axisA broken → 파급반경 라인 포함", () => {
+  const out = formatScopeFindings([sv({ axisA: "broken", axisAReason: "Sidebar 미반영" })], false);
+  assert.ok(out.includes("파급반경"), "파급반경 라벨");
+  assert.ok(out.includes("Sidebar 미반영"));
+});
+
+test("formatScopeFindings: rung1/2/3 → 각 라벨 포함", () => {
+  assert.ok(formatScopeFindings([sv({ rung: "rung1", rungReason: "플러그인 과다" })], false).includes("과다구현"));
+  assert.ok(formatScopeFindings([sv({ rung: "rung2", rungReason: "text.ts 중복" })], false).includes("기존코드 재사용"));
+  assert.ok(formatScopeFindings([sv({ rung: "rung3", rungReason: "structuredClone" })], false).includes("표준라이브러리"));
+});
+
+test("formatScopeFindings: degraded + 액션 있음 → 정직 고지 한 줄 첨부", () => {
+  const out = formatScopeFindings([sv({ axisA: "broken", axisAReason: "r" })], true);
+  assert.ok(/생략|탐색 컨텍스트/.test(out), "degraded 고지");
 });
