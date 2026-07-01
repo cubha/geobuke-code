@@ -28,6 +28,7 @@ import {
   buildCrossRepoHint,
   buildSessionStartPayload,
   formatScopeFindings,
+  logScopeVerdicts,
 } from "../dist/hook.js";
 import { loadRepos, addRepo, removeRepo } from "../dist/repos.js";
 import {
@@ -2362,4 +2363,66 @@ test("formatScopeFindings: rung1/2/3 → 각 라벨 포함", () => {
 test("formatScopeFindings: degraded + 액션 있음 → 정직 고지 한 줄 첨부", () => {
   const out = formatScopeFindings([sv({ axisA: "broken", axisAReason: "r" })], true);
   assert.ok(/생략|탐색 컨텍스트/.test(out), "degraded 고지");
+});
+
+// ===== SubTask 6: metrics.ts scope 계측 태깅 (프라이버시 불변식) =====
+
+test("logScopeVerdicts: events.jsonl에 scope 이벤트 기록(enum 태그만)", () => {
+  const cwd = tmpCwd();
+  try {
+    const verdicts = [
+      sv({ file: "src/a.ts", axisA: "broken", axisAReason: "민감한 코드 사유 텍스트", rung: "rung2", rungReason: "비밀 스니펫" }),
+    ];
+    logScopeVerdicts(cwd, "sess1", verdicts, { contextMode: "grep", transport: "api", specPresent: true });
+    const raw = readFileSync(join(cwd, ".gbc", "events.jsonl"), "utf8");
+    const events = parseEvents(raw);
+    const scopeEvts = events.filter((e) => e.kind === "scope");
+    assert.equal(scopeEvts.length, 1);
+    const e = scopeEvts[0];
+    assert.equal(e.axis, "rung2", "rung 걸림이 coarse axis 태그");
+    assert.equal(e.axisA, "broken");
+    assert.equal(e.rung, "rung2");
+    assert.equal(e.spec_present, true);
+    assert.equal(e.context_mode, "grep");
+    assert.equal(e.transport, "api");
+    assert.equal(e.degraded, false);
+    // 프라이버시 불변식: 코드 본문·사유 문자열이 직렬화에 절대 없어야 함
+    assert.ok(!raw.includes("민감한 코드 사유 텍스트"), "axisAReason 미저장");
+    assert.ok(!raw.includes("비밀 스니펫"), "rungReason 미저장");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("logScopeVerdicts: axisA broken·rung none → axis=scope 태그", () => {
+  const cwd = tmpCwd();
+  try {
+    logScopeVerdicts(cwd, "s", [sv({ axisA: "broken", rung: "none" })], {
+      contextMode: "grep",
+      transport: "cli",
+      specPresent: false,
+    });
+    const events = parseEvents(readFileSync(join(cwd, ".gbc", "events.jsonl"), "utf8"));
+    assert.equal(events[0].axis, "scope");
+    assert.equal(events[0].context_mode, "grep");
+    assert.equal(events[0].spec_present, false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("logScopeVerdicts: degraded 이벤트도 정직 기록(context_mode none)", () => {
+  const cwd = tmpCwd();
+  try {
+    logScopeVerdicts(cwd, "s", [sv({ axisA: "unknown", rung: "unknown", degraded: true })], {
+      contextMode: "none",
+      transport: "api",
+      specPresent: true,
+    });
+    const events = parseEvents(readFileSync(join(cwd, ".gbc", "events.jsonl"), "utf8"));
+    assert.equal(events[0].degraded, true);
+    assert.equal(events[0].context_mode, "none");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

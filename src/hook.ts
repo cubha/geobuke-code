@@ -344,21 +344,38 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   process.exit(0);
 }
 
+/** scope 이벤트의 coarse axis 태그 도출 — rung 걸림이 우선, 아니면 파급반경(scope). */
+function scopeAxisTag(v: ScopeVerdict): "scope" | "rung1" | "rung2" | "rung3" {
+  if (v.rung === "rung1" || v.rung === "rung2" || v.rung === "rung3") return v.rung;
+  return "scope";
+}
+
 /**
- * scope 판정 결과를 events.jsonl에 계측 태깅한다(SubTask 6에서 GateEvent 필드와 함께 완성).
- * 프라이버시 불변식: 열거형 태그만(axis/degraded 등), 코드 본문·사유는 절대 넣지 않는다.
+ * scope 판정 결과를 events.jsonl에 계측 태깅한다(편집별 1 이벤트).
+ * 프라이버시 불변식: 열거형 태그만(axis/axisA/rung/context_mode/transport/degraded), 코드 본문·사유
+ * 문자열은 절대 넣지 않는다(axisAReason/rungReason 미포함). 계측 실패는 무시(logEvent 내부 fail-silent).
  */
-function logScopeVerdicts(
+export function logScopeVerdicts(
   cwd: string,
   session: string,
   verdicts: ScopeVerdict[],
-  hasContext: boolean,
+  opts: { contextMode: "none" | "grep"; transport: "api" | "cli"; specPresent: boolean },
 ): void {
-  // SubTask 6: GateEvent에 axis/spec_present/context_mode/transport/degraded 필드 추가 후 여기서 태깅.
-  void cwd;
-  void session;
-  void verdicts;
-  void hasContext;
+  for (const v of verdicts) {
+    logEvent(cwd, {
+      at: nowIso(),
+      session,
+      specHash: "",
+      kind: "scope",
+      axis: scopeAxisTag(v),
+      axisA: v.axisA,
+      rung: v.rung,
+      spec_present: opts.specPresent,
+      context_mode: opts.contextMode,
+      transport: opts.transport,
+      degraded: v.degraded,
+    });
+  }
 }
 
 /**
@@ -393,11 +410,16 @@ async function processScopeQueue(cwd: string, session: string): Promise<string> 
   const queue = readScopeQueue(cwd);
   if (queue.length === 0) return "";
   try {
-    const { judgeScope } = await import("./judge.js");
+    const { judgeScope, selectedTransport } = await import("./judge.js");
     const { context, filesWithContext } = await collectGrepContext(cwd, queue);
     const verdicts = await judgeScope(queue, context, filesWithContext);
     clearScopeQueue(cwd);
-    logScopeVerdicts(cwd, session, verdicts, Boolean(context));
+    const { text: specText } = loadPlanSpec(cwd);
+    logScopeVerdicts(cwd, session, verdicts, {
+      contextMode: context ? "grep" : "none",
+      transport: selectedTransport(),
+      specPresent: specText.trim() !== "",
+    });
     return formatScopeFindings(verdicts, verdicts.some((v) => v.degraded));
   } catch {
     // 판정 파이프라인 실패 → 큐를 비워 다음 턴 누적 폭주를 막고 조용히 통과(fail-silent).
