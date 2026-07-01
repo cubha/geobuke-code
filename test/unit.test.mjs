@@ -78,6 +78,13 @@ import {
   MAX_GREP_LINE_LEN,
   MAX_SCOPE_CONTEXT_CHARS,
 } from "../dist/scope.js";
+import {
+  buildScopeMessage,
+  parseScopeVerdicts,
+  judgeScope,
+  SCOPE_SYSTEM,
+  SCOPE_MODEL,
+} from "../dist/judge.js";
 import { parseJUnit, readVerifyResults, JUNIT_DEFAULT_REL } from "../dist/junit.js";
 import { runVerify } from "../dist/verify.js";
 import { readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
@@ -2171,4 +2178,120 @@ test("formatGrepContext: 총 길이 MAX_SCOPE_CONTEXT_CHARS 이내로 바운드"
   const ctx = formatGrepContext(many);
   assert.ok(ctx.length <= MAX_SCOPE_CONTEXT_CHARS, `컨텍스트 길이 ${ctx.length} <= ${MAX_SCOPE_CONTEXT_CHARS}`);
   assert.ok(ctx.includes("src/f0.ts"), "앞쪽 매치는 포함");
+});
+
+// ===== SubTask 3: judge.ts SCOPE_SYSTEM + judgeScope + 하드가드 (0.5.2) =====
+
+function scopeQ(over = {}) {
+  return { file: "src/a.ts", tool: "Edit", edit: "x", specHash: "h", at: "t", ...over };
+}
+
+test("SCOPE_MODEL: 기본 haiku (GBC_SCOPE_MODEL 미설정 시)", () => {
+  // 기본 실행 환경엔 GBC_SCOPE_MODEL 없음 → haiku
+  assert.equal(SCOPE_MODEL, "claude-haiku-4-5");
+});
+
+test("parseScopeVerdicts: 정상 배치 파싱 (컨텍스트 있음 → degraded=false)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const raw = JSON.stringify([
+    { file: "src/a.ts", axisA: "broken", axisAReason: "Sidebar.tsx 미반영", rung: "rung2", rungReason: "text.ts 중복" },
+  ]);
+  const [v] = parseScopeVerdicts(raw, entries, new Set(["src/a.ts"]));
+  assert.equal(v.file, "src/a.ts");
+  assert.equal(v.axisA, "broken");
+  assert.equal(v.rung, "rung2");
+  assert.equal(v.degraded, false);
+});
+
+test("하드가드: 컨텍스트 없는 파일 → axisA 강제 unknown + degraded=true (모델이 broken이라 해도)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const raw = JSON.stringify([
+    { file: "src/a.ts", axisA: "broken", axisAReason: "확신", rung: "none", rungReason: "" },
+  ]);
+  const [v] = parseScopeVerdicts(raw, entries, new Set()); // 컨텍스트 없음
+  assert.equal(v.axisA, "unknown", "탐색 근거 없이 broken 확신 차단");
+  assert.equal(v.degraded, true);
+});
+
+test("하드가드: 컨텍스트 없을 때 rung2 → unknown 강제 (재사용은 grep 없이 판정 불가)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const raw = JSON.stringify([
+    { file: "src/a.ts", axisA: "unknown", axisAReason: "", rung: "rung2", rungReason: "있을듯" },
+  ]);
+  const [v] = parseScopeVerdicts(raw, entries, new Set());
+  assert.equal(v.rung, "unknown", "grep 없이 rung2(중복존재) 확신 차단");
+  assert.equal(v.degraded, true);
+});
+
+test("하드가드: 컨텍스트 없어도 rung1(YAGNI)/rung3(stdlib)는 유지 (grep 무관 판정)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" }), scopeQ({ file: "src/b.ts" })];
+  const raw = JSON.stringify([
+    { file: "src/a.ts", axisA: "ok", axisAReason: "", rung: "rung1", rungReason: "플러그인 과다" },
+    { file: "src/b.ts", axisA: "ok", axisAReason: "", rung: "rung3", rungReason: "structuredClone 있음" },
+  ]);
+  const vs = parseScopeVerdicts(raw, entries, new Set()); // 컨텍스트 없음
+  assert.equal(vs[0].rung, "rung1", "rung1은 grep 없이도 유지");
+  assert.equal(vs[1].rung, "rung3", "rung3은 grep 없이도 유지");
+  // 단 axisA는 컨텍스트 없으니 degraded
+  assert.equal(vs[0].degraded, true);
+});
+
+test("parseScopeVerdicts: 응답에 없는 파일 → unknown+degraded (모델이 판정 안 함)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" }), scopeQ({ file: "src/missing.ts" })];
+  const raw = JSON.stringify([{ file: "src/a.ts", axisA: "ok", axisAReason: "", rung: "none", rungReason: "" }]);
+  const vs = parseScopeVerdicts(raw, entries, new Set(["src/a.ts", "src/missing.ts"]));
+  assert.equal(vs.length, 2, "엔트리마다 하나씩(응답 누락도 채움)");
+  const missing = vs.find((v) => v.file === "src/missing.ts");
+  assert.equal(missing.axisA, "unknown");
+  assert.equal(missing.rung, "unknown");
+  assert.equal(missing.degraded, true);
+});
+
+test("parseScopeVerdicts: 파싱 불가 → 전 엔트리 unknown+degraded (broken/rung2 조작 금지)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const [v] = parseScopeVerdicts("쓰레기 응답 no json", entries, new Set(["src/a.ts"]));
+  assert.equal(v.axisA, "unknown");
+  assert.equal(v.rung, "unknown");
+  assert.equal(v.degraded, true);
+});
+
+test("parseScopeVerdicts: 잘못된 enum 값 → unknown 강제", () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const raw = JSON.stringify([{ file: "src/a.ts", axisA: "무효값", rung: "rung9", axisAReason: "", rungReason: "" }]);
+  const [v] = parseScopeVerdicts(raw, entries, new Set(["src/a.ts"]));
+  assert.equal(v.axisA, "unknown");
+  assert.equal(v.rung, "unknown");
+});
+
+test("buildScopeMessage: 편집들과 grep 컨텍스트를 담는다", () => {
+  const entries = [scopeQ({ file: "src/a.ts", edit: "return x || 'g'" })];
+  const msg = buildScopeMessage(entries, "src/other.ts:4: uses x");
+  assert.ok(msg.includes("src/a.ts"), "파일 경로 포함");
+  assert.ok(msg.includes("return x || 'g'"), "편집 본문 포함");
+  assert.ok(msg.includes("src/other.ts:4"), "grep 컨텍스트 포함");
+});
+
+test("buildScopeMessage: 컨텍스트 없으면 '(탐색 결과 없음)' 명시", () => {
+  const msg = buildScopeMessage([scopeQ()], "");
+  assert.ok(/탐색 결과 없음|없음/.test(msg), "빈 컨텍스트를 명시적으로 표기");
+});
+
+test("judgeScope: 호출 실패 → 전 엔트리 unknown+degraded (fail-open, block 아님)", async () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const invoke = async () => {
+    throw new Error("API 다운");
+  };
+  const vs = await judgeScope(entries, "ctx", new Set(["src/a.ts"]), { invoke });
+  assert.equal(vs.length, 1);
+  assert.equal(vs[0].axisA, "unknown");
+  assert.equal(vs[0].degraded, true);
+});
+
+test("judgeScope: 정상 응답 파싱 + 하드가드 적용", async () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const invoke = async () =>
+    JSON.stringify([{ file: "src/a.ts", axisA: "broken", axisAReason: "r", rung: "none", rungReason: "" }]);
+  const vs = await judgeScope(entries, "src/a.ts:1: hit", new Set(["src/a.ts"]), { invoke });
+  assert.equal(vs[0].axisA, "broken");
+  assert.equal(vs[0].degraded, false);
 });

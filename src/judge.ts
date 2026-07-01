@@ -3,11 +3,17 @@ import { promisify } from "node:util";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Verdict, ReviewVerdict } from "./types.js";
+import type { Verdict, ReviewVerdict, ScopeQueueEntry, ScopeVerdict, AxisAVerdict, RungVerdict } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
 const MODEL = process.env.GBC_MODEL ?? "claude-haiku-4-5";
+/**
+ * scope 판정(축A/축B) 전용 모델 — 게이트 MODEL과 *물리 분리*(GBC_SCOPE_MODEL).
+ * 기본 haiku(스파이크: grep 컨텍스트 있으면 haiku·sonnet 동률·오버클레임0). sonnet은 opt-in.
+ * GBC_MODEL과 분리하는 이유: 공유 시 게이트/verify/scope 3중으로 sonnet 비용이 배증.
+ */
+const SCOPE_MODEL = process.env.GBC_SCOPE_MODEL ?? "claude-haiku-4-5";
 const CLI_TIMEOUT_MS = 30000; // claude -p 폴백 상한(행 방지). 초과 시 kill → fail-open.
 
 /**
@@ -317,4 +323,32 @@ export async function judgeReviewed(
   }
 }
 
-export { GATE_SYSTEM, buildUserMessage, parseVerdict, REVIEW_SYSTEM };
+// ===== scope 경로 (축A 파급반경 + 축B Ponytail 사다리) — 0.5.2 =====
+// STUB(SubTask 3 RED) — 아래 구현 예정.
+
+const SCOPE_SYSTEM = "STUB";
+
+export function buildScopeMessage(_entries: ScopeQueueEntry[], _grepContext: string): string {
+  return "STUB";
+}
+
+export function parseScopeVerdicts(
+  _raw: string,
+  _entries: ScopeQueueEntry[],
+  _filesWithContext: Set<string>,
+): ScopeVerdict[] {
+  return [];
+}
+
+export type ScopeInvoke = (system: string, user: string) => Promise<string>;
+
+export async function judgeScope(
+  _entries: ScopeQueueEntry[],
+  _grepContext: string,
+  _filesWithContext: Set<string>,
+  _opts: { invoke?: ScopeInvoke } = {},
+): Promise<ScopeVerdict[]> {
+  return [];
+}
+
+export { GATE_SYSTEM, buildUserMessage, parseVerdict, REVIEW_SYSTEM, SCOPE_SYSTEM, SCOPE_MODEL };
