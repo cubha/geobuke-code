@@ -67,6 +67,17 @@ import { resolveApiKey, safeModel } from "../dist/judge.js";
 import { normalizeCase, MAX_CASE } from "../dist/text.js";
 import { isStopHintMuted, setStopHintMuted } from "../dist/config.js";
 import { parseBinding } from "../dist/verify.js";
+import {
+  enqueueScope,
+  readScopeQueue,
+  clearScopeQueue,
+  parseGrepOutput,
+  formatGrepContext,
+  MAX_SCOPE_QUEUE,
+  MAX_GREP_MATCHES,
+  MAX_GREP_LINE_LEN,
+  MAX_SCOPE_CONTEXT_CHARS,
+} from "../dist/scope.js";
 import { parseJUnit, readVerifyResults, JUNIT_DEFAULT_REL } from "../dist/junit.js";
 import { runVerify } from "../dist/verify.js";
 import { readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
@@ -2042,4 +2053,122 @@ test("buildSessionStartPayload: 안내만 → systemMessage만, additionalContex
 test("buildSessionStartPayload: 둘 다 없음 → 빈 문자열(무출력, 현행 동작 보존)", () => {
   assert.equal(buildSessionStartPayload([], ""), "");
   assert.equal(buildSessionStartPayload(["", "  "], ""), "", "빈/공백 파트만 있으면 무출력");
+});
+
+// ===== SubTask 2: scope.ts 큐 IO + grep 파싱 (0.5.2) =====
+
+function tmpCwd() {
+  return mkdtempSync(join(tmpdir(), "gbc-scope-"));
+}
+
+function scopeEntry(over = {}) {
+  return {
+    file: "src/format/userName.ts",
+    tool: "Edit",
+    edit: "return user.name || 'Guest';",
+    specHash: "abc123",
+    at: "2026-07-01T00:00:00.000Z",
+    ...over,
+  };
+}
+
+test("scope 큐: enqueue→read 라운드트립(순서 보존)", () => {
+  const cwd = tmpCwd();
+  try {
+    enqueueScope(cwd, scopeEntry({ file: "a.ts" }));
+    enqueueScope(cwd, scopeEntry({ file: "b.ts" }));
+    const q = readScopeQueue(cwd);
+    assert.equal(q.length, 2);
+    assert.equal(q[0].file, "a.ts");
+    assert.equal(q[1].file, "b.ts");
+    assert.equal(q[0].edit, "return user.name || 'Guest';");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("scope 큐: clear가 비운다", () => {
+  const cwd = tmpCwd();
+  try {
+    enqueueScope(cwd, scopeEntry());
+    clearScopeQueue(cwd);
+    assert.deepEqual(readScopeQueue(cwd), []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("scope 큐: 없을 때 read는 빈 배열", () => {
+  const cwd = tmpCwd();
+  try {
+    assert.deepEqual(readScopeQueue(cwd), []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("scope 큐: MAX_SCOPE_QUEUE 초과 시 최신 N만 유지(오래된 것 드롭)", () => {
+  const cwd = tmpCwd();
+  try {
+    for (let i = 0; i < MAX_SCOPE_QUEUE + 5; i++) {
+      enqueueScope(cwd, scopeEntry({ file: `f${i}.ts` }));
+    }
+    const q = readScopeQueue(cwd);
+    assert.equal(q.length, MAX_SCOPE_QUEUE, "큐는 상한을 넘지 않는다");
+    // 최신 유지: 마지막 엔트리는 가장 최근에 넣은 것
+    assert.equal(q[q.length - 1].file, `f${MAX_SCOPE_QUEUE + 4}.ts`);
+    // 가장 오래된 것(f0)은 드롭됨
+    assert.ok(!q.some((e) => e.file === "f0.ts"), "가장 오래된 엔트리는 드롭");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("parseGrepOutput: file:line:content 파싱", () => {
+  const raw = "src/a.ts:12:  foo(bar)\nsrc/b.ts:3:const x = 1";
+  const { matches, truncated } = parseGrepOutput(raw);
+  assert.equal(truncated, false);
+  assert.equal(matches.length, 2);
+  assert.deepEqual(matches[0], { file: "src/a.ts", line: 12, text: "foo(bar)" });
+  assert.equal(matches[1].file, "src/b.ts");
+  assert.equal(matches[1].line, 3);
+});
+
+test("parseGrepOutput: 깨진 줄·빈 줄 skip", () => {
+  const raw = "src/a.ts:12:ok\n\ngarbage line no colon\nsrc/b.ts:notanumber:x\nsrc/c.ts:5:good";
+  const { matches } = parseGrepOutput(raw);
+  assert.equal(matches.length, 2, "정상 2줄만");
+  assert.equal(matches[0].file, "src/a.ts");
+  assert.equal(matches[1].file, "src/c.ts");
+});
+
+test("parseGrepOutput: 빈 입력 → 빈 matches(하드가드 트리거 신호)", () => {
+  assert.deepEqual(parseGrepOutput("").matches, []);
+  assert.deepEqual(parseGrepOutput("   \n  ").matches, []);
+});
+
+test("parseGrepOutput: MAX_GREP_MATCHES 초과 시 잘리고 truncated=true", () => {
+  const lines = [];
+  for (let i = 0; i < MAX_GREP_MATCHES + 10; i++) lines.push(`src/f.ts:${i + 1}:line${i}`);
+  const { matches, truncated } = parseGrepOutput(lines.join("\n"));
+  assert.equal(matches.length, MAX_GREP_MATCHES);
+  assert.equal(truncated, true);
+});
+
+test("parseGrepOutput: 긴 줄은 MAX_GREP_LINE_LEN으로 절단", () => {
+  const longText = "x".repeat(MAX_GREP_LINE_LEN + 200);
+  const { matches } = parseGrepOutput(`src/a.ts:1:${longText}`);
+  assert.ok(matches[0].text.length <= MAX_GREP_LINE_LEN, "줄 텍스트 절단");
+});
+
+test("formatGrepContext: 빈 matches → 빈 문자열", () => {
+  assert.equal(formatGrepContext([]), "");
+});
+
+test("formatGrepContext: 총 길이 MAX_SCOPE_CONTEXT_CHARS 이내로 바운드", () => {
+  const many = [];
+  for (let i = 0; i < 500; i++) many.push({ file: `src/f${i}.ts`, line: i, text: "y".repeat(150) });
+  const ctx = formatGrepContext(many);
+  assert.ok(ctx.length <= MAX_SCOPE_CONTEXT_CHARS, `컨텍스트 길이 ${ctx.length} <= ${MAX_SCOPE_CONTEXT_CHARS}`);
+  assert.ok(ctx.includes("src/f0.ts"), "앞쪽 매치는 포함");
 });
