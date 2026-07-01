@@ -695,7 +695,10 @@ function cmdMetrics(args: string[]): void {
 
   [M1] post-gate 재작업
     게이트 리셋 ${m.m1.resets} · 통과후 churn ${m.m1.churnAfterPass}
-    ⚠️ ${m.m1.note}`);
+    ⚠️ ${m.m1.note}
+
+  [scope] 축A 파급반경 · 축B 최소구현 사다리 (사후 판정)
+    판정 ${m.scope.total}건 · 파급반경 broken ${m.scope.rippleBroken} · 사다리 걸림 ${m.scope.rungHits} · 탐색불가 미평가 ${m.scope.degraded}`);
 }
 
 // ---------- gbc update ----------

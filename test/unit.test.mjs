@@ -2426,3 +2426,19 @@ test("logScopeVerdicts: degraded 이벤트도 정직 기록(context_mode none)",
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("computeMetrics: scope 롤업(파급반경 broken·사다리 걸림·degraded 집계)", () => {
+  const events = parseEvents(
+    [
+      JSON.stringify({ at: "t1", session: "s", specHash: "", kind: "scope", axisA: "broken", rung: "none", degraded: false }),
+      JSON.stringify({ at: "t2", session: "s", specHash: "", kind: "scope", axisA: "ok", rung: "rung2", degraded: false }),
+      JSON.stringify({ at: "t3", session: "s", specHash: "", kind: "scope", axisA: "unknown", rung: "unknown", degraded: true }),
+      JSON.stringify({ at: "t4", session: "s", specHash: "h", kind: "gate", tool: "Edit", decision: "pass" }),
+    ].join("\n"),
+  );
+  const m = computeMetrics(events);
+  assert.equal(m.scope.total, 3, "scope 이벤트만 집계(gate 제외)");
+  assert.equal(m.scope.rippleBroken, 1);
+  assert.equal(m.scope.rungHits, 1);
+  assert.equal(m.scope.degraded, 1);
+});

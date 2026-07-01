@@ -144,6 +144,17 @@ export interface Metrics {
     churnAfterPass: number;
     note: string;
   };
+  /** scope — 축A/축B 사후 판정 롤업(0.5.2). */
+  scope: {
+    /** scope 이벤트 총 수(편집별 1건) */
+    total: number;
+    /** 파급반경 broken(축A) 건수 */
+    rippleBroken: number;
+    /** 최소구현 사다리 걸림(rung1/2/3) 건수 */
+    rungHits: number;
+    /** 탐색 컨텍스트 부족으로 축소 판정(degraded) 건수 */
+    degraded: number;
+  };
 }
 
 const M1_NOTE =
@@ -197,11 +208,25 @@ export function computeMetrics(events: GateEvent[]): Metrics {
   }
   const resets = events.filter((e) => e.kind === "gate-reset").length;
 
+  // scope(축A/축B) 롤업 — 사후 판정이 실제로 무엇을 잡는지 관측(theater 방지).
+  const scopeEvents = events.filter((e) => e.kind === "scope");
+  const rippleBroken = scopeEvents.filter((e) => e.axisA === "broken").length;
+  const rungHits = scopeEvents.filter(
+    (e) => e.rung === "rung1" || e.rung === "rung2" || e.rung === "rung3",
+  ).length;
+  const degradedScope = scopeEvents.filter((e) => e.degraded === true).length;
+
   return {
     totalEvents: events.length,
     m3: { workUnits, totalEdits, avgEditsPerUnit, maxEditsPerUnit, multiEditUnits },
     m2: { gateCaught, blocks: blockEvents.length, deferred, midDiscoveryRatio },
     m1: { resets, churnAfterPass, note: M1_NOTE },
+    scope: {
+      total: scopeEvents.length,
+      rippleBroken,
+      rungHits,
+      degraded: degradedScope,
+    },
   };
 }
 
