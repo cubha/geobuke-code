@@ -73,10 +73,13 @@ import {
   clearScopeQueue,
   parseGrepOutput,
   formatGrepContext,
+  extractSymbols,
+  collectGrepContext,
   MAX_SCOPE_QUEUE,
   MAX_GREP_MATCHES,
   MAX_GREP_LINE_LEN,
   MAX_SCOPE_CONTEXT_CHARS,
+  MAX_GREP_SYMBOLS,
 } from "../dist/scope.js";
 import {
   buildScopeMessage,
@@ -2294,4 +2297,40 @@ test("judgeScope: 정상 응답 파싱 + 하드가드 적용", async () => {
   const vs = await judgeScope(entries, "src/a.ts:1: hit", new Set(["src/a.ts"]), { invoke });
   assert.equal(vs[0].axisA, "broken");
   assert.equal(vs[0].degraded, false);
+});
+
+// ===== SubTask 4: extractSymbols + collectGrepContext (grep 실행 유틸) =====
+
+test("extractSymbols: 함수·const·class 정의명 추출, 키워드·짧은 이름 제외", () => {
+  const edit = "export function formatUserName(u) {\n  const fallback = 'Guest';\n  return u.name || fallback;\n}";
+  const syms = extractSymbols(edit);
+  assert.ok(syms.includes("formatUserName"), "함수명 추출");
+  assert.ok(syms.includes("fallback"), "const명 추출");
+  assert.ok(!syms.includes("const"), "키워드 제외");
+  assert.ok(!syms.includes("u"), "3자 미만 제외");
+});
+
+test("extractSymbols: MAX_GREP_SYMBOLS로 상한", () => {
+  let edit = "";
+  for (let i = 0; i < 30; i++) edit += `function fn_symbol_${i}() {}\n`;
+  assert.ok(extractSymbols(edit).length <= MAX_GREP_SYMBOLS);
+});
+
+test("collectGrepContext: 타 파일 매치 → filesWithContext 등록 + 컨텍스트 채움", async () => {
+  const entries = [scopeQ({ file: "src/a.ts", edit: "function formatUserName(u){ return u.name }" })];
+  // 주입 grep: formatUserName이 다른 파일(src/sidebar.ts)에서 호출됨
+  const grep = async (sym) =>
+    sym === "formatUserName" ? "src/sidebar.ts:41: formatUserName(user)\nsrc/a.ts:1: function formatUserName" : "";
+  const { context, filesWithContext } = await collectGrepContext(".", entries, { grep });
+  assert.ok(filesWithContext.has("src/a.ts"), "타 파일 매치 있으니 컨텍스트 있음으로");
+  assert.ok(context.includes("src/sidebar.ts"), "타 파일 호출부가 컨텍스트에");
+  assert.ok(!context.includes("src/a.ts:1"), "자기 파일 매치는 제외");
+});
+
+test("collectGrepContext: 매치 없음 → filesWithContext 비고 컨텍스트 빈문자열(하드가드 신호)", async () => {
+  const entries = [scopeQ({ file: "src/a.ts", edit: "function loneSymbol(){}" })];
+  const grep = async () => ""; // 아무 매치 없음
+  const { context, filesWithContext } = await collectGrepContext(".", entries, { grep });
+  assert.equal(context, "");
+  assert.equal(filesWithContext.size, 0, "컨텍스트 없음 → 하드가드가 unknown 처리하게 됨");
 });

@@ -1,9 +1,13 @@
 // scope 판정 큐 + grep 결과 파싱 (축A 파급반경 + 축B Ponytail 사다리, 0.5.2).
 // PreToolUse가 pass한 동작편집을 여기 큐잉 → Stop 훅이 grep 컨텍스트를 채워 배치 판정한다.
 // 이 파일은 순수 로직·파일 IO만 담당(모델 호출 없음 — 그건 judge.ts judgeScope).
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { join } from "node:path";
 import { gbcDir, readJson, writeJson } from "./store.js";
 import type { ScopeQueueEntry } from "./types.js";
+
+const execFileAsync = promisify(execFile);
 
 /** 큐 최대 엔트리 수(한 턴에 판정 대상 상한 — 초과 시 최신 유지). */
 export const MAX_SCOPE_QUEUE = 20;
@@ -102,4 +106,101 @@ export function formatGrepContext(matches: GrepMatch[]): string {
     total += l.length + 1;
   }
   return lines.join("\n");
+}
+
+// ===== 실제 grep 실행 (SubTask 4, 비결정 I/O) =====
+
+/** 심볼당 grep 호출 총 상한(Stop 지연 보호 — 배치 편집이 많아도 이 수만큼만 grep). */
+export const MAX_GREP_SYMBOLS = 8;
+/** grep 총 타임아웃(ms) — Stop 훅 내부 예산. 초과 시 그때까지 모은 것만 사용. */
+export const GREP_TIMEOUT_MS = 4000;
+
+const IDENT_KEYWORDS = new Set([
+  "function", "const", "let", "var", "class", "interface", "type", "return", "export",
+  "import", "async", "await", "true", "false", "null", "void", "string", "number", "boolean",
+  "if", "else", "for", "while", "new", "this", "from",
+]);
+
+/**
+ * 편집 본문에서 *정의/수정되는 심볼 이름*을 추출한다(순수). 이 이름들을 다른 파일에서 grep해
+ * 호출부(축A)·유사 유틸(rung2) 단서를 찾는다. 노이즈 억제: 3자 미만·키워드 제외, 상한 적용.
+ */
+export function extractSymbols(editText: string): string[] {
+  const out = new Set<string>();
+  const patterns = [
+    /(?:function|class|interface|type)\s+([A-Za-z_]\w*)/g,
+    /(?:const|let|var)\s+([A-Za-z_]\w*)\s*[=:]/g,
+    /(?:export\s+(?:async\s+)?function\s+)([A-Za-z_]\w*)/g,
+    // `name(...)` 형태의 정의/호출 심볼(메서드·팩토리)
+    /\b([A-Za-z_]\w{2,})\s*\(/g,
+  ];
+  for (const re of patterns) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(editText)) !== null) {
+      const name = m[1];
+      if (name.length >= 3 && !IDENT_KEYWORDS.has(name)) out.add(name);
+    }
+  }
+  return [...out].slice(0, MAX_GREP_SYMBOLS);
+}
+
+/** collectGrepContext 결과 — 프롬프트용 컨텍스트 + 컨텍스트를 얻은 파일 집합(하드가드 입력). */
+export interface GrepCollectResult {
+  context: string;
+  /** grep 매치를 하나라도 얻은 *편집 파일* 경로 집합(그 파일의 축A/rung2를 신뢰할 수 있음). */
+  filesWithContext: Set<string>;
+}
+
+/** grep 실행 주입(테스트용). 미지정 시 실제 `grep -rn`. */
+export type GrepRunner = (symbol: string, cwd: string) => Promise<string>;
+
+async function realGrep(symbol: string, cwd: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(
+      "grep",
+      [
+        "-rn", "--include=*.ts", "--include=*.js", "--include=*.tsx", "--include=*.jsx",
+        "--exclude-dir=node_modules", "--exclude-dir=.git", "--exclude-dir=dist", "--exclude-dir=.gbc",
+        "-F", symbol, ".",
+      ],
+      { cwd, timeout: GREP_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+    );
+    return stdout;
+  } catch {
+    // grep exit 1(매치 없음)·타임아웃·부재 → 빈 결과(하드가드가 흡수).
+    return "";
+  }
+}
+
+/**
+ * 큐의 편집들에 대해 실제 grep을 돌려 코드베이스 컨텍스트를 모은다(비결정 I/O).
+ * 각 편집의 정의 심볼을 *다른 파일에서* 찾아(자기 파일 제외) 호출부·유사 유틸 단서를 수집.
+ * 심볼 총량은 MAX_GREP_SYMBOLS로 캡. grep 실패/무매치는 조용히 빈 컨텍스트 → 하드가드로 정직 처리.
+ */
+export async function collectGrepContext(
+  cwd: string,
+  entries: ScopeQueueEntry[],
+  opts: { grep?: GrepRunner } = {},
+): Promise<GrepCollectResult> {
+  const grep = opts.grep ?? realGrep;
+  const filesWithContext = new Set<string>();
+  const allMatches: GrepMatch[] = [];
+  const seenSymbols = new Set<string>();
+
+  for (const entry of entries) {
+    for (const sym of extractSymbols(entry.edit)) {
+      if (seenSymbols.size >= MAX_GREP_SYMBOLS) break;
+      if (seenSymbols.has(sym)) continue;
+      seenSymbols.add(sym);
+      const raw = await grep(sym, cwd);
+      const { matches } = parseGrepOutput(raw);
+      // 자기 파일 매치는 제외(다른 파일의 호출부·중복만 단서로).
+      const others = matches.filter((m) => !m.file.endsWith(entry.file) && !entry.file.endsWith(m.file));
+      if (others.length > 0) {
+        filesWithContext.add(entry.file);
+        allMatches.push(...others);
+      }
+    }
+  }
+  return { context: formatGrepContext(allMatches), filesWithContext };
 }
