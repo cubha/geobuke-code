@@ -2456,6 +2456,29 @@ test("logScopeVerdicts: degraded 이벤트도 정직 기록(context_mode none)",
   }
 });
 
+// ===== 0.5.4 ST-P0-2: 자기파일 제외 — production형 경로 조합(절대 file_path × ./상대 grep) =====
+// 기존 테스트는 양쪽 다 상대경로 픽스처라 endsWith 우연 일치로 버그가 은폐됐다(분석 2026-07-02).
+
+test("collectGrepContext: 절대 file_path × './'상대 grep 출력에서도 자기 파일 매치를 제외한다", async () => {
+  const cwd = "/mnt/proj";
+  // production 실제 조합: CC file_path=절대경로, grep -rn ... . 출력=./상대경로
+  const entries = [scopeEntry({ file: "/mnt/proj/src/a.ts", edit: "export function fooBarBaz() {}" })];
+  const grep = async () => "./src/a.ts:3: export function fooBarBaz() {}\n./src/other.ts:9: fooBarBaz();";
+  const { context, filesWithContext } = await collectGrepContext(cwd, entries, { grep });
+  assert.ok(!context.includes("./src/a.ts:3"), "자기 파일 정의 라인은 컨텍스트에서 제외");
+  assert.ok(context.includes("./src/other.ts:9"), "타 파일 호출부는 유지");
+  assert.ok(filesWithContext.has("/mnt/proj/src/a.ts"), "타 파일 매치가 있으므로 등록");
+});
+
+test("collectGrepContext: 자기 파일 매치뿐이면 컨텍스트 없음(하드가드 신호 유지)", async () => {
+  const cwd = "/mnt/proj";
+  const entries = [scopeEntry({ file: "/mnt/proj/src/a.ts", edit: "export function fooBarBaz() {}" })];
+  const grep = async () => "./src/a.ts:3: export function fooBarBaz() {}";
+  const { context, filesWithContext } = await collectGrepContext(cwd, entries, { grep });
+  assert.equal(context, "", "자기참조만이면 빈 컨텍스트");
+  assert.equal(filesWithContext.size, 0, "filesWithContext 미등록 → 미평가(degraded) 경로");
+});
+
 // ===== 0.5.4 ST-P0-1: scope 이벤트 조인키 specHash 충전 (A2 사후대조 선행) =====
 
 test("enrichVerdictsWithSpecHash: 큐 file→specHash 매칭으로 verdict에 specHash 채움(미매칭은 빈값)", async () => {
