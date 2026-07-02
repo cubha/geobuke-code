@@ -105,6 +105,11 @@ export interface ScopeQueueEntry {
 export interface ScopeVerdict {
   /** 판정 대상 편집의 파일 경로(큐 엔트리와 매칭) */
   file: string;
+  /**
+   * 큐잉 시점 작업단위 키(ScopeQueueEntry.specHash 전파) — events.jsonl 조인키 충전용(0.5.4).
+   * judgeScope 출력엔 없고 processScopeQueue가 큐 매칭으로 보강한다. 미매칭/미보강이면 undefined→"" 기록.
+   */
+  specHash?: string;
   axisA: AxisAVerdict;
   /** 축A 한 줄 사유(broken이면 어느 경계인지 명시) */
   axisAReason: string;
