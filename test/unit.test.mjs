@@ -2456,6 +2456,41 @@ test("logScopeVerdicts: degraded 이벤트도 정직 기록(context_mode none)",
   }
 });
 
+// ===== 0.5.4 ST-P0-1: scope 이벤트 조인키 specHash 충전 (A2 사후대조 선행) =====
+
+test("enrichVerdictsWithSpecHash: 큐 file→specHash 매칭으로 verdict에 specHash 채움(미매칭은 빈값)", async () => {
+  const { enrichVerdictsWithSpecHash } = await import("../dist/scope.js");
+  assert.equal(typeof enrichVerdictsWithSpecHash, "function", "scope.ts에 순수 헬퍼 export");
+  const queue = [
+    scopeEntry({ file: "src/a.ts", specHash: "h-aaa" }),
+    scopeEntry({ file: "src/b.ts", specHash: "h-bbb" }),
+  ];
+  const verdicts = [sv({ file: "src/a.ts" }), sv({ file: "src/b.ts" }), sv({ file: "src/unknown.ts" })];
+  const out = enrichVerdictsWithSpecHash(verdicts, queue);
+  assert.equal(out[0].specHash, "h-aaa");
+  assert.equal(out[1].specHash, "h-bbb");
+  assert.equal(out[2].specHash, "", "큐에 없는 파일은 빈값(거짓 상관 금지)");
+  assert.equal(verdicts[0].specHash, undefined, "입력 배열 비변이(순수)");
+});
+
+test("logScopeVerdicts: verdict.specHash를 scope 이벤트에 기록(조인키 충전, 미지정은 기존 '')", () => {
+  const cwd = tmpCwd();
+  try {
+    logScopeVerdicts(cwd, "sess-j", [sv({ specHash: "h-join" }), sv({ file: "src/b.ts" })], {
+      contextMode: "grep",
+      transport: "api",
+      specPresent: true,
+    });
+    const events = parseEvents(readFileSync(join(cwd, ".gbc", "events.jsonl"), "utf8"));
+    assert.equal(events.length, 2);
+    assert.equal(events[0].specHash, "h-join", "큐잉 시점 specHash가 이벤트에 실림");
+    assert.equal(events[1].specHash, "", "specHash 없는 verdict는 기존 규약('') 유지");
+    assert.equal(events[0].session, "sess-j", "session×specHash 조인쌍 성립");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("computeMetrics: scope 롤업(파급반경 broken·사다리 걸림·degraded 집계)", () => {
   const events = parseEvents(
     [
