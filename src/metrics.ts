@@ -13,6 +13,7 @@ const MAX_MISSING_LEN = 200;
 
 export type EventKind =
   | "gate"
+  | "scope"
   | "defer-add"
   | "defer-start"
   | "defer-resolve"
@@ -25,6 +26,11 @@ export type EventKind =
   | "bypass";
 
 export type GateDecision = "pass" | "block" | "failopen" | "cached";
+
+/** scope 판정 계측 열거형(프라이버시: 코드 본문·사유 없이 enum 태그만). */
+export type ScopeAxis = "missing" | "scope" | "rung1" | "rung2" | "rung3";
+export type ScopeContextMode = "none" | "editText" | "grep";
+export type ScopeTransport = "api" | "cli";
 
 /** events.jsonl 한 줄. 메타데이터만 — 코드 diff 본문은 절대 넣지 않는다. */
 export interface GateEvent {
@@ -45,6 +51,21 @@ export interface GateEvent {
   deferCount?: number;
   /** 게이트 시점 spec 케이스 수 */
   specCount?: number;
+  // --- scope 이벤트(축A/축B) 계측 태그 (0.5.2) — 전부 enum, 코드 본문 없음 ---
+  /** 이 이벤트가 다루는 축 카테고리(coarse) */
+  axis?: ScopeAxis;
+  /** scope: 파급반경 판정 결과 */
+  axisA?: "ok" | "broken" | "unknown";
+  /** scope: 최소구현 사다리 rung */
+  rung?: "rung1" | "rung2" | "rung3" | "none" | "unknown";
+  /** scope: 판정 시점 계획 명세 존재 여부 */
+  spec_present?: boolean;
+  /** scope: 판정에 쓰인 컨텍스트 모드 */
+  context_mode?: ScopeContextMode;
+  /** scope: 판정 트랜스포트 */
+  transport?: ScopeTransport;
+  /** scope: 탐색 컨텍스트 부재로 축소 판정(정직 고지)했는지 */
+  degraded?: boolean;
 }
 
 /** missing[]을 항목 수/길이로 캡 */
@@ -123,6 +144,17 @@ export interface Metrics {
     churnAfterPass: number;
     note: string;
   };
+  /** scope — 축A/축B 사후 판정 롤업(0.5.2). */
+  scope: {
+    /** scope 이벤트 총 수(편집별 1건) */
+    total: number;
+    /** 파급반경 broken(축A) 건수 */
+    rippleBroken: number;
+    /** 최소구현 사다리 걸림(rung1/2/3) 건수 */
+    rungHits: number;
+    /** 탐색 컨텍스트 부족으로 축소 판정(degraded) 건수 */
+    degraded: number;
+  };
 }
 
 const M1_NOTE =
@@ -176,11 +208,25 @@ export function computeMetrics(events: GateEvent[]): Metrics {
   }
   const resets = events.filter((e) => e.kind === "gate-reset").length;
 
+  // scope(축A/축B) 롤업 — 사후 판정이 실제로 무엇을 잡는지 관측(theater 방지).
+  const scopeEvents = events.filter((e) => e.kind === "scope");
+  const rippleBroken = scopeEvents.filter((e) => e.axisA === "broken").length;
+  const rungHits = scopeEvents.filter(
+    (e) => e.rung === "rung1" || e.rung === "rung2" || e.rung === "rung3",
+  ).length;
+  const degradedScope = scopeEvents.filter((e) => e.degraded === true).length;
+
   return {
     totalEvents: events.length,
     m3: { workUnits, totalEdits, avgEditsPerUnit, maxEditsPerUnit, multiEditUnits },
     m2: { gateCaught, blocks: blockEvents.length, deferred, midDiscoveryRatio },
     m1: { resets, churnAfterPass, note: M1_NOTE },
+    scope: {
+      total: scopeEvents.length,
+      rippleBroken,
+      rungHits,
+      degraded: degradedScope,
+    },
   };
 }
 

@@ -9,6 +9,7 @@ import { isStopHintMuted, isGoldenCapture } from "./config.js";
 import { loadRepos } from "./repos.js";
 import { writePendingReview } from "./review.js";
 import { addGoldenCase, goldenCaseId } from "./golden.js";
+import { enqueueScope, readScopeQueue, clearScopeQueue, collectGrepContext } from "./scope.js";
 import { readProjectSettings, buildUpdateNotice, wasNotified, markNotified } from "./notice.js";
 import {
   isCacheStale,
@@ -20,7 +21,7 @@ import { appendFileSync, existsSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { gbcDir } from "./store.js";
 import { logEvent } from "./metrics.js";
-import type { EditToolInput, Verdict, DeferEntry } from "./types.js";
+import type { EditToolInput, Verdict, DeferEntry, ScopeVerdict } from "./types.js";
 
 /**
  * 차단 사유 메시지를 빌드한다. 두 차단 종류를 다르게 안내한다:
@@ -134,6 +135,31 @@ function maybeUpdateNotice(cwd: string, session: string, ctx?: HookContext): str
     return notice;
   } catch {
     return "";
+  }
+}
+
+/** 코드 파일 확장자(scope 큐잉 대상 — 문서/설정 편집은 파급반경·사다리 판정 대상 아님). */
+const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|php|c|h|cpp|cc|cs|kt|swift|scala)$/i;
+
+/**
+ * pass한 동작편집을 scope 큐(.gbc/scope-queue.json)에 넣는다 — Stop 훅이 그 턴 종료 시 실제 grep으로
+ * 축A/축B 판정. hot path엔 API·grep 없음(정규화+파일 append만). GBC_NO_SCOPE=1이면 전체 스킵.
+ * fail-silent: 큐잉 실패는 게이트를 절대 막지 않는다. 코드파일 편집만(문서/설정 제외).
+ */
+function maybeEnqueueScope(
+  cwd: string,
+  toolName: string,
+  input: EditToolInput,
+  editText: string,
+  specHash: string,
+): void {
+  if (process.env.GBC_NO_SCOPE === "1") return;
+  try {
+    const file = input.file_path ?? "";
+    if (!file || !CODE_FILE_RE.test(file)) return;
+    enqueueScope(cwd, { file, tool: toolName, edit: editText, specHash, at: nowIso() });
+  } catch {
+    /* 큐잉 실패는 무시(hot path 보호) */
   }
 }
 
@@ -253,6 +279,8 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
     }
     // 정상 pass. 단 빈 명세 pass는 절대 캐시하지 않는다(상수 hash 영구 우회 방지).
     if (shouldCacheVerdict(verdict, specEmpty)) markGated(cwd, specHash, verdict.reason);
+    // scope 큐잉(축A/축B) — 판정된 pass 편집을 Stop서 파급반경·사다리 판정하도록 예약(API 없음).
+    maybeEnqueueScope(cwd, toolName, input.tool_input ?? {}, editText, logHash);
     logEvent(cwd, {
       at: nowIso(),
       session,
@@ -316,7 +344,121 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   process.exit(0);
 }
 
-/** Stop: 미해결 defer 리마인드 (stop_hook_active 가드로 1회만) */
+/** scope 이벤트의 coarse axis 태그 도출 — rung 걸림이 우선, 아니면 파급반경(scope). */
+function scopeAxisTag(v: ScopeVerdict): "scope" | "rung1" | "rung2" | "rung3" {
+  if (v.rung === "rung1" || v.rung === "rung2" || v.rung === "rung3") return v.rung;
+  return "scope";
+}
+
+/**
+ * scope 판정 결과를 events.jsonl에 계측 태깅한다(편집별 1 이벤트).
+ * 프라이버시 불변식: 열거형 태그만(axis/axisA/rung/context_mode/transport/degraded), 코드 본문·사유
+ * 문자열은 절대 넣지 않는다(axisAReason/rungReason 미포함). 계측 실패는 무시(logEvent 내부 fail-silent).
+ */
+export function logScopeVerdicts(
+  cwd: string,
+  session: string,
+  verdicts: ScopeVerdict[],
+  opts: { contextMode: "none" | "grep"; transport: "api" | "cli"; specPresent: boolean },
+): void {
+  for (const v of verdicts) {
+    logEvent(cwd, {
+      at: nowIso(),
+      session,
+      specHash: "",
+      kind: "scope",
+      axis: scopeAxisTag(v),
+      axisA: v.axisA,
+      rung: v.rung,
+      spec_present: opts.specPresent,
+      context_mode: opts.contextMode,
+      transport: opts.transport,
+      degraded: v.degraded,
+    });
+  }
+}
+
+/**
+ * scope 판정 결과(축A broken·rung 걸림)를 사후 표면화용 문자열로 포맷한다. 없으면 "".
+ * 차단이 아니라 권고 — "이 편집과 같은 원인이 다른 곳에도 있는지"를 gbc가 이미 판정한 결과다
+ * (사용자에게 탐색을 떠넘기지 않는다). degraded(탐색 불가로 미평가)는 표면화 시에만 한 줄 정직 고지.
+ */
+export function formatScopeFindings(verdicts: ScopeVerdict[], anyDegraded: boolean): string {
+  const lines: string[] = [];
+  for (const v of verdicts) {
+    if (v.axisA === "broken") {
+      lines.push(`  · [파급반경] ${v.file}: ${v.axisAReason}`);
+    }
+    if (v.rung === "rung1" || v.rung === "rung2" || v.rung === "rung3") {
+      const label = v.rung === "rung1" ? "과다구현" : v.rung === "rung2" ? "기존코드 재사용" : "표준라이브러리";
+      lines.push(`  · [${label}] ${v.file}: ${v.rungReason}`);
+    }
+  }
+  if (lines.length === 0) return "";
+  const degradedNote = anyDegraded
+    ? "\n(일부 편집은 탐색 컨텍스트 부족으로 파급반경 판정을 생략했습니다.)"
+    : "";
+  return `🐢 거북이 scope 점검 — 방금 구현의 파급반경·최소구현을 검토했습니다:\n${lines.join("\n")}${degradedNote}`;
+}
+
+/**
+ * scope 큐를 처리한다(Stop 시점): 실제 grep으로 코드베이스 컨텍스트 수집 → 배치 판정 → 큐 비움 →
+ * 표면화 문자열 반환(actionable 없으면 ""). 판정 결과는 metrics로 계측(SubTask 6). 전체 fail-silent.
+ * judgeScope만 SDK를 lazy import(hot path 아님 — Stop은 CC가 600s까지 대기).
+ */
+async function processScopeQueue(cwd: string, session: string): Promise<string> {
+  const queue = readScopeQueue(cwd);
+  if (queue.length === 0) return "";
+  try {
+    const { judgeScope, selectedTransport } = await import("./judge.js");
+    // CLI 폴백(키 없음)은 호출당 18~30s(스파이크 실측) — SCOPE_TIMEOUT_MS(10s) 안에 못 끝나
+    // 매 턴 10s 대기 후 fail-open만 반복된다. 지연 렌즈 권고대로 CLI 트랜스포트는 scope 판정을
+    // *시도조차 안 하고* skip한다(조건부 degradation). 정직 계측: degraded 이벤트는 남긴다.
+    const transport = selectedTransport();
+    if (transport === "cli") {
+      clearScopeQueue(cwd);
+      const { text: specText } = loadPlanSpec(cwd);
+      logScopeVerdicts(
+        cwd,
+        session,
+        queue.map((q) => ({
+          file: q.file,
+          axisA: "unknown" as const,
+          axisAReason: "CLI 트랜스포트 — scope 판정 생략(지연 예산 초과)",
+          rung: "unknown" as const,
+          rungReason: "",
+          degraded: true,
+        })),
+        { contextMode: "none", transport: "cli", specPresent: specText.trim() !== "" },
+      );
+      return "";
+    }
+    const { context, filesWithContext } = await collectGrepContext(cwd, queue);
+    // 계획 명세를 판정 입력에 포함 — rung1(YAGNI)은 "요청이 무엇이었나" 없이 판정 불가
+    // (스파이크의 rung1 정확도는 명세 존재 조건에서 검증됨 — 판정 조건 정렬).
+    const { text: specText } = loadPlanSpec(cwd);
+    const verdicts = await judgeScope(queue, context, filesWithContext, { planSpec: specText });
+    clearScopeQueue(cwd);
+    logScopeVerdicts(cwd, session, verdicts, {
+      contextMode: context ? "grep" : "none",
+      transport: selectedTransport(),
+      specPresent: specText.trim() !== "",
+    });
+    return formatScopeFindings(verdicts, verdicts.some((v) => v.degraded));
+  } catch (e) {
+    // 판정 파이프라인 실패 → 큐를 비워 다음 턴 누적 폭주를 막고 통과하되, **계측은 남긴다**
+    // (fail-open 고지 철학 — 조용한 무력화 방지. 게이트 failopen.log와 동일 패턴, "scope" 태그).
+    logFailOpen(cwd, "scope", String(e).slice(0, 160));
+    try {
+      clearScopeQueue(cwd);
+    } catch {
+      /* 무시 */
+    }
+    return "";
+  }
+}
+
+/** Stop: scope 판정(축A/축B) + 미해결 defer 리마인드. stop_hook_active 가드로 턴당 1회. */
 export async function runStop(): Promise<void> {
   let input: StopInput = {};
   try {
@@ -326,21 +468,29 @@ export async function runStop(): Promise<void> {
     process.exit(0);
   }
 
-  // 이미 한 번 리마인드해 계속 진행 중이면 루프 방지 위해 통과
+  // 이미 한 번 리마인드해 계속 진행 중이면 루프 방지 위해 통과(scope·defer 둘 다 1회만)
   if (input.stop_hook_active === true) process.exit(0);
 
   const cwd = input.cwd || process.cwd();
-  // 사용자가 'gbc defer mute'로 Stop 리마인드를 음소거했으면 조용히 통과(unmute 전까지 영속).
-  // SessionStart 진입 알림은 별개 채널이라 영향 없음. emit 없이 종료 = Claude 정상 stop 허용.
-  if (isStopHintMuted(cwd)) process.exit(0);
+  const session = (input as { session_id?: string }).session_id ?? "";
 
-  // defers.json 없으면(파일 부재) 조용히 통과
-  if (loadDefers(cwd).length === 0) process.exit(0);
+  // ① scope 판정(축A/축B) — defer와 독립. 큐가 있으면 grep+판정해 사후 표면화. GBC_NO_SCOPE로 opt-out.
+  //    무거운 작업이지만 Stop은 hot path가 아니다(CC가 완료까지 대기, 기본 타임아웃 600s).
+  let scopeMsg = "";
+  if (process.env.GBC_NO_SCOPE !== "1") {
+    scopeMsg = await processScopeQueue(cwd, session);
+  }
 
-  const all = loadDefers(cwd);
-  if (all.filter((d) => d.status !== "resolved").length === 0) process.exit(0);
+  // ② defer 리마인드(기존) — 음소거 시 스킵. scope와 독립이라 각각 조건 판단.
+  let deferMsg = "";
+  if (!isStopHintMuted(cwd)) {
+    const all = loadDefers(cwd);
+    if (all.filter((d) => d.status !== "resolved").length > 0) deferMsg = buildStopReminder(all);
+  }
 
-  emit({ decision: "block", reason: buildStopReminder(all) });
+  // ③ 합쳐서 1회 emit(decision:block=사후 표면화 채널). 둘 다 없으면 조용히 정상 stop.
+  const combined = [scopeMsg, deferMsg].filter(Boolean).join("\n\n");
+  if (combined) emit({ decision: "block", reason: combined });
   process.exit(0);
 }
 

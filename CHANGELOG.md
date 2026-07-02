@@ -4,6 +4,23 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-01
+
+게이트에 코드 품질 두 축을 편입한다 — **축A 파급반경**(같은 원인이 인접 경계 너머 재발하는 단편적 수정)과 **축B Ponytail 최소구현 사다리**(YAGNI→기존코드 재사용→표준라이브러리). "백그라운드 자동화 서비스가 사용자에게 탐색을 떠넘기지 않는다"는 원칙에 따라, gbc가 **직접 grep으로 코드베이스를 탐색해 판정**한다.
+
+### Added
+- **scope 사후 판정 (Stop 시점, 축A 파급반경 · 축B 최소구현 사다리)** — PreToolUse에서 pass한 코드 편집을 `.gbc/scope-queue.json`에 큐잉(API 0회)하고, 응답 종료(Stop) 시점에 gbc가 **실제 grep으로 인접 호출부·유사 유틸을 탐색**해 배치 판정한다(`src/scope.ts` `collectGrepContext`, `src/judge.ts` `judgeScope`/`SCOPE_SYSTEM`). 차단이 아니라 사후 권고(`formatScopeFindings`). 게이트(`GATE_SYSTEM`)는 **무변경** — 축을 같은 호출에 섞으면 침묵-누락 골든이 8/8→6/8로 퇴행함이 실측돼(스파이크), 완전히 별도 호출로 분리했다. 골든 8/8(FP0 FN0) 유지 확인.
+- **코드 하드가드 (탐색 근거 없는 확신 차단)** — grep이 컨텍스트를 못 찾은 파일은 파서(`parseScopeVerdicts`)가 축A·rung2를 `unknown`으로 강제하고 `degraded=true`로 정직 고지한다(rung1/rung3는 grep 무관이라 유지). 프롬프트 지시가 아닌 코드 레벨 방어 — 모델의 근거 없는 hallucination을 구조적으로 막는다.
+- **`GBC_SCOPE_MODEL` / `GBC_NO_SCOPE`** — scope 판정 모델은 기본 haiku, `GBC_SCOPE_MODEL=claude-sonnet-4-6`로 opt-in(게이트 `GBC_MODEL`과 **물리 분리** — 공유 시 비용 배증). `GBC_NO_SCOPE=1`로 기능 전체 opt-out.
+- **`gbc metrics` scope 롤업 + `events.jsonl` scope 계측** — `[scope]` 요약(파급반경 broken·사다리 걸림·탐색불가 미평가 건수). `events.jsonl`엔 열거형 태그(axis/axisA/rung/spec_present/context_mode/transport/degraded)만 기록하고 코드 본문·사유는 저장하지 않는다(프라이버시 불변식 유지).
+- **scope 하드 타임아웃 + CLI 트랜스포트 skip** — scope 판정 호출에 `SCOPE_TIMEOUT_MS`(10s) 상한. 초과·실패는 unknown+degraded fail-open하고 `failopen.log`에 `scope` 태그로 계측(조용한 무력화 방지). 키 없는 환경(claude -p 폴백, 호출당 18~30s 실측)은 Stop 지연 예산을 초과하므로 **판정을 시도조차 안 하고 skip** — degraded 계측만 남긴다(조건부 degradation 정직 고지).
+- **scope 판정 입력에 계획 명세 포함** — rung1(YAGNI)은 "요청이 무엇이었나" 없이 판정 불가라 `buildScopeMessage`에 `[계획 명세]` 섹션을 포함(스파이크의 rung1 정확도가 명세 존재 조건에서 검증된 것과 판정 조건 정렬).
+- **scope 골든셋(`test/scope-cases.json`) + 회귀 확장** — 축A/rung2 정답라벨 케이스 6건(grep 컨텍스트 포함 5 + 무컨텍스트 하드가드 1)을 `eval/regression.ts`에 편입. 초회 실측 gate 8/8 + scope 6/6.
+
+### Notes
+- **재init 불필요** — `gbc init`이 등록하는 Stop hook **명령**은 동일하고 `runStop`이 확장됐을 뿐이다. 기존 설치처는 전역 패키지 갱신(`gbc update`)으로 새 동작을 받는다. 로컬 dist 도그푸딩 설치처는 재빌드로 반영.
+- **설계 검증** — BLOCKER 스파이크(48건 실측) + 2라운드 브레인트러스트(9렌즈) + Stop훅 CC 타임아웃(600s) 실증 + gbc 자체 코퍼스 라이브 도그푸딩(실제 파급반경 결함 탐지)을 거쳐 3차 설계로 확정.
+
 ## [0.5.1] - 2026-06-29
 
 순수 대화 세션(코드 편집 없이 대화만)에서 업데이트 안내가 사용자에게 영영 안 보이던 가시성 갭을 닫는다. 0.3.0이 PreToolUse(편집) 경로의 배너는 고쳤지만, 도구 호출이 0인 세션은 PreToolUse가 안 떠서 SessionStart 채널만 남는데 그게 모델 컨텍스트로만 주입돼 사용자 화면엔 안 떴다.

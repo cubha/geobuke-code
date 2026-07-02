@@ -67,6 +67,57 @@ export interface PendingReview {
   at: string;
 }
 
+// ===== scope 판정 (축A 파급반경 + 축B Ponytail 사다리) — 0.5.2 =====
+// 게이트(GATE_SYSTEM, 침묵-누락)와 *완전히 분리된* 별도 판정. PreToolUse 핫패스에서 즉시 판정하지
+// 않고(축 섞으면 골든 8/8→6/8 실회귀 스파이크 실증), pass한 동작편집을 큐잉만 → Stop 훅에서 gbc가
+// 실제 grep으로 코드베이스 컨텍스트를 채워 배치 단일 호출로 판정한다. 하드가드: 탐색 결과 없으면
+// 모델에 묻지 않고 "unknown"(미평가)로 정직 처리(degraded=true).
+
+/** 축A(파급반경) 판정 — 같은 원인이 인접 경계(호출부·API/데이터 계약·공유 상태) 너머 재발하는가. */
+export type AxisAVerdict = "ok" | "broken" | "unknown";
+
+/** 축B(Ponytail 최소구현 사다리) — 먼저 걸리는 rung 하나. none=사다리 미해당, unknown=탐색불가로 미평가. */
+export type RungVerdict = "rung1" | "rung2" | "rung3" | "none" | "unknown";
+
+/**
+ * PreToolUse가 큐잉하는 scope-판정 대기 엔트리 (.gbc/scope-queue.json — 배열).
+ * ⚠️ edit는 정규화된 *편집 본문*이다 — events.jsonl이 privacy 불변식으로 절대 저장 안 하는 내용을
+ *    여기엔 opt-in으로 로컬 저장한다(golden.ts와 동일 선례). .gbc/는 gitignore이고, 이 큐는
+ *    Stop 훅이 그 턴에 판정 후 즉시 비우는 *휘발성*이라 잔존 노출면이 작다(커밋=본문노출 방지).
+ */
+export interface ScopeQueueEntry {
+  /** 편집 대상 파일 경로(grep 스코프·판정 식별용) */
+  file: string;
+  /** Edit/Write/MultiEdit */
+  tool: string;
+  /** 정규화된 편집 본문 — Stop서 grep 컨텍스트와 함께 판정 입력 */
+  edit: string;
+  /** 작업단위 키(게이트 specHash와 상관) */
+  specHash: string;
+  /** 큐잉 시각 (ISO) */
+  at: string;
+}
+
+/**
+ * scope 배치 판정 결과 — Stop 시점 grep+단일 호출이 산출하는 편집별 판정.
+ * 축A/축B를 한 레코드에 담되, 게이트 Verdict(block/pass)와 달리 *비차단*이다(사후 표면화만).
+ */
+export interface ScopeVerdict {
+  /** 판정 대상 편집의 파일 경로(큐 엔트리와 매칭) */
+  file: string;
+  axisA: AxisAVerdict;
+  /** 축A 한 줄 사유(broken이면 어느 경계인지 명시) */
+  axisAReason: string;
+  rung: RungVerdict;
+  /** 축B 한 줄 사유(rung 근거 — "유사명 발견, 확인 필요" 톤) */
+  rungReason: string;
+  /**
+   * 탐색 컨텍스트 부재로 축A/rung2 판정을 축소(미평가)했는지 — 정직 고지 마커.
+   * true면 표면화 문구에 "탐색 불가로 파급반경 판정 생략" 명시(silent degradation 금지).
+   */
+  degraded: boolean;
+}
+
 /** 골든셋 케이스의 기대 판정(캡처 시점 judge 출력) */
 export interface GoldenExpected {
   verdict: VerdictKind;

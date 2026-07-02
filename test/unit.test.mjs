@@ -27,6 +27,8 @@ import {
   buildStopReminder,
   buildCrossRepoHint,
   buildSessionStartPayload,
+  formatScopeFindings,
+  logScopeVerdicts,
 } from "../dist/hook.js";
 import { loadRepos, addRepo, removeRepo } from "../dist/repos.js";
 import {
@@ -67,6 +69,27 @@ import { resolveApiKey, safeModel } from "../dist/judge.js";
 import { normalizeCase, MAX_CASE } from "../dist/text.js";
 import { isStopHintMuted, setStopHintMuted } from "../dist/config.js";
 import { parseBinding } from "../dist/verify.js";
+import {
+  enqueueScope,
+  readScopeQueue,
+  clearScopeQueue,
+  parseGrepOutput,
+  formatGrepContext,
+  extractSymbols,
+  collectGrepContext,
+  MAX_SCOPE_QUEUE,
+  MAX_GREP_MATCHES,
+  MAX_GREP_LINE_LEN,
+  MAX_SCOPE_CONTEXT_CHARS,
+  MAX_GREP_SYMBOLS,
+} from "../dist/scope.js";
+import {
+  buildScopeMessage,
+  parseScopeVerdicts,
+  judgeScope,
+  SCOPE_SYSTEM,
+  SCOPE_MODEL,
+} from "../dist/judge.js";
 import { parseJUnit, readVerifyResults, JUNIT_DEFAULT_REL } from "../dist/junit.js";
 import { runVerify } from "../dist/verify.js";
 import { readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
@@ -2042,4 +2065,399 @@ test("buildSessionStartPayload: 안내만 → systemMessage만, additionalContex
 test("buildSessionStartPayload: 둘 다 없음 → 빈 문자열(무출력, 현행 동작 보존)", () => {
   assert.equal(buildSessionStartPayload([], ""), "");
   assert.equal(buildSessionStartPayload(["", "  "], ""), "", "빈/공백 파트만 있으면 무출력");
+});
+
+// ===== SubTask 2: scope.ts 큐 IO + grep 파싱 (0.5.2) =====
+
+function tmpCwd() {
+  return mkdtempSync(join(tmpdir(), "gbc-scope-"));
+}
+
+function scopeEntry(over = {}) {
+  return {
+    file: "src/format/userName.ts",
+    tool: "Edit",
+    edit: "return user.name || 'Guest';",
+    specHash: "abc123",
+    at: "2026-07-01T00:00:00.000Z",
+    ...over,
+  };
+}
+
+test("scope 큐: enqueue→read 라운드트립(순서 보존)", () => {
+  const cwd = tmpCwd();
+  try {
+    enqueueScope(cwd, scopeEntry({ file: "a.ts" }));
+    enqueueScope(cwd, scopeEntry({ file: "b.ts" }));
+    const q = readScopeQueue(cwd);
+    assert.equal(q.length, 2);
+    assert.equal(q[0].file, "a.ts");
+    assert.equal(q[1].file, "b.ts");
+    assert.equal(q[0].edit, "return user.name || 'Guest';");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("scope 큐: clear가 비운다", () => {
+  const cwd = tmpCwd();
+  try {
+    enqueueScope(cwd, scopeEntry());
+    clearScopeQueue(cwd);
+    assert.deepEqual(readScopeQueue(cwd), []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("scope 큐: 없을 때 read는 빈 배열", () => {
+  const cwd = tmpCwd();
+  try {
+    assert.deepEqual(readScopeQueue(cwd), []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("scope 큐: MAX_SCOPE_QUEUE 초과 시 최신 N만 유지(오래된 것 드롭)", () => {
+  const cwd = tmpCwd();
+  try {
+    for (let i = 0; i < MAX_SCOPE_QUEUE + 5; i++) {
+      enqueueScope(cwd, scopeEntry({ file: `f${i}.ts` }));
+    }
+    const q = readScopeQueue(cwd);
+    assert.equal(q.length, MAX_SCOPE_QUEUE, "큐는 상한을 넘지 않는다");
+    // 최신 유지: 마지막 엔트리는 가장 최근에 넣은 것
+    assert.equal(q[q.length - 1].file, `f${MAX_SCOPE_QUEUE + 4}.ts`);
+    // 가장 오래된 것(f0)은 드롭됨
+    assert.ok(!q.some((e) => e.file === "f0.ts"), "가장 오래된 엔트리는 드롭");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("parseGrepOutput: file:line:content 파싱", () => {
+  const raw = "src/a.ts:12:  foo(bar)\nsrc/b.ts:3:const x = 1";
+  const { matches, truncated } = parseGrepOutput(raw);
+  assert.equal(truncated, false);
+  assert.equal(matches.length, 2);
+  assert.deepEqual(matches[0], { file: "src/a.ts", line: 12, text: "foo(bar)" });
+  assert.equal(matches[1].file, "src/b.ts");
+  assert.equal(matches[1].line, 3);
+});
+
+test("parseGrepOutput: 깨진 줄·빈 줄 skip", () => {
+  const raw = "src/a.ts:12:ok\n\ngarbage line no colon\nsrc/b.ts:notanumber:x\nsrc/c.ts:5:good";
+  const { matches } = parseGrepOutput(raw);
+  assert.equal(matches.length, 2, "정상 2줄만");
+  assert.equal(matches[0].file, "src/a.ts");
+  assert.equal(matches[1].file, "src/c.ts");
+});
+
+test("parseGrepOutput: 빈 입력 → 빈 matches(하드가드 트리거 신호)", () => {
+  assert.deepEqual(parseGrepOutput("").matches, []);
+  assert.deepEqual(parseGrepOutput("   \n  ").matches, []);
+});
+
+test("parseGrepOutput: MAX_GREP_MATCHES 초과 시 잘리고 truncated=true", () => {
+  const lines = [];
+  for (let i = 0; i < MAX_GREP_MATCHES + 10; i++) lines.push(`src/f.ts:${i + 1}:line${i}`);
+  const { matches, truncated } = parseGrepOutput(lines.join("\n"));
+  assert.equal(matches.length, MAX_GREP_MATCHES);
+  assert.equal(truncated, true);
+});
+
+test("parseGrepOutput: 긴 줄은 MAX_GREP_LINE_LEN으로 절단", () => {
+  const longText = "x".repeat(MAX_GREP_LINE_LEN + 200);
+  const { matches } = parseGrepOutput(`src/a.ts:1:${longText}`);
+  assert.ok(matches[0].text.length <= MAX_GREP_LINE_LEN, "줄 텍스트 절단");
+});
+
+test("formatGrepContext: 빈 matches → 빈 문자열", () => {
+  assert.equal(formatGrepContext([]), "");
+});
+
+test("formatGrepContext: 총 길이 MAX_SCOPE_CONTEXT_CHARS 이내로 바운드", () => {
+  const many = [];
+  for (let i = 0; i < 500; i++) many.push({ file: `src/f${i}.ts`, line: i, text: "y".repeat(150) });
+  const ctx = formatGrepContext(many);
+  assert.ok(ctx.length <= MAX_SCOPE_CONTEXT_CHARS, `컨텍스트 길이 ${ctx.length} <= ${MAX_SCOPE_CONTEXT_CHARS}`);
+  assert.ok(ctx.includes("src/f0.ts"), "앞쪽 매치는 포함");
+});
+
+// ===== SubTask 3: judge.ts SCOPE_SYSTEM + judgeScope + 하드가드 (0.5.2) =====
+
+function scopeQ(over = {}) {
+  return { file: "src/a.ts", tool: "Edit", edit: "x", specHash: "h", at: "t", ...over };
+}
+
+test("SCOPE_MODEL: 기본 haiku (GBC_SCOPE_MODEL 미설정 시)", () => {
+  // 기본 실행 환경엔 GBC_SCOPE_MODEL 없음 → haiku
+  assert.equal(SCOPE_MODEL, "claude-haiku-4-5");
+});
+
+test("parseScopeVerdicts: 정상 배치 파싱 (컨텍스트 있음 → degraded=false)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const raw = JSON.stringify([
+    { file: "src/a.ts", axisA: "broken", axisAReason: "Sidebar.tsx 미반영", rung: "rung2", rungReason: "text.ts 중복" },
+  ]);
+  const [v] = parseScopeVerdicts(raw, entries, new Set(["src/a.ts"]));
+  assert.equal(v.file, "src/a.ts");
+  assert.equal(v.axisA, "broken");
+  assert.equal(v.rung, "rung2");
+  assert.equal(v.degraded, false);
+});
+
+test("하드가드: 컨텍스트 없는 파일 → axisA 강제 unknown + degraded=true (모델이 broken이라 해도)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const raw = JSON.stringify([
+    { file: "src/a.ts", axisA: "broken", axisAReason: "확신", rung: "none", rungReason: "" },
+  ]);
+  const [v] = parseScopeVerdicts(raw, entries, new Set()); // 컨텍스트 없음
+  assert.equal(v.axisA, "unknown", "탐색 근거 없이 broken 확신 차단");
+  assert.equal(v.degraded, true);
+});
+
+test("하드가드: 컨텍스트 없을 때 rung2 → unknown 강제 (재사용은 grep 없이 판정 불가)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const raw = JSON.stringify([
+    { file: "src/a.ts", axisA: "unknown", axisAReason: "", rung: "rung2", rungReason: "있을듯" },
+  ]);
+  const [v] = parseScopeVerdicts(raw, entries, new Set());
+  assert.equal(v.rung, "unknown", "grep 없이 rung2(중복존재) 확신 차단");
+  assert.equal(v.degraded, true);
+});
+
+test("하드가드: 컨텍스트 없어도 rung1(YAGNI)/rung3(stdlib)는 유지 (grep 무관 판정)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" }), scopeQ({ file: "src/b.ts" })];
+  const raw = JSON.stringify([
+    { file: "src/a.ts", axisA: "ok", axisAReason: "", rung: "rung1", rungReason: "플러그인 과다" },
+    { file: "src/b.ts", axisA: "ok", axisAReason: "", rung: "rung3", rungReason: "structuredClone 있음" },
+  ]);
+  const vs = parseScopeVerdicts(raw, entries, new Set()); // 컨텍스트 없음
+  assert.equal(vs[0].rung, "rung1", "rung1은 grep 없이도 유지");
+  assert.equal(vs[1].rung, "rung3", "rung3은 grep 없이도 유지");
+  // 단 axisA는 컨텍스트 없으니 degraded
+  assert.equal(vs[0].degraded, true);
+});
+
+test("parseScopeVerdicts: 응답에 없는 파일 → unknown+degraded (모델이 판정 안 함)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" }), scopeQ({ file: "src/missing.ts" })];
+  const raw = JSON.stringify([{ file: "src/a.ts", axisA: "ok", axisAReason: "", rung: "none", rungReason: "" }]);
+  const vs = parseScopeVerdicts(raw, entries, new Set(["src/a.ts", "src/missing.ts"]));
+  assert.equal(vs.length, 2, "엔트리마다 하나씩(응답 누락도 채움)");
+  const missing = vs.find((v) => v.file === "src/missing.ts");
+  assert.equal(missing.axisA, "unknown");
+  assert.equal(missing.rung, "unknown");
+  assert.equal(missing.degraded, true);
+});
+
+test("parseScopeVerdicts: 파싱 불가 → 전 엔트리 unknown+degraded (broken/rung2 조작 금지)", () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const [v] = parseScopeVerdicts("쓰레기 응답 no json", entries, new Set(["src/a.ts"]));
+  assert.equal(v.axisA, "unknown");
+  assert.equal(v.rung, "unknown");
+  assert.equal(v.degraded, true);
+});
+
+test("parseScopeVerdicts: 잘못된 enum 값 → unknown 강제", () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const raw = JSON.stringify([{ file: "src/a.ts", axisA: "무효값", rung: "rung9", axisAReason: "", rungReason: "" }]);
+  const [v] = parseScopeVerdicts(raw, entries, new Set(["src/a.ts"]));
+  assert.equal(v.axisA, "unknown");
+  assert.equal(v.rung, "unknown");
+});
+
+test("buildScopeMessage: 편집들과 grep 컨텍스트를 담는다", () => {
+  const entries = [scopeQ({ file: "src/a.ts", edit: "return x || 'g'" })];
+  const msg = buildScopeMessage(entries, "src/other.ts:4: uses x");
+  assert.ok(msg.includes("src/a.ts"), "파일 경로 포함");
+  assert.ok(msg.includes("return x || 'g'"), "편집 본문 포함");
+  assert.ok(msg.includes("src/other.ts:4"), "grep 컨텍스트 포함");
+});
+
+test("buildScopeMessage: 컨텍스트 없으면 '(탐색 결과 없음)' 명시", () => {
+  const msg = buildScopeMessage([scopeQ()], "");
+  assert.ok(/탐색 결과 없음|없음/.test(msg), "빈 컨텍스트를 명시적으로 표기");
+});
+
+test("judgeScope: 타임아웃 초과 → unknown+degraded fail-open (사유에 타임아웃 명시)", async () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const invoke = () => new Promise(() => {}); // 영원히 안 끝나는 호출
+  const t0 = Date.now();
+  const vs = await judgeScope(entries, "ctx", new Set(["src/a.ts"]), { invoke, timeoutMs: 80 });
+  assert.ok(Date.now() - t0 < 2000, "타임아웃이 실제로 끊는다");
+  assert.equal(vs[0].axisA, "unknown");
+  assert.equal(vs[0].degraded, true);
+  assert.ok(vs[0].axisAReason.includes("타임아웃"), "사유에 타임아웃 명시");
+});
+
+test("buildScopeMessage: planSpec 포함(rung1 판정 조건 정렬), 없으면 '(계획 명세 없음)'", async () => {
+  const withSpec = buildScopeMessage([scopeQ()], "", "apiTimeout 값 하나만 읽기");
+  assert.ok(withSpec.includes("apiTimeout 값 하나만 읽기"));
+  assert.ok(withSpec.includes("[계획 명세]"));
+  const noSpec = buildScopeMessage([scopeQ()], "");
+  assert.ok(noSpec.includes("(계획 명세 없음)"));
+});
+
+test("judgeScope: 호출 실패 → 전 엔트리 unknown+degraded (fail-open, block 아님)", async () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const invoke = async () => {
+    throw new Error("API 다운");
+  };
+  const vs = await judgeScope(entries, "ctx", new Set(["src/a.ts"]), { invoke });
+  assert.equal(vs.length, 1);
+  assert.equal(vs[0].axisA, "unknown");
+  assert.equal(vs[0].degraded, true);
+});
+
+test("judgeScope: 정상 응답 파싱 + 하드가드 적용", async () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const invoke = async () =>
+    JSON.stringify([{ file: "src/a.ts", axisA: "broken", axisAReason: "r", rung: "none", rungReason: "" }]);
+  const vs = await judgeScope(entries, "src/a.ts:1: hit", new Set(["src/a.ts"]), { invoke });
+  assert.equal(vs[0].axisA, "broken");
+  assert.equal(vs[0].degraded, false);
+});
+
+// ===== SubTask 4: extractSymbols + collectGrepContext (grep 실행 유틸) =====
+
+test("extractSymbols: 함수·const·class 정의명 추출, 키워드·짧은 이름 제외", () => {
+  const edit = "export function formatUserName(u) {\n  const fallback = 'Guest';\n  return u.name || fallback;\n}";
+  const syms = extractSymbols(edit);
+  assert.ok(syms.includes("formatUserName"), "함수명 추출");
+  assert.ok(syms.includes("fallback"), "const명 추출");
+  assert.ok(!syms.includes("const"), "키워드 제외");
+  assert.ok(!syms.includes("u"), "3자 미만 제외");
+});
+
+test("extractSymbols: MAX_GREP_SYMBOLS로 상한", () => {
+  let edit = "";
+  for (let i = 0; i < 30; i++) edit += `function fn_symbol_${i}() {}\n`;
+  assert.ok(extractSymbols(edit).length <= MAX_GREP_SYMBOLS);
+});
+
+test("collectGrepContext: 타 파일 매치 → filesWithContext 등록 + 컨텍스트 채움", async () => {
+  const entries = [scopeQ({ file: "src/a.ts", edit: "function formatUserName(u){ return u.name }" })];
+  // 주입 grep: formatUserName이 다른 파일(src/sidebar.ts)에서 호출됨
+  const grep = async (sym) =>
+    sym === "formatUserName" ? "src/sidebar.ts:41: formatUserName(user)\nsrc/a.ts:1: function formatUserName" : "";
+  const { context, filesWithContext } = await collectGrepContext(".", entries, { grep });
+  assert.ok(filesWithContext.has("src/a.ts"), "타 파일 매치 있으니 컨텍스트 있음으로");
+  assert.ok(context.includes("src/sidebar.ts"), "타 파일 호출부가 컨텍스트에");
+  assert.ok(!context.includes("src/a.ts:1"), "자기 파일 매치는 제외");
+});
+
+test("collectGrepContext: 매치 없음 → filesWithContext 비고 컨텍스트 빈문자열(하드가드 신호)", async () => {
+  const entries = [scopeQ({ file: "src/a.ts", edit: "function loneSymbol(){}" })];
+  const grep = async () => ""; // 아무 매치 없음
+  const { context, filesWithContext } = await collectGrepContext(".", entries, { grep });
+  assert.equal(context, "");
+  assert.equal(filesWithContext.size, 0, "컨텍스트 없음 → 하드가드가 unknown 처리하게 됨");
+});
+
+// ===== SubTask 5: hook.ts formatScopeFindings (표면화 포맷) =====
+
+function sv(over = {}) {
+  return { file: "src/a.ts", axisA: "ok", axisAReason: "", rung: "none", rungReason: "", degraded: false, ...over };
+}
+
+test("formatScopeFindings: 액션 없음(ok+none) → 빈 문자열(불필요한 표면화 안 함)", () => {
+  assert.equal(formatScopeFindings([sv()], false), "");
+  assert.equal(formatScopeFindings([sv({ axisA: "unknown", rung: "unknown", degraded: true })], true), "");
+});
+
+test("formatScopeFindings: axisA broken → 파급반경 라인 포함", () => {
+  const out = formatScopeFindings([sv({ axisA: "broken", axisAReason: "Sidebar 미반영" })], false);
+  assert.ok(out.includes("파급반경"), "파급반경 라벨");
+  assert.ok(out.includes("Sidebar 미반영"));
+});
+
+test("formatScopeFindings: rung1/2/3 → 각 라벨 포함", () => {
+  assert.ok(formatScopeFindings([sv({ rung: "rung1", rungReason: "플러그인 과다" })], false).includes("과다구현"));
+  assert.ok(formatScopeFindings([sv({ rung: "rung2", rungReason: "text.ts 중복" })], false).includes("기존코드 재사용"));
+  assert.ok(formatScopeFindings([sv({ rung: "rung3", rungReason: "structuredClone" })], false).includes("표준라이브러리"));
+});
+
+test("formatScopeFindings: degraded + 액션 있음 → 정직 고지 한 줄 첨부", () => {
+  const out = formatScopeFindings([sv({ axisA: "broken", axisAReason: "r" })], true);
+  assert.ok(/생략|탐색 컨텍스트/.test(out), "degraded 고지");
+});
+
+// ===== SubTask 6: metrics.ts scope 계측 태깅 (프라이버시 불변식) =====
+
+test("logScopeVerdicts: events.jsonl에 scope 이벤트 기록(enum 태그만)", () => {
+  const cwd = tmpCwd();
+  try {
+    const verdicts = [
+      sv({ file: "src/a.ts", axisA: "broken", axisAReason: "민감한 코드 사유 텍스트", rung: "rung2", rungReason: "비밀 스니펫" }),
+    ];
+    logScopeVerdicts(cwd, "sess1", verdicts, { contextMode: "grep", transport: "api", specPresent: true });
+    const raw = readFileSync(join(cwd, ".gbc", "events.jsonl"), "utf8");
+    const events = parseEvents(raw);
+    const scopeEvts = events.filter((e) => e.kind === "scope");
+    assert.equal(scopeEvts.length, 1);
+    const e = scopeEvts[0];
+    assert.equal(e.axis, "rung2", "rung 걸림이 coarse axis 태그");
+    assert.equal(e.axisA, "broken");
+    assert.equal(e.rung, "rung2");
+    assert.equal(e.spec_present, true);
+    assert.equal(e.context_mode, "grep");
+    assert.equal(e.transport, "api");
+    assert.equal(e.degraded, false);
+    // 프라이버시 불변식: 코드 본문·사유 문자열이 직렬화에 절대 없어야 함
+    assert.ok(!raw.includes("민감한 코드 사유 텍스트"), "axisAReason 미저장");
+    assert.ok(!raw.includes("비밀 스니펫"), "rungReason 미저장");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("logScopeVerdicts: axisA broken·rung none → axis=scope 태그", () => {
+  const cwd = tmpCwd();
+  try {
+    logScopeVerdicts(cwd, "s", [sv({ axisA: "broken", rung: "none" })], {
+      contextMode: "grep",
+      transport: "cli",
+      specPresent: false,
+    });
+    const events = parseEvents(readFileSync(join(cwd, ".gbc", "events.jsonl"), "utf8"));
+    assert.equal(events[0].axis, "scope");
+    assert.equal(events[0].context_mode, "grep");
+    assert.equal(events[0].spec_present, false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("logScopeVerdicts: degraded 이벤트도 정직 기록(context_mode none)", () => {
+  const cwd = tmpCwd();
+  try {
+    logScopeVerdicts(cwd, "s", [sv({ axisA: "unknown", rung: "unknown", degraded: true })], {
+      contextMode: "none",
+      transport: "api",
+      specPresent: true,
+    });
+    const events = parseEvents(readFileSync(join(cwd, ".gbc", "events.jsonl"), "utf8"));
+    assert.equal(events[0].degraded, true);
+    assert.equal(events[0].context_mode, "none");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("computeMetrics: scope 롤업(파급반경 broken·사다리 걸림·degraded 집계)", () => {
+  const events = parseEvents(
+    [
+      JSON.stringify({ at: "t1", session: "s", specHash: "", kind: "scope", axisA: "broken", rung: "none", degraded: false }),
+      JSON.stringify({ at: "t2", session: "s", specHash: "", kind: "scope", axisA: "ok", rung: "rung2", degraded: false }),
+      JSON.stringify({ at: "t3", session: "s", specHash: "", kind: "scope", axisA: "unknown", rung: "unknown", degraded: true }),
+      JSON.stringify({ at: "t4", session: "s", specHash: "h", kind: "gate", tool: "Edit", decision: "pass" }),
+    ].join("\n"),
+  );
+  const m = computeMetrics(events);
+  assert.equal(m.scope.total, 3, "scope 이벤트만 집계(gate 제외)");
+  assert.equal(m.scope.rippleBroken, 1);
+  assert.equal(m.scope.rungHits, 1);
+  assert.equal(m.scope.degraded, 1);
 });
