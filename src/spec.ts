@@ -117,6 +117,16 @@ function nowStamp(): string {
  * 그 명시적 완료 이벤트의 데이터 동작이다(게이트 리셋은 호출부 cmdDone이 별도로 — resetGate 불변).
  * @returns 아카이브 파일 경로(보존했으면), 비울 본문이 없으면 null.
  */
+/**
+ * spec.archive 보존상한(0.5.3 — 0.4.2 보안 S2 해소): 아카이브 파일이 무기한 누적되지 않게
+ * 최신 keep개만 남기고 오래된 것부터 삭제한다. 파일명 = <hash 16자>-<ISO stamp>.md 라
+ * 시간순은 stamp 부분(slice(17))으로 정렬한다(hash 프리픽스는 시간과 무관).
+ * STUB(ST3 RED)
+ */
+export function pruneSpecArchive(_dir: string, _keep: number): string[] {
+  throw new Error("미구현(ST3 RED)");
+}
+
 export function archiveSpec(cwd: string): string | null {
   const path = specPath(cwd);
   if (!existsSync(path)) return null;

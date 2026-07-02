@@ -19,7 +19,7 @@ import {
   reopenDefer,
 } from "../dist/defer.js";
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
-import { addSpecCase, readSpecCases, clearSpec, archiveSpec } from "../dist/spec.js";
+import { addSpecCase, readSpecCases, clearSpec, archiveSpec, pruneSpecArchive } from "../dist/spec.js";
 import {
   buildBlockReason,
   shouldCacheVerdict,
@@ -93,7 +93,7 @@ import {
 } from "../dist/judge.js";
 import { parseJUnit, readVerifyResults, JUNIT_DEFAULT_REL } from "../dist/junit.js";
 import { runVerify } from "../dist/verify.js";
-import { readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, symlinkSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -2527,5 +2527,59 @@ test("readVersionCache: latest가 비-semver면 캐시 무효(null)", () => {
     assert.ok(readVersionCache(home), "정상 latest는 그대로 유효");
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ===== ST3 (0.5.3): spec.archive 보존상한 =====
+// 아카이브 무기한 누적(0.4.2 S2 Warning) 차단 — 최신 keep개만 보존, 오래된 것부터 삭제.
+
+test("pruneSpecArchive: 상한 초과 시 오래된 파일부터 삭제(최신 keep개 보존)", () => {
+  const dir = tmp();
+  try {
+    // 파일명 = <hash16>-<stamp>.md — hash가 시간순과 무관함을 드러내는 배치(늦은 stamp가 앞 hash).
+    const names = [
+      "aaaaaaaaaaaaaaaa-2026-07-02T03-00-00-000Z.md", // 최신
+      "ffffffffffffffff-2026-07-01T01-00-00-000Z.md", // 가장 오래됨
+      "bbbbbbbbbbbbbbbb-2026-07-01T02-00-00-000Z.md",
+    ];
+    for (const n of names) writeFileSync(join(dir, n), "x");
+    const removed = pruneSpecArchive(dir, 2);
+    assert.deepEqual(removed, ["ffffffffffffffff-2026-07-01T01-00-00-000Z.md"]);
+    assert.ok(!existsSync(join(dir, names[1])), "가장 오래된 파일 삭제됨");
+    assert.ok(existsSync(join(dir, names[0])) && existsSync(join(dir, names[2])), "최신 2개 보존");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pruneSpecArchive: 상한 이내·디렉토리 없음은 no-op(빈 배열)", () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "aaaaaaaaaaaaaaaa-2026-07-02T03-00-00-000Z.md"), "x");
+    assert.deepEqual(pruneSpecArchive(dir, 2), []);
+    assert.deepEqual(pruneSpecArchive(join(dir, "없는곳"), 2), [], "디렉토리 부재 fail-silent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("archiveSpec: 아카이브 후 보존상한 자동 적용(GBC_ARCHIVE_KEEP)", () => {
+  const dir = tmp();
+  const prev = process.env.GBC_ARCHIVE_KEEP;
+  process.env.GBC_ARCHIVE_KEEP = "1";
+  try {
+    const arch = join(dir, ".gbc", "spec.archive");
+    mkdirSync(arch, { recursive: true });
+    writeFileSync(join(arch, "0000000000000000-2020-01-01T00-00-00-000Z.md"), "old");
+    addSpecCase(dir, "케이스 A");
+    const kept = archiveSpec(dir);
+    assert.ok(kept, "아카이브 수행됨");
+    const files = readdirSync(arch);
+    assert.equal(files.length, 1, "keep=1 → 방금 아카이브만 남음");
+    assert.ok(!files.includes("0000000000000000-2020-01-01T00-00-00-000Z.md"));
+  } finally {
+    if (prev === undefined) delete process.env.GBC_ARCHIVE_KEEP;
+    else process.env.GBC_ARCHIVE_KEEP = prev;
+    rmSync(dir, { recursive: true, force: true });
   }
 });
