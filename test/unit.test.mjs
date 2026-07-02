@@ -60,6 +60,7 @@ import {
   buildVersionNotice,
   isCacheStale,
   readVersionCache,
+  isValidVersion,
   writeVersionCache,
   shouldRefreshCache,
 } from "../dist/version.js";
@@ -2499,4 +2500,32 @@ test("buildCliInvocation: --output-format json 유지(기존 파싱 계약 보�
   const inv = buildCliInvocation("S", "U", "claude-haiku-4-5");
   const i = inv.argv.indexOf("--output-format");
   assert.equal(inv.argv[i + 1], "json");
+});
+
+// ===== ST2 (0.5.3): version-check latest semver 형식 검증 =====
+// 캐시 파일 변조 시 비-semver 문자열이 안내 문구(systemMessage)에 실리지 않게 읽기 지점에서 차단.
+
+test("isValidVersion: 유효 semver는 true", () => {
+  for (const v of ["0.5.2", "10.20.30", "1.0.0-rc.1", "1.2.3+build.5"]) {
+    assert.equal(isValidVersion(v), true, v);
+  }
+});
+
+test("isValidVersion: 비-semver·인젝션형은 false", () => {
+  for (const v of ["", "abc", "1.2", "1.2.3.4", "9.9.9 <script>", "9.9.9;rm -rf", "9.9.9\n악성", " 1.2.3"]) {
+    assert.equal(isValidVersion(v), false, JSON.stringify(v));
+  }
+});
+
+test("readVersionCache: latest가 비-semver면 캐시 무효(null)", () => {
+  const home = tmp();
+  try {
+    mkdirSync(join(home, ".gbc"), { recursive: true });
+    writeVersionCache({ latest: "9.9.9 <script>alert(1)</script>", checkedAt: 12345 }, home);
+    assert.equal(readVersionCache(home), null, "변조 latest는 읽기 지점에서 무효");
+    writeVersionCache({ latest: "9.9.9", checkedAt: 12345 }, home);
+    assert.ok(readVersionCache(home), "정상 latest는 그대로 유효");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -35,6 +35,15 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+/**
+ * latest 필드의 semver 형식 검증(순수) — 0.5.1 보안 Info 해소: 캐시 파일이 변조돼도
+ * 비-semver 문자열이 SessionStart systemMessage/안내 문구에 실리지 않게 한다.
+ * STUB(ST2 RED)
+ */
+export function isValidVersion(_v: string): boolean {
+  throw new Error("미구현(ST2 RED)");
+}
+
 export function readVersionCache(home?: string): VersionCache | null {
   try {
     const j = JSON.parse(readFileSync(cachePath(home), "utf8")) as VersionCache;
