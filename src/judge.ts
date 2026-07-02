@@ -11,6 +11,12 @@ const MODEL = process.env.GBC_MODEL ?? "claude-haiku-4-5";
  * GBC_MODEL과 분리하는 이유: 공유 시 게이트/verify/scope 3중으로 sonnet 비용이 배증.
  */
 const SCOPE_MODEL = process.env.GBC_SCOPE_MODEL ?? "claude-haiku-4-5";
+/**
+ * verify reviewed 판정 전용 모델(GBC_VERIFY_MODEL, opt-in) — SCOPE_MODEL과 동형 분리.
+ * 기본 haiku: A/B 실측(2026-07-02, 8케이스 pass4/fail4 오버클레임 함정 포함)에서
+ * haiku·sonnet 정확도 8/8 동률, 지연은 haiku가 절반(~2s vs ~3.5s) → 상향 근거 없음.
+ */
+const VERIFY_MODEL = process.env.GBC_VERIFY_MODEL ?? "claude-haiku-4-5";
 const CLI_TIMEOUT_MS = 30000; // claude -p 폴백 상한(행 방지). 초과 시 kill → fail-open.
 
 /**
@@ -141,13 +147,18 @@ export function selectedTransport(): "api" | "cli" {
 }
 
 /** 직접 Anthropic API (haiku). SDK는 여기서만 lazy import → hook 핫패스 보호. */
-async function judgeViaApi(system: string, user: string, temperature?: number): Promise<string> {
+async function judgeViaApi(
+  system: string,
+  user: string,
+  temperature?: number,
+  model: string = MODEL,
+): Promise<string> {
   const mod = await import("@anthropic-ai/sdk");
   const Anthropic = mod.default;
   // 키를 코드에서 해석(env 또는 ~/.gbc/api-key)해 명시 전달 — 셸 주입 불필요(크로스플랫폼).
   const client = new Anthropic({ apiKey: resolveApiKey() ?? undefined });
   const resp = await client.messages.create({
-    model: MODEL,
+    model,
     max_tokens: 1024,
     // temperature는 replay(회귀락)에서만 0으로 핀해 결정성을 높인다. 핫패스는 undefined=API 기본
     // (기존 판정 분포 보존). undefined면 키 자체를 안 보내 SDK 기본을 쓴다.
@@ -163,10 +174,10 @@ async function judgeViaApi(system: string, user: string, temperature?: number): 
 }
 
 /** claude -p 폴백 (무설정 도그푸딩용, 느림). CC의 기존 인증 사용. */
-async function judgeViaCli(system: string, user: string): Promise<string> {
+async function judgeViaCli(system: string, user: string, model: string = MODEL): Promise<string> {
   // native Windows는 claude.cmd라 별도 경로(아래) — POSIX도 W2로 user=stdin 통일(0.5.3).
-  if (process.platform === "win32") return judgeViaCliWin(system, user);
-  return runClaudeCli(buildCliInvocation(system, user, MODEL));
+  if (process.platform === "win32") return judgeViaCliWin(system, user, model);
+  return runClaudeCli(buildCliInvocation(system, user, model));
 }
 
 /**
@@ -229,11 +240,11 @@ function runClaudeCli(inv: CliInvocation, opts: { shell?: boolean } = {}): Promi
  *  '판정 품질'만 프롬프트 전달 방식이 다르고, 이는 가시적 fail-open으로 바운드된다.)
  * kill-timeout 필수 — 무응답 stdin이 PreToolUse를 무한 차단하면 ENOENT보다 나쁘다 → fail-open 강제.
  */
-function judgeViaCliWin(system: string, user: string): Promise<string> {
+function judgeViaCliWin(system: string, user: string, model: string = MODEL): Promise<string> {
   // shell:true 경로라 argv엔 동적 데이터 절대 금지 — system조차 stdin에 결합(기존 검증된 형태 보존).
   return runClaudeCli(
     {
-      argv: ["-p", "--model", safeModel(MODEL), "--output-format", "json"],
+      argv: ["-p", "--model", safeModel(model), "--output-format", "json"],
       stdin: `${system}\n\n${user}`,
     },
     { shell: true },
@@ -350,7 +361,9 @@ export async function judgeReviewed(
   const invoke: ReviewInvoke =
     opts.invoke ??
     ((system, u) =>
-      selectedTransport() === "api" ? judgeViaApi(system, u) : judgeViaCli(system, u));
+      selectedTransport() === "api"
+        ? judgeViaApi(system, u, undefined, VERIFY_MODEL)
+        : judgeViaCli(system, u, VERIFY_MODEL));
   try {
     return parseReviewVerdict(await invoke(REVIEW_SYSTEM, user));
   } catch (e) {
