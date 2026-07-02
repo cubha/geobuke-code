@@ -125,8 +125,10 @@ function nowStamp(): string {
  */
 export function pruneSpecArchive(dir: string, keep: number): string[] {
   try {
+    // 정형 파일명(<hash16>-<stamp>.md)만 대상 — 비정형 .md(수동 메모 등)는 slice(17) 정렬이
+    // 무의미하고 오판 삭제 위험이 있어 보존한다(0.5.3 보안검토 S6).
     const files = readdirSync(dir)
-      .filter((n) => n.endsWith(".md"))
+      .filter((n) => /^[0-9a-f]{16}-.+\.md$/.test(n))
       .sort((a, b) => (a.slice(17) < b.slice(17) ? -1 : 1)); // 오래된 것 앞
     if (files.length <= keep) return [];
     const doomed = files.slice(0, files.length - keep);

@@ -2583,3 +2583,17 @@ test("archiveSpec: 아카이브 후 보존상한 자동 적용(GBC_ARCHIVE_KEEP)
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("pruneSpecArchive: 비정형 파일명(.md)은 정렬·삭제 대상에서 제외(보존)", () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "pre-0.4.2-manual-note.md"), "수동 메모");
+    writeFileSync(join(dir, "aaaaaaaaaaaaaaaa-2026-07-02T03-00-00-000Z.md"), "x");
+    writeFileSync(join(dir, "bbbbbbbbbbbbbbbb-2026-07-01T01-00-00-000Z.md"), "x");
+    const removed = pruneSpecArchive(dir, 1);
+    assert.deepEqual(removed, ["bbbbbbbbbbbbbbbb-2026-07-01T01-00-00-000Z.md"]);
+    assert.ok(existsSync(join(dir, "pre-0.4.2-manual-note.md")), "비정형 파일은 keep 계산과 무관하게 보존");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

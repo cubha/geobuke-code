@@ -521,7 +521,8 @@ async function scopeViaApi(system: string, user: string): Promise<string> {
 }
 
 async function scopeViaCli(system: string, user: string): Promise<string> {
-  if (process.platform === "win32") return judgeViaCliWin(system, user);
+  // win32도 SCOPE_MODEL 명시 전달(0.5.3 보안검토 W2 — 기본값 MODEL로 새면 모델 비용 분리가 깨짐).
+  if (process.platform === "win32") return judgeViaCliWin(system, user, SCOPE_MODEL);
   return runClaudeCli(buildCliInvocation(system, user, SCOPE_MODEL));
 }
 
