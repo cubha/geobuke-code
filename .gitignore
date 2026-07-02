@@ -11,6 +11,7 @@ dist/
 
 # MVP 빌드 작업 아티팩트
 scratch.md
+scratch.md.precompact-backup-*
 .mvp-state.json
 .mvp-state.completed-*.json
 
