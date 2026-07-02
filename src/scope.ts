@@ -3,7 +3,7 @@
 // 이 파일은 순수 로직·파일 IO만 담당(모델 호출 없음 — 그건 judge.ts judgeScope).
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { gbcDir, readJson, writeJson } from "./store.js";
 import type { ScopeQueueEntry, ScopeVerdict } from "./types.js";
 
@@ -210,8 +210,10 @@ export async function collectGrepContext(
       seenSymbols.add(sym);
       const raw = await grep(sym, cwd);
       const { matches } = parseGrepOutput(raw);
-      // 자기 파일 매치는 제외(다른 파일의 호출부·중복만 단서로).
-      const others = matches.filter((m) => !m.file.endsWith(entry.file) && !entry.file.endsWith(m.file));
+      // 자기 파일 매치는 제외(다른 파일의 호출부·중복만 단서로). cwd 기준 절대경로 동등 비교 —
+      // production은 entry.file=절대(CC file_path) × grep 출력=./상대 조합이라 endsWith가 불일치했다(0.5.4).
+      const entryAbs = resolve(cwd, entry.file);
+      const others = matches.filter((m) => resolve(cwd, m.file) !== entryAbs);
       if (others.length > 0) {
         filesWithContext.add(entry.file);
         allMatches.push(...others);
