@@ -161,7 +161,9 @@ async function realGrep(symbol: string, cwd: string): Promise<string> {
       [
         "-rn", "--include=*.ts", "--include=*.js", "--include=*.tsx", "--include=*.jsx",
         "--exclude-dir=node_modules", "--exclude-dir=.git", "--exclude-dir=dist", "--exclude-dir=.gbc",
-        "-F", symbol, ".",
+        // "--"로 옵션 종결 — extractSymbols가 [A-Za-z_] 앵커라 현재는 "-" 시작 심볼이 없지만,
+        // 패턴 확장 시 심볼이 grep 플래그로 해석되는 회귀를 방어(보안 QUICK W1).
+        "-F", "--", symbol, ".",
       ],
       { cwd, timeout: GREP_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
     );
