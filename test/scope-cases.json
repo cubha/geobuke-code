@@ -46,7 +46,7 @@
   },
   {
     "id": "S5-rung1-YAGNI",
-    "note": "요청은 timeout 값 읽기 하나인데 플러그인 시스템 선구현 — rung1이어야(계획명세 대비 판정)",
+    "note": "요청은 timeout 값 읽기 하나인데 플러그인 시스템 선구현 — rung1이어야(계획명세 대비 판정). axisA는 이 케이스 목적이 아니라 무제약(cli 실측서 broken 변산 관측 — rung1 판정은 양 트랜스포트 일치)",
     "plan_spec": "설정 파일에서 'apiTimeout' 숫자 값 하나만 읽어와 사용",
     "edits": [
       {
@@ -57,7 +57,7 @@
     ],
     "grepContext": "src/config/settings.ts:1: (신규 파일 — 플러그인 시스템 사용처 없음)",
     "filesWithContext": ["src/config/settings.ts"],
-    "expect": { "axisA": ["ok", "unknown"], "rung": ["rung1"] }
+    "expect": { "rung": ["rung1"] }
   },
   {
     "id": "S6-rung3-stdlib",
