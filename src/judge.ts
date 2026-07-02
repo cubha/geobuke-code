@@ -1,11 +1,8 @@
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Verdict, ReviewVerdict, ScopeQueueEntry, ScopeVerdict, AxisAVerdict, RungVerdict } from "./types.js";
-
-const execFileAsync = promisify(execFile);
 
 const MODEL = process.env.GBC_MODEL ?? "claude-haiku-4-5";
 /**
@@ -27,15 +24,26 @@ export function safeModel(model: string): string {
 /**
  * CLI 폴백 호출 구성(순수) — W2: 동적 user는 stdin, argv엔 정적 데이터(system 프롬프트·플래그·
  * 화이트리스트 모델)만 남긴다. user(diff·spec 포함)가 argv에 실리면 프로세스 목록(ps·procfs
- * cmdline)에 노출된다.
- * STUB(ST1 RED)
+ * cmdline)에 노출된다. system(GATE/REVIEW/SCOPE)은 전부 정적 const라 argv 유지가 안전하고,
+ * --append-system-prompt 분리를 보존해 판정 품질 변수를 만들지 않는다.
  */
 export interface CliInvocation {
   argv: string[];
   stdin: string;
 }
-export function buildCliInvocation(_system: string, _user: string, _model: string): CliInvocation {
-  throw new Error("미구현(ST1 RED)");
+export function buildCliInvocation(system: string, user: string, model: string): CliInvocation {
+  return {
+    argv: [
+      "-p",
+      "--append-system-prompt",
+      system,
+      "--model",
+      safeModel(model),
+      "--output-format",
+      "json",
+    ],
+    stdin: user,
+  };
 }
 
 /** resolveApiKey 의존성 주입(테스트용). 미지정 시 실제 env/homedir/fs 사용. */
@@ -156,31 +164,19 @@ async function judgeViaApi(system: string, user: string, temperature?: number): 
 
 /** claude -p 폴백 (무설정 도그푸딩용, 느림). CC의 기존 인증 사용. */
 async function judgeViaCli(system: string, user: string): Promise<string> {
-  // native Windows는 claude.cmd라 별도 경로(아래) — POSIX는 검증된 경로 그대로(8/8 회귀 보존).
+  // native Windows는 claude.cmd라 별도 경로(아래) — POSIX도 W2로 user=stdin 통일(0.5.3).
   if (process.platform === "win32") return judgeViaCliWin(system, user);
-  const { stdout } = await execFileAsync(
-    "claude",
-    ["-p", user, "--append-system-prompt", system, "--model", MODEL, "--output-format", "json"],
-    { maxBuffer: 10 * 1024 * 1024, timeout: CLI_TIMEOUT_MS },
-  );
-  const env = JSON.parse(stdout);
-  return env.result ?? "";
+  return runClaudeCli(buildCliInvocation(system, user, MODEL));
 }
 
 /**
- * native Windows 폴백. claude는 claude.cmd(배치 shim)라 Node 18+가 shell 없이 spawn 못 한다
- * (CVE-2024-27980 → ENOENT). shell:true로 실행하되, argv엔 동적 데이터를 절대 두지 않는다:
- * system+user를 합쳐 stdin으로 전달 → argv는 고정 플래그뿐이라 셸 메타문자 인젝션 표면이 없다.
- * (W3 stdin 결합은 WSL에서 claude -p 실측으로 판정 품질 동일 검증함 — POSIX/win32 양 경로의
- *  '판정 품질'만 프롬프트 전달 방식이 다르고, 이는 가시적 fail-open으로 바운드된다.)
- * kill-timeout 필수 — 무응답 stdin이 PreToolUse를 무한 차단하면 ENOENT보다 나쁘다 → fail-open 강제.
+ * 공용 CLI 러너 — CliInvocation 계약(argv=정적, stdin=동적)을 spawn으로 실행. W2(0.5.3):
+ * execFile argv-프롬프트 경로를 대체해 user가 프로세스 목록에 노출되지 않는다.
+ * kill-timeout 필수 — 무응답 stdin이 판정을 무한 차단하면 안 됨 → 기존 CLI_TIMEOUT_MS 동일.
  */
-function judgeViaCliWin(system: string, user: string): Promise<string> {
+function runClaudeCli(inv: CliInvocation, opts: { shell?: boolean } = {}): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const prompt = `${system}\n\n${user}`;
-    const child = spawn("claude", ["-p", "--model", safeModel(MODEL), "--output-format", "json"], {
-      shell: true,
-    });
+    const child = spawn("claude", inv.argv, { shell: opts.shell ?? false });
     let out = "";
     let err = "";
     let done = false;
@@ -194,7 +190,14 @@ function judgeViaCliWin(system: string, user: string): Promise<string> {
       child.kill();
       finish(() => reject(new Error(`claude -p 타임아웃(${CLI_TIMEOUT_MS}ms)`)));
     }, CLI_TIMEOUT_MS);
-    child.stdout?.on("data", (d) => (out += String(d)));
+    child.stdout?.on("data", (d) => {
+      out += String(d);
+      // 구 execFile maxBuffer(10MB) 동등 방어 — 비정상 대형 스트림의 무한 누적 차단.
+      if (out.length > 10 * 1024 * 1024) {
+        child.kill();
+        finish(() => reject(new Error("claude -p 응답 10MB 초과")));
+      }
+    });
     child.stderr?.on("data", (d) => (err += String(d)));
     child.on("error", (e) => finish(() => reject(e)));
     child.on("close", (code) =>
@@ -213,9 +216,28 @@ function judgeViaCliWin(system: string, user: string): Promise<string> {
     child.stdin?.on("error", () => {
       /* EPIPE 등은 close/error 핸들러가 처리 */
     });
-    child.stdin?.write(prompt);
+    child.stdin?.write(inv.stdin);
     child.stdin?.end();
   });
+}
+
+/**
+ * native Windows 폴백. claude는 claude.cmd(배치 shim)라 Node 18+가 shell 없이 spawn 못 한다
+ * (CVE-2024-27980 → ENOENT). shell:true로 실행하되, argv엔 동적 데이터를 절대 두지 않는다:
+ * system+user를 합쳐 stdin으로 전달 → argv는 고정 플래그뿐이라 셸 메타문자 인젝션 표면이 없다.
+ * (W3 stdin 결합은 WSL에서 claude -p 실측으로 판정 품질 동일 검증함 — POSIX/win32 양 경로의
+ *  '판정 품질'만 프롬프트 전달 방식이 다르고, 이는 가시적 fail-open으로 바운드된다.)
+ * kill-timeout 필수 — 무응답 stdin이 PreToolUse를 무한 차단하면 ENOENT보다 나쁘다 → fail-open 강제.
+ */
+function judgeViaCliWin(system: string, user: string): Promise<string> {
+  // shell:true 경로라 argv엔 동적 데이터 절대 금지 — system조차 stdin에 결합(기존 검증된 형태 보존).
+  return runClaudeCli(
+    {
+      argv: ["-p", "--model", safeModel(MODEL), "--output-format", "json"],
+      stdin: `${system}\n\n${user}`,
+    },
+    { shell: true },
+  );
 }
 
 /**
@@ -487,12 +509,7 @@ async function scopeViaApi(system: string, user: string): Promise<string> {
 
 async function scopeViaCli(system: string, user: string): Promise<string> {
   if (process.platform === "win32") return judgeViaCliWin(system, user);
-  const { stdout } = await execFileAsync(
-    "claude",
-    ["-p", user, "--append-system-prompt", system, "--model", safeModel(SCOPE_MODEL), "--output-format", "json"],
-    { maxBuffer: 10 * 1024 * 1024, timeout: CLI_TIMEOUT_MS },
-  );
-  return (JSON.parse(stdout).result as string) ?? "";
+  return runClaudeCli(buildCliInvocation(system, user, SCOPE_MODEL));
 }
 
 /** scope 판정 하드 타임아웃(ms) — Stop 훅 체감 지연 상한. 초과 시 fail-open(unknown+degraded). */
