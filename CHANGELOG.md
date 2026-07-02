@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-07-03
+
+A(100) standalone 피벗 착수 전 선행 패치(P0) — 사후대조(진짜 M1) 조인키 정합 + scope 판정 입력 신뢰도 수정. 근거: `docs/analysis/ANALYSIS-a-mode-readiness-2026-07-02.md`.
+
+### Fixed
+- **scope 이벤트 조인키 specHash 충전** — `events.jsonl`의 `kind:scope` 이벤트가 specHash를 무조건 `""`로 기록해 session×작업단위 조인이 성립하지 않던 것을, 큐잉 시점 `ScopeQueueEntry.specHash`를 판정 결과에 보강(`enrichVerdictsWithSpecHash`, 순수·file 매칭·미매칭 `""`)해 기록하도록 수정. CLI 트랜스포트 degraded 경로도 동일 충전. judgeScope 프롬프트/파싱 무변경(골든 판정 불변) — 계측 seam에서만 충전한다.
+- **scope 자기파일 제외가 production 경로 조합에서 실패** — `collectGrepContext`의 자기 파일 매치 제외가 endsWith 비교라 CC `file_path`(절대경로) × grep 출력(`./`상대경로) 조합에서 불일치 → 자기참조가 탐색 컨텍스트에 오염돼 rung2/broken 오판정을 유발하던 버그. cwd 기준 `path.resolve` 동등 비교로 교체(구 양방향 endsWith의 접미 우연일치 과잉 제외도 함께 해소). production형 픽스처(절대×상대) 회귀 테스트 추가 — 기존 테스트는 양쪽 상대경로라 버그를 은폐했다.
+
+### Changed
+- **Anthropic API 클라이언트 팩토리 단일화** — `judgeViaApi`/`scopeViaApi`가 각각 수행하던 SDK lazy import+키 해석+클라이언트 생성을 내부 `createApiClient()` 한 지점으로. 동작 불변(매 호출 생성·캐싱 없음). A-mode `engine.ts`가 클라이언트 생명주기를 가져갈 seam 선정비.
+
 ## [0.5.3] - 2026-07-02
 
 하드닝·유지보수 릴리스 — 이월 잔여 항목 전량 처분(W2 stdin 통일 + 비차단 하드닝 2건 + verify 모델 A/B).
