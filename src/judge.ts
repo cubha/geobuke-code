@@ -24,6 +24,20 @@ export function safeModel(model: string): string {
   return /^[\w.-]+$/.test(model) ? model : "claude-haiku-4-5";
 }
 
+/**
+ * CLI 폴백 호출 구성(순수) — W2: 동적 user는 stdin, argv엔 정적 데이터(system 프롬프트·플래그·
+ * 화이트리스트 모델)만 남긴다. user(diff·spec 포함)가 argv에 실리면 프로세스 목록(ps·procfs
+ * cmdline)에 노출된다.
+ * STUB(ST1 RED)
+ */
+export interface CliInvocation {
+  argv: string[];
+  stdin: string;
+}
+export function buildCliInvocation(_system: string, _user: string, _model: string): CliInvocation {
+  throw new Error("미구현(ST1 RED)");
+}
+
 /** resolveApiKey 의존성 주입(테스트용). 미지정 시 실제 env/homedir/fs 사용. */
 export interface KeyResolveOpts {
   env?: Record<string, string | undefined>;

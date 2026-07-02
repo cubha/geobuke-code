@@ -65,7 +65,7 @@ import {
 } from "../dist/version.js";
 import { serializeEvent, parseEvents, computeMetrics, logEvent, tagEventsWithRepo } from "../dist/metrics.js";
 import { goldenCaseId, diffVerdict, upsertGolden, summarizeReplay } from "../dist/golden.js";
-import { resolveApiKey, safeModel } from "../dist/judge.js";
+import { resolveApiKey, safeModel, buildCliInvocation } from "../dist/judge.js";
 import { normalizeCase, MAX_CASE } from "../dist/text.js";
 import { isStopHintMuted, setStopHintMuted } from "../dist/config.js";
 import { parseBinding } from "../dist/verify.js";
@@ -2460,4 +2460,43 @@ test("computeMetrics: scope 롤업(파급반경 broken·사다리 걸림·degrad
   assert.equal(m.scope.rippleBroken, 1);
   assert.equal(m.scope.rungHits, 1);
   assert.equal(m.scope.degraded, 1);
+});
+
+// ===== ST1 (0.5.3 W2): buildCliInvocation — CLI 폴백 stdin 통일 =====
+// 동적 user(diff·spec)는 stdin으로, argv엔 정적 데이터만 — /proc/*/cmdline 노출 차단.
+
+test("buildCliInvocation: 동적 user는 stdin에만 실리고 argv에 없다", () => {
+  const user = "[현재 편집] rm -rf $(secret) `whoami` 매우 긴 diff 본문";
+  const inv = buildCliInvocation("SYSTEM", user, "claude-haiku-4-5");
+  assert.equal(inv.stdin, user);
+  assert.ok(!inv.argv.some((a) => a.includes(user)), "user가 argv에 노출되면 안 됨");
+  assert.ok(!inv.argv.some((a) => a.includes("whoami")), "user 부분 문자열도 argv 금지");
+});
+
+test("buildCliInvocation: 정적 system은 --append-system-prompt argv로 유지", () => {
+  const inv = buildCliInvocation("GATE_SYS_PROMPT", "user", "claude-haiku-4-5");
+  const i = inv.argv.indexOf("--append-system-prompt");
+  assert.ok(i >= 0, "--append-system-prompt 플래그 존재");
+  assert.equal(inv.argv[i + 1], "GATE_SYS_PROMPT");
+});
+
+test("buildCliInvocation: -p는 프롬프트 인자 없이 단독(다음 원소는 플래그)", () => {
+  const inv = buildCliInvocation("S", "U", "claude-haiku-4-5");
+  const i = inv.argv.indexOf("-p");
+  assert.ok(i >= 0, "-p 존재");
+  assert.ok(String(inv.argv[i + 1] ?? "--").startsWith("--"), "-p 뒤는 프롬프트가 아닌 플래그");
+});
+
+test("buildCliInvocation: 모델은 safeModel 화이트리스트 경유(메타문자→기본모델)", () => {
+  const inv = buildCliInvocation("S", "U", "evil;model$(x)");
+  const i = inv.argv.indexOf("--model");
+  assert.equal(inv.argv[i + 1], "claude-haiku-4-5");
+  const ok = buildCliInvocation("S", "U", "claude-sonnet-4-6");
+  assert.equal(ok.argv[ok.argv.indexOf("--model") + 1], "claude-sonnet-4-6");
+});
+
+test("buildCliInvocation: --output-format json 유지(기존 파싱 계약 보존)", () => {
+  const inv = buildCliInvocation("S", "U", "claude-haiku-4-5");
+  const i = inv.argv.indexOf("--output-format");
+  assert.equal(inv.argv[i + 1], "json");
 });
