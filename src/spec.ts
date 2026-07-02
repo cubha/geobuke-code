@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { gbcDir } from "./store.js";
@@ -117,6 +117,36 @@ function nowStamp(): string {
  * 그 명시적 완료 이벤트의 데이터 동작이다(게이트 리셋은 호출부 cmdDone이 별도로 — resetGate 불변).
  * @returns 아카이브 파일 경로(보존했으면), 비울 본문이 없으면 null.
  */
+/**
+ * spec.archive 보존상한(0.5.3 — 0.4.2 보안 S2 해소): 아카이브 파일이 무기한 누적되지 않게
+ * 최신 keep개만 남기고 오래된 것부터 삭제한다. 파일명 = <hash 16자>-<ISO stamp>.md 라
+ * 시간순은 stamp 부분(slice(17))으로 정렬한다(hash 프리픽스는 시간과 무관).
+ * @returns 삭제한 파일명 목록(오래된 순). 디렉토리 부재·읽기 실패는 no-op(fail-silent).
+ */
+export function pruneSpecArchive(dir: string, keep: number): string[] {
+  try {
+    // 정형 파일명(<hash16>-<stamp>.md)만 대상 — 비정형 .md(수동 메모 등)는 slice(17) 정렬이
+    // 무의미하고 오판 삭제 위험이 있어 보존한다(0.5.3 보안검토 S6).
+    const files = readdirSync(dir)
+      .filter((n) => /^[0-9a-f]{16}-.+\.md$/.test(n))
+      .sort((a, b) => (a.slice(17) < b.slice(17) ? -1 : 1)); // 오래된 것 앞
+    if (files.length <= keep) return [];
+    const doomed = files.slice(0, files.length - keep);
+    const removed: string[] = [];
+    for (const n of doomed) {
+      try {
+        unlinkSync(join(dir, n));
+        removed.push(n);
+      } catch {
+        /* 개별 삭제 실패는 건너뜀 — 상한은 다음 아카이브 때 재시도됨 */
+      }
+    }
+    return removed;
+  } catch {
+    return [];
+  }
+}
+
 export function archiveSpec(cwd: string): string | null {
   const path = specPath(cwd);
   if (!existsSync(path)) return null;
@@ -126,6 +156,9 @@ export function archiveSpec(cwd: string): string | null {
   mkdirSync(dir, { recursive: true });
   const archivePath = join(dir, `${computeSpecHash(raw)}-${nowStamp()}.md`);
   writeFileSync(archivePath, raw, "utf8");
+  // 보존상한(기본 20, GBC_ARCHIVE_KEEP 조정) — 방금 쓴 파일 포함 최신 keep개만 남긴다.
+  const keep = Number(process.env.GBC_ARCHIVE_KEEP ?? 20);
+  if (Number.isFinite(keep) && keep > 0) pruneSpecArchive(dir, keep);
   clearSpec(cwd);
   return archivePath;
 }

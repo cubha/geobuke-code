@@ -19,7 +19,7 @@ import {
   reopenDefer,
 } from "../dist/defer.js";
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
-import { addSpecCase, readSpecCases, clearSpec, archiveSpec } from "../dist/spec.js";
+import { addSpecCase, readSpecCases, clearSpec, archiveSpec, pruneSpecArchive } from "../dist/spec.js";
 import {
   buildBlockReason,
   shouldCacheVerdict,
@@ -60,12 +60,13 @@ import {
   buildVersionNotice,
   isCacheStale,
   readVersionCache,
+  isValidVersion,
   writeVersionCache,
   shouldRefreshCache,
 } from "../dist/version.js";
 import { serializeEvent, parseEvents, computeMetrics, logEvent, tagEventsWithRepo } from "../dist/metrics.js";
 import { goldenCaseId, diffVerdict, upsertGolden, summarizeReplay } from "../dist/golden.js";
-import { resolveApiKey, safeModel } from "../dist/judge.js";
+import { resolveApiKey, safeModel, buildCliInvocation } from "../dist/judge.js";
 import { normalizeCase, MAX_CASE } from "../dist/text.js";
 import { isStopHintMuted, setStopHintMuted } from "../dist/config.js";
 import { parseBinding } from "../dist/verify.js";
@@ -92,7 +93,7 @@ import {
 } from "../dist/judge.js";
 import { parseJUnit, readVerifyResults, JUNIT_DEFAULT_REL } from "../dist/junit.js";
 import { runVerify } from "../dist/verify.js";
-import { readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, symlinkSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -2460,4 +2461,139 @@ test("computeMetrics: scope 롤업(파급반경 broken·사다리 걸림·degrad
   assert.equal(m.scope.rippleBroken, 1);
   assert.equal(m.scope.rungHits, 1);
   assert.equal(m.scope.degraded, 1);
+});
+
+// ===== ST1 (0.5.3 W2): buildCliInvocation — CLI 폴백 stdin 통일 =====
+// 동적 user(diff·spec)는 stdin으로, argv엔 정적 데이터만 — /proc/*/cmdline 노출 차단.
+
+test("buildCliInvocation: 동적 user는 stdin에만 실리고 argv에 없다", () => {
+  const user = "[현재 편집] rm -rf $(secret) `whoami` 매우 긴 diff 본문";
+  const inv = buildCliInvocation("SYSTEM", user, "claude-haiku-4-5");
+  assert.equal(inv.stdin, user);
+  assert.ok(!inv.argv.some((a) => a.includes(user)), "user가 argv에 노출되면 안 됨");
+  assert.ok(!inv.argv.some((a) => a.includes("whoami")), "user 부분 문자열도 argv 금지");
+});
+
+test("buildCliInvocation: 정적 system은 --append-system-prompt argv로 유지", () => {
+  const inv = buildCliInvocation("GATE_SYS_PROMPT", "user", "claude-haiku-4-5");
+  const i = inv.argv.indexOf("--append-system-prompt");
+  assert.ok(i >= 0, "--append-system-prompt 플래그 존재");
+  assert.equal(inv.argv[i + 1], "GATE_SYS_PROMPT");
+});
+
+test("buildCliInvocation: -p는 프롬프트 인자 없이 단독(다음 원소는 플래그)", () => {
+  const inv = buildCliInvocation("S", "U", "claude-haiku-4-5");
+  const i = inv.argv.indexOf("-p");
+  assert.ok(i >= 0, "-p 존재");
+  assert.ok(String(inv.argv[i + 1] ?? "--").startsWith("--"), "-p 뒤는 프롬프트가 아닌 플래그");
+});
+
+test("buildCliInvocation: 모델은 safeModel 화이트리스트 경유(메타문자→기본모델)", () => {
+  const inv = buildCliInvocation("S", "U", "evil;model$(x)");
+  const i = inv.argv.indexOf("--model");
+  assert.equal(inv.argv[i + 1], "claude-haiku-4-5");
+  const ok = buildCliInvocation("S", "U", "claude-sonnet-4-6");
+  assert.equal(ok.argv[ok.argv.indexOf("--model") + 1], "claude-sonnet-4-6");
+});
+
+test("buildCliInvocation: --output-format json 유지(기존 파싱 계약 보존)", () => {
+  const inv = buildCliInvocation("S", "U", "claude-haiku-4-5");
+  const i = inv.argv.indexOf("--output-format");
+  assert.equal(inv.argv[i + 1], "json");
+});
+
+// ===== ST2 (0.5.3): version-check latest semver 형식 검증 =====
+// 캐시 파일 변조 시 비-semver 문자열이 안내 문구(systemMessage)에 실리지 않게 읽기 지점에서 차단.
+
+test("isValidVersion: 유효 semver는 true", () => {
+  for (const v of ["0.5.2", "10.20.30", "1.0.0-rc.1", "1.2.3+build.5"]) {
+    assert.equal(isValidVersion(v), true, v);
+  }
+});
+
+test("isValidVersion: 비-semver·인젝션형은 false", () => {
+  for (const v of ["", "abc", "1.2", "1.2.3.4", "9.9.9 <script>", "9.9.9;rm -rf", "9.9.9\n악성", " 1.2.3"]) {
+    assert.equal(isValidVersion(v), false, JSON.stringify(v));
+  }
+});
+
+test("readVersionCache: latest가 비-semver면 캐시 무효(null)", () => {
+  const home = tmp();
+  try {
+    mkdirSync(join(home, ".gbc"), { recursive: true });
+    writeVersionCache({ latest: "9.9.9 <script>alert(1)</script>", checkedAt: 12345 }, home);
+    assert.equal(readVersionCache(home), null, "변조 latest는 읽기 지점에서 무효");
+    writeVersionCache({ latest: "9.9.9", checkedAt: 12345 }, home);
+    assert.ok(readVersionCache(home), "정상 latest는 그대로 유효");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ===== ST3 (0.5.3): spec.archive 보존상한 =====
+// 아카이브 무기한 누적(0.4.2 S2 Warning) 차단 — 최신 keep개만 보존, 오래된 것부터 삭제.
+
+test("pruneSpecArchive: 상한 초과 시 오래된 파일부터 삭제(최신 keep개 보존)", () => {
+  const dir = tmp();
+  try {
+    // 파일명 = <hash16>-<stamp>.md — hash가 시간순과 무관함을 드러내는 배치(늦은 stamp가 앞 hash).
+    const names = [
+      "aaaaaaaaaaaaaaaa-2026-07-02T03-00-00-000Z.md", // 최신
+      "ffffffffffffffff-2026-07-01T01-00-00-000Z.md", // 가장 오래됨
+      "bbbbbbbbbbbbbbbb-2026-07-01T02-00-00-000Z.md",
+    ];
+    for (const n of names) writeFileSync(join(dir, n), "x");
+    const removed = pruneSpecArchive(dir, 2);
+    assert.deepEqual(removed, ["ffffffffffffffff-2026-07-01T01-00-00-000Z.md"]);
+    assert.ok(!existsSync(join(dir, names[1])), "가장 오래된 파일 삭제됨");
+    assert.ok(existsSync(join(dir, names[0])) && existsSync(join(dir, names[2])), "최신 2개 보존");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pruneSpecArchive: 상한 이내·디렉토리 없음은 no-op(빈 배열)", () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "aaaaaaaaaaaaaaaa-2026-07-02T03-00-00-000Z.md"), "x");
+    assert.deepEqual(pruneSpecArchive(dir, 2), []);
+    assert.deepEqual(pruneSpecArchive(join(dir, "없는곳"), 2), [], "디렉토리 부재 fail-silent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("archiveSpec: 아카이브 후 보존상한 자동 적용(GBC_ARCHIVE_KEEP)", () => {
+  const dir = tmp();
+  const prev = process.env.GBC_ARCHIVE_KEEP;
+  process.env.GBC_ARCHIVE_KEEP = "1";
+  try {
+    const arch = join(dir, ".gbc", "spec.archive");
+    mkdirSync(arch, { recursive: true });
+    writeFileSync(join(arch, "0000000000000000-2020-01-01T00-00-00-000Z.md"), "old");
+    addSpecCase(dir, "케이스 A");
+    const kept = archiveSpec(dir);
+    assert.ok(kept, "아카이브 수행됨");
+    const files = readdirSync(arch);
+    assert.equal(files.length, 1, "keep=1 → 방금 아카이브만 남음");
+    assert.ok(!files.includes("0000000000000000-2020-01-01T00-00-00-000Z.md"));
+  } finally {
+    if (prev === undefined) delete process.env.GBC_ARCHIVE_KEEP;
+    else process.env.GBC_ARCHIVE_KEEP = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pruneSpecArchive: 비정형 파일명(.md)은 정렬·삭제 대상에서 제외(보존)", () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "pre-0.4.2-manual-note.md"), "수동 메모");
+    writeFileSync(join(dir, "aaaaaaaaaaaaaaaa-2026-07-02T03-00-00-000Z.md"), "x");
+    writeFileSync(join(dir, "bbbbbbbbbbbbbbbb-2026-07-01T01-00-00-000Z.md"), "x");
+    const removed = pruneSpecArchive(dir, 1);
+    assert.deepEqual(removed, ["bbbbbbbbbbbbbbbb-2026-07-01T01-00-00-000Z.md"]);
+    assert.ok(existsSync(join(dir, "pre-0.4.2-manual-note.md")), "비정형 파일은 keep 계산과 무관하게 보존");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -35,10 +35,21 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+/**
+ * latest 필드의 semver 형식 검증(순수) — 0.5.1 보안 Info 해소: 캐시 파일이 변조돼도
+ * 비-semver 문자열이 SessionStart systemMessage/안내 문구에 실리지 않게 한다.
+ * 허용: x.y.z(+선택적 -prerelease/+build, 영숫자·점·하이픈만). 공백·메타문자 일절 불가.
+ */
+export function isValidVersion(v: string): boolean {
+  return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(v);
+}
+
 export function readVersionCache(home?: string): VersionCache | null {
   try {
     const j = JSON.parse(readFileSync(cachePath(home), "utf8")) as VersionCache;
-    if (typeof j.latest === "string" && typeof j.checkedAt === "number") return j;
+    // latest는 형식까지 검증 — 변조된 캐시가 안내 문구로 새는 것을 읽기 지점 하나에서 차단.
+    if (typeof j.latest === "string" && isValidVersion(j.latest) && typeof j.checkedAt === "number")
+      return j;
     return null;
   } catch {
     return null;
@@ -98,7 +109,9 @@ export async function refreshVersionCache(home?: string, now: number = Date.now(
       const resp = await fetch(`https://registry.npmjs.org/${PKG}/latest`, { signal: ctrl.signal });
       if (!resp.ok) return;
       const j = (await resp.json()) as { version?: string };
-      if (j && typeof j.version === "string") {
+      // 쓰기 지점도 동일 술어로 검증(scope-critic 권고) — 오염 캐시 기록 자체를 예방해
+      // 읽기 가드의 null→stale→재페치 루프(operational 비용)를 만들지 않는다.
+      if (j && typeof j.version === "string" && isValidVersion(j.version)) {
         writeVersionCache({ latest: j.version, checkedAt: now }, home);
       }
     } finally {

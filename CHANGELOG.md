@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-02
+
+하드닝·유지보수 릴리스 — 이월 잔여 항목 전량 처분(W2 stdin 통일 + 비차단 하드닝 2건 + verify 모델 A/B).
+
+### Security
+- **W2 — CLI 폴백 user 프롬프트 stdin 통일** — POSIX `claude -p` 폴백(게이트·verify·scope 3경로)이 동적 user 프롬프트(diff·spec 본문 포함)를 argv로 전달해 프로세스 목록(ps·procfs cmdline)에 노출되던 것을 stdin 전달로 교체(`buildCliInvocation` + `runClaudeCli` 공용 러너). 정적 시스템 프롬프트는 `--append-system-prompt` argv 유지(판정 품질 변수 차단). 골든 재실측: api gate 8/8+scope 6/6 · cli gate 8/8.
+- **version-check `latest` semver 형식 검증** — `~/.gbc/version-check.json` 변조 시 비-semver 문자열이 업데이트 안내 문구에 실리지 않게 읽기 지점(`readVersionCache`)+쓰기 지점(`refreshVersionCache`) 이중 검증(`isValidVersion`). 무효 캐시는 stale 취급 → 다음 refresh가 자가치유.
+- **spec.archive 보존상한** — `gbc done` 아카이브가 무기한 누적되던 것을 최신 20개 보존으로 상한(`pruneSpecArchive`, `GBC_ARCHIVE_KEEP` 조정, fail-silent).
+
+### Added
+- **`GBC_VERIFY_MODEL`** — verify reviewed 판정 모델을 게이트 `GBC_MODEL`과 분리 opt-in(scope `GBC_SCOPE_MODEL` 동형). 기본 haiku 유지 — A/B 실측(8케이스, 오버클레임 함정 포함)에서 haiku·sonnet 정확도 8/8 동률, 지연은 haiku가 절반(~2s vs ~3.5s).
+
 ## [0.5.2] - 2026-07-01
 
 게이트에 코드 품질 두 축을 편입한다 — **축A 파급반경**(같은 원인이 인접 경계 너머 재발하는 단편적 수정)과 **축B Ponytail 최소구현 사다리**(YAGNI→기존코드 재사용→표준라이브러리). "백그라운드 자동화 서비스가 사용자에게 탐색을 떠넘기지 않는다"는 원칙에 따라, gbc가 **직접 grep으로 코드베이스를 탐색해 판정**한다.
