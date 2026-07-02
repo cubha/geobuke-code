@@ -1,0 +1,92 @@
+[
+  {
+    "id": "S1-축A-단편수정",
+    "note": "다른 파일 호출부가 grep에 보임 — 같은 원인 미반영 = broken이어야",
+    "plan_spec": "사용자 표시 이름 포맷 통일: 이름이 없는(null) 사용자는 화면 어디서든 'Guest'로 표시한다.",
+    "edits": [
+      {
+        "file": "src/format/userName.ts",
+        "tool": "Edit",
+        "edit": "--- src/format/userName.ts\n- export function formatUserName(user) { return user.name; }\n+ export function formatUserName(user) { return user.name || 'Guest'; }"
+      }
+    ],
+    "grepContext": "src/components/Sidebar.tsx:41: <span>{user.name}</span>  (formatUserName 미사용 — 이름 null이면 빈 문자열 표시, 이번 수정과 동일 원인 미반영)",
+    "filesWithContext": ["src/format/userName.ts"],
+    "expect": { "axisA": ["broken"], "rung": ["none", "unknown"] }
+  },
+  {
+    "id": "S2-축A-클린",
+    "note": "호출부 1곳뿐이고 추가 변경 불필요 — broken 단정하면 오탐",
+    "plan_spec": "알림 배지 카운트: 99 초과 시 '99+'로 표시",
+    "edits": [
+      {
+        "file": "src/format/badge.ts",
+        "tool": "Edit",
+        "edit": "--- src/format/badge.ts\n- export function formatBadge(n) { return String(n); }\n+ export function formatBadge(n) { return n > 99 ? '99+' : String(n); }"
+      }
+    ],
+    "grepContext": "src/components/NotificationIcon.tsx:12: {formatBadge(count)}  (유일한 호출부 — 반환값 그대로 표시, 추가 변경 불필요)",
+    "filesWithContext": ["src/format/badge.ts"],
+    "expect": { "axisA": ["ok"], "rung": ["none", "unknown"] }
+  },
+  {
+    "id": "S3-rung2-중복존재",
+    "note": "동일 로직 유틸이 타 파일에 이미 존재(grep에 보임) — rung2여야",
+    "plan_spec": "환경변수 파싱 시 값 앞뒤 공백 제거 및 내부 개행을 공백으로 접어야 함",
+    "edits": [
+      {
+        "file": "src/config/loadEnv.ts",
+        "tool": "Edit",
+        "edit": "--- src/config/loadEnv.ts\n+ function cleanEnvValue(v) {\n+   return v.trim().replace(/\\s*\\n+\\s*/g, ' ');\n+ }"
+      }
+    ],
+    "grepContext": "src/text.ts:13: export function normalizeCase(item){ return item.trim().replace(/\\s*\\n+\\s*/g,\" \").slice(0,500) }  (동일 로직 — spec.ts·defer.ts가 이미 공용 사용 중)",
+    "filesWithContext": ["src/config/loadEnv.ts"],
+    "expect": { "axisA": ["ok", "broken", "unknown"], "rung": ["rung2"] }
+  },
+  {
+    "id": "S5-rung1-YAGNI",
+    "note": "요청은 timeout 값 읽기 하나인데 플러그인 시스템 선구현 — rung1이어야(계획명세 대비 판정)",
+    "plan_spec": "설정 파일에서 'apiTimeout' 숫자 값 하나만 읽어와 사용",
+    "edits": [
+      {
+        "file": "src/config/settings.ts",
+        "tool": "Edit",
+        "edit": "--- src/config/settings.ts\n+ export interface PluginConfig { name: string; enabled: boolean; priority: number; }\n+ export class ConfigManager {\n+   private plugins: PluginConfig[] = [];\n+   registerPlugin(p: PluginConfig) { this.plugins.push(p); }\n+   getApiTimeout(): number { return this.readValue('apiTimeout') ?? 5000; }\n+ }"
+      }
+    ],
+    "grepContext": "src/config/settings.ts:1: (신규 파일 — 플러그인 시스템 사용처 없음)",
+    "filesWithContext": ["src/config/settings.ts"],
+    "expect": { "axisA": ["ok", "unknown"], "rung": ["rung1"] }
+  },
+  {
+    "id": "S6-rung3-stdlib",
+    "note": "structuredClone 전역 존재 — 수제 deepClone은 rung3이어야",
+    "plan_spec": "설정 객체를 깊은 복사해 원본 변경 없이 수정본을 반환",
+    "edits": [
+      {
+        "file": "src/config/clone.ts",
+        "tool": "Edit",
+        "edit": "--- src/config/clone.ts\n+ function deepClone(obj) {\n+   if (Array.isArray(obj)) return obj.map(deepClone);\n+   if (obj !== null && typeof obj === 'object') {\n+     const out = {}; for (const k in obj) out[k] = deepClone(obj[k]); return out;\n+   }\n+   return obj;\n+ }"
+      }
+    ],
+    "grepContext": "(참고) Node.js 전역 structuredClone(obj) 존재 — 깊은 복사 표준 지원",
+    "filesWithContext": ["src/config/clone.ts"],
+    "expect": { "axisA": ["ok", "unknown"], "rung": ["rung3"] }
+  },
+  {
+    "id": "H1-하드가드-무컨텍스트",
+    "note": "grep 결과 0건 — 파서가 axisA를 unknown으로 강제해야(모델 응답 무관, 결정론)",
+    "plan_spec": "사용자 표시 이름 포맷 통일: null이면 'Guest'",
+    "edits": [
+      {
+        "file": "src/format/userName.ts",
+        "tool": "Edit",
+        "edit": "--- src/format/userName.ts\n- export function formatUserName(user) { return user.name; }\n+ export function formatUserName(user) { return user.name || 'Guest'; }"
+      }
+    ],
+    "grepContext": "",
+    "filesWithContext": [],
+    "expect": { "axisA": ["unknown"], "rungNot": ["rung2"], "degraded": true }
+  }
+]

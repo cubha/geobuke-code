@@ -13,6 +13,9 @@
 - **코드 하드가드 (탐색 근거 없는 확신 차단)** — grep이 컨텍스트를 못 찾은 파일은 파서(`parseScopeVerdicts`)가 축A·rung2를 `unknown`으로 강제하고 `degraded=true`로 정직 고지한다(rung1/rung3는 grep 무관이라 유지). 프롬프트 지시가 아닌 코드 레벨 방어 — 모델의 근거 없는 hallucination을 구조적으로 막는다.
 - **`GBC_SCOPE_MODEL` / `GBC_NO_SCOPE`** — scope 판정 모델은 기본 haiku, `GBC_SCOPE_MODEL=claude-sonnet-4-6`로 opt-in(게이트 `GBC_MODEL`과 **물리 분리** — 공유 시 비용 배증). `GBC_NO_SCOPE=1`로 기능 전체 opt-out.
 - **`gbc metrics` scope 롤업 + `events.jsonl` scope 계측** — `[scope]` 요약(파급반경 broken·사다리 걸림·탐색불가 미평가 건수). `events.jsonl`엔 열거형 태그(axis/axisA/rung/spec_present/context_mode/transport/degraded)만 기록하고 코드 본문·사유는 저장하지 않는다(프라이버시 불변식 유지).
+- **scope 하드 타임아웃 + CLI 트랜스포트 skip** — scope 판정 호출에 `SCOPE_TIMEOUT_MS`(10s) 상한. 초과·실패는 unknown+degraded fail-open하고 `failopen.log`에 `scope` 태그로 계측(조용한 무력화 방지). 키 없는 환경(claude -p 폴백, 호출당 18~30s 실측)은 Stop 지연 예산을 초과하므로 **판정을 시도조차 안 하고 skip** — degraded 계측만 남긴다(조건부 degradation 정직 고지).
+- **scope 판정 입력에 계획 명세 포함** — rung1(YAGNI)은 "요청이 무엇이었나" 없이 판정 불가라 `buildScopeMessage`에 `[계획 명세]` 섹션을 포함(스파이크의 rung1 정확도가 명세 존재 조건에서 검증된 것과 판정 조건 정렬).
+- **scope 골든셋(`test/scope-cases.json`) + 회귀 확장** — 축A/rung2 정답라벨 케이스 6건(grep 컨텍스트 포함 5 + 무컨텍스트 하드가드 1)을 `eval/regression.ts`에 편입. 초회 실측 gate 8/8 + scope 6/6.
 
 ### Notes
 - **재init 불필요** — `gbc init`이 등록하는 Stop hook **명령**은 동일하고 `runStop`이 확장됐을 뿐이다. 기존 설치처는 전역 패키지 갱신(`gbc update`)으로 새 동작을 받는다. 로컬 dist 도그푸딩 설치처는 재빌드로 반영.

@@ -2281,6 +2281,25 @@ test("buildScopeMessage: 컨텍스트 없으면 '(탐색 결과 없음)' 명시"
   assert.ok(/탐색 결과 없음|없음/.test(msg), "빈 컨텍스트를 명시적으로 표기");
 });
 
+test("judgeScope: 타임아웃 초과 → unknown+degraded fail-open (사유에 타임아웃 명시)", async () => {
+  const entries = [scopeQ({ file: "src/a.ts" })];
+  const invoke = () => new Promise(() => {}); // 영원히 안 끝나는 호출
+  const t0 = Date.now();
+  const vs = await judgeScope(entries, "ctx", new Set(["src/a.ts"]), { invoke, timeoutMs: 80 });
+  assert.ok(Date.now() - t0 < 2000, "타임아웃이 실제로 끊는다");
+  assert.equal(vs[0].axisA, "unknown");
+  assert.equal(vs[0].degraded, true);
+  assert.ok(vs[0].axisAReason.includes("타임아웃"), "사유에 타임아웃 명시");
+});
+
+test("buildScopeMessage: planSpec 포함(rung1 판정 조건 정렬), 없으면 '(계획 명세 없음)'", async () => {
+  const withSpec = buildScopeMessage([scopeQ()], "", "apiTimeout 값 하나만 읽기");
+  assert.ok(withSpec.includes("apiTimeout 값 하나만 읽기"));
+  assert.ok(withSpec.includes("[계획 명세]"));
+  const noSpec = buildScopeMessage([scopeQ()], "");
+  assert.ok(noSpec.includes("(계획 명세 없음)"));
+});
+
 test("judgeScope: 호출 실패 → 전 엔트리 unknown+degraded (fail-open, block 아님)", async () => {
   const entries = [scopeQ({ file: "src/a.ts" })];
   const invoke = async () => {

@@ -411,18 +411,44 @@ async function processScopeQueue(cwd: string, session: string): Promise<string> 
   if (queue.length === 0) return "";
   try {
     const { judgeScope, selectedTransport } = await import("./judge.js");
+    // CLI 폴백(키 없음)은 호출당 18~30s(스파이크 실측) — SCOPE_TIMEOUT_MS(10s) 안에 못 끝나
+    // 매 턴 10s 대기 후 fail-open만 반복된다. 지연 렌즈 권고대로 CLI 트랜스포트는 scope 판정을
+    // *시도조차 안 하고* skip한다(조건부 degradation). 정직 계측: degraded 이벤트는 남긴다.
+    const transport = selectedTransport();
+    if (transport === "cli") {
+      clearScopeQueue(cwd);
+      const { text: specText } = loadPlanSpec(cwd);
+      logScopeVerdicts(
+        cwd,
+        session,
+        queue.map((q) => ({
+          file: q.file,
+          axisA: "unknown" as const,
+          axisAReason: "CLI 트랜스포트 — scope 판정 생략(지연 예산 초과)",
+          rung: "unknown" as const,
+          rungReason: "",
+          degraded: true,
+        })),
+        { contextMode: "none", transport: "cli", specPresent: specText.trim() !== "" },
+      );
+      return "";
+    }
     const { context, filesWithContext } = await collectGrepContext(cwd, queue);
-    const verdicts = await judgeScope(queue, context, filesWithContext);
-    clearScopeQueue(cwd);
+    // 계획 명세를 판정 입력에 포함 — rung1(YAGNI)은 "요청이 무엇이었나" 없이 판정 불가
+    // (스파이크의 rung1 정확도는 명세 존재 조건에서 검증됨 — 판정 조건 정렬).
     const { text: specText } = loadPlanSpec(cwd);
+    const verdicts = await judgeScope(queue, context, filesWithContext, { planSpec: specText });
+    clearScopeQueue(cwd);
     logScopeVerdicts(cwd, session, verdicts, {
       contextMode: context ? "grep" : "none",
       transport: selectedTransport(),
       specPresent: specText.trim() !== "",
     });
     return formatScopeFindings(verdicts, verdicts.some((v) => v.degraded));
-  } catch {
-    // 판정 파이프라인 실패 → 큐를 비워 다음 턴 누적 폭주를 막고 조용히 통과(fail-silent).
+  } catch (e) {
+    // 판정 파이프라인 실패 → 큐를 비워 다음 턴 누적 폭주를 막고 통과하되, **계측은 남긴다**
+    // (fail-open 고지 철학 — 조용한 무력화 방지. 게이트 failopen.log와 동일 패턴, "scope" 태그).
+    logFailOpen(cwd, "scope", String(e).slice(0, 160));
     try {
       clearScopeQueue(cwd);
     } catch {

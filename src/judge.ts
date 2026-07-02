@@ -353,15 +353,26 @@ TDD RED 실패 테스트. 해당 없으면 "none". 컨텍스트 없어 rung2를 
 오직 아래 JSON 배열만 출력(편집마다 하나, 설명·펜스 금지). file은 입력의 파일 경로 그대로:
 [{"file":"경로","axisA":"ok|broken|unknown","axisAReason":"한 줄","rung":"rung1|rung2|rung3|none|unknown","rungReason":"한 줄"}]`;
 
-/** 배치 사용자 메시지 — 편집 목록 + 실제 grep 컨텍스트. */
-export function buildScopeMessage(entries: ScopeQueueEntry[], grepContext: string): string {
+/**
+ * 배치 사용자 메시지 — 계획 명세 + 편집 목록 + 실제 grep 컨텍스트.
+ * 계획 명세를 포함하는 이유: rung1(YAGNI="요청 안 한 기능")은 요청이 무엇이었는지 없이는 판정
+ * 불가 — 스파이크의 rung1 정확도는 명세 존재 조건에서 검증된 것이라 판정 조건을 그에 정렬한다.
+ */
+export function buildScopeMessage(
+  entries: ScopeQueueEntry[],
+  grepContext: string,
+  planSpec = "",
+): string {
   const edits = entries
     .map((e, i) => {
       const body = e.edit.length > MAX_SCOPE_EDIT ? e.edit.slice(0, MAX_SCOPE_EDIT) + "\n…(절단)" : e.edit;
       return `[편집 ${i + 1}] file=${e.file} (${e.tool})\n${body}`;
     })
     .join("\n\n");
-  return `[편집 목록]
+  return `[계획 명세]
+${planSpec.trim() || "(계획 명세 없음)"}
+
+[편집 목록]
 ${edits}
 
 [코드베이스 컨텍스트]
@@ -470,29 +481,52 @@ async function scopeViaCli(system: string, user: string): Promise<string> {
   return (JSON.parse(stdout).result as string) ?? "";
 }
 
+/** scope 판정 하드 타임아웃(ms) — Stop 훅 체감 지연 상한. 초과 시 fail-open(unknown+degraded). */
+export const SCOPE_TIMEOUT_MS = 10000;
+
+/** ms 초과 시 reject하는 race 래퍼 — SDK 기본 타임아웃(수분)이 Stop UX를 잡아먹지 않게 한다. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`scope 판정 타임아웃(${ms}ms)`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 /**
  * scope 배치 판정. 편집 목록 + grep 컨텍스트를 한 번에 판정한다(축 섞기 회귀는 GATE_SYSTEM과의
- * 혼합에서 왔으므로 여기선 전용 프롬프트). 호출 실패·타임아웃은 **전 엔트리 unknown+degraded**로
- * fail-open(게이트의 'pass'도, block도 아님 — 사후 권고라 조용히 미평가). 하드가드는 파서가 적용.
+ * 혼합에서 왔으므로 여기선 전용 프롬프트). 호출 실패·**타임아웃(SCOPE_TIMEOUT_MS)**은 전 엔트리
+ * unknown+degraded로 fail-open(게이트의 'pass'도, block도 아님 — 사후 권고라 조용히 미평가).
+ * 하드가드는 파서가 적용. 실패 사유는 반환 verdict의 axisAReason에 담겨 호출자가 계측한다.
  */
 export async function judgeScope(
   entries: ScopeQueueEntry[],
   grepContext: string,
   filesWithContext: Set<string>,
-  opts: { invoke?: ScopeInvoke } = {},
+  opts: { invoke?: ScopeInvoke; timeoutMs?: number; planSpec?: string } = {},
 ): Promise<ScopeVerdict[]> {
   if (entries.length === 0) return [];
-  const user = buildScopeMessage(entries, grepContext);
+  const user = buildScopeMessage(entries, grepContext, opts.planSpec ?? "");
   const invoke: ScopeInvoke =
     opts.invoke ?? ((s, u) => (selectedTransport() === "api" ? scopeViaApi(s, u) : scopeViaCli(s, u)));
+  const timeoutMs = opts.timeoutMs ?? SCOPE_TIMEOUT_MS;
   try {
-    return parseScopeVerdicts(await invoke(SCOPE_SYSTEM, user), entries, filesWithContext);
-  } catch {
+    const raw = await withTimeout(invoke(SCOPE_SYSTEM, user), timeoutMs);
+    return parseScopeVerdicts(raw, entries, filesWithContext);
+  } catch (e) {
     // fail-open: 미평가로 정직 처리(확신 조작 금지). 하드가드와 동일한 unknown 바닥.
-    return entries.map((e) => ({
-      file: e.file,
+    return entries.map((entry) => ({
+      file: entry.file,
       axisA: "unknown" as AxisAVerdict,
-      axisAReason: "scope 판정 호출 실패(미평가)",
+      axisAReason: `scope 판정 호출 실패(미평가): ${String(e).slice(0, 120)}`,
       rung: "unknown" as RungVerdict,
       rungReason: "",
       degraded: true,
