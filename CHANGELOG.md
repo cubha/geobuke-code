@@ -4,6 +4,23 @@
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-07-03
+
+codebase-viz 도그푸딩 실측 결함 4건 수정 — 게이트 문서 오판정·missing 발명·안내 문구 허위·defer 종결 상태 부족. 근거: `docs/analysis/ANALYSIS-gbc-defect-rca-2026-07-03.md`.
+
+### Fixed
+- **게이트 문서 하드가드(결함A)** — "코드를 서술하는 문서"(.md 분석 보고서·README)를 haiku judge가 GATE_SYSTEM 1단계("문서→무조건 pass")를 자인하면서 block하던 실증 실패 모드(3회)를 코드에서 근절: 문서 확장자(`.md/.mdx/.txt/.rst/.adoc`)는 judge 미호출 즉시 pass(`isDocFile`) + `doc-skip` 계측. 코드 whitelist 부정형이 아닌 문서 blocklist — 미등재 코드 확장자(.vue/.sql 등)의 게이트 우회 구멍을 만들지 않는다.
+- **missing 명세 교차검증(결함B)** — judge가 missing[]을 편집 본문에서 발명·ID 재조합(원문 오매핑)하던 것을 이중 차단: GATE_SYSTEM에 원문 인용(verbatim) 제약 + `filterMissingBySpec` 코드 하드가드(명세 무근거 항목 드롭, verdict 불변, 드롭 시 reason 정직 고지). 골든 재실측: gate 8/8 + scope 6/6, decisionFlip 0 — 케이스 3에서 발명 missing 4건 드롭 라이브 실증.
+- **Stop 리마인드 허위 문구(결함C)** — "(이 리마인드는 1회만 표시됩니다)"에 해당하는 로직은 존재하지 않음(매 턴 표시가 의도 설계, opt-out=`/gbc-mute`). 문구를 사실 계약으로 정정.
+- **block 안내 defer 유도 조건화** — defer 대상을 "이 변경의 형제 케이스"로 한정 안내(별도 작업단위·로드맵 항목의 defer 오용 유도 차단).
+
+### Added
+- **`gbc defer withdraw <ref>`(결함D)** — 철회 종결 상태 `withdrawn` 신설: 오등록 정정·기각 등 "완료 아님" 종결을 `resolved`(완료)와 구분. withdrawn은 리마인드·집계에서 빠지되 judge [이미 완료된 항목]엔 절대 전달되지 않는다(철회를 완료로 거짓 진술 금지). 복구는 `gbc defer reopen`. 인덱스 ref에도 적격(open·in_progress) 강제 — resolved 정정은 reopen 경유만. `defer-withdraw` 이벤트 계측.
+- 미해결 필터 단일 술어 `isClosedStatus`(resolved|withdrawn) — 기존 `!== "resolved"` 부정형 필터 9곳(defer·hook·cli) 전수 교체.
+
+### 주의
+- **버전 혼재**: 0.5.4 이하 gbc는 `withdrawn`을 미해결로 오분류한다(크로스-repo 요약 등 표면 노이즈, 게이트 판정 무영향). 여러 repo 운용 시 전 repo 동시 업데이트 권장.
+
 ## [0.5.4] - 2026-07-03
 
 A(100) standalone 피벗 착수 전 선행 패치(P0) — 사후대조(진짜 M1) 조인키 정합 + scope 판정 입력 신뢰도 수정. 근거: `docs/analysis/ANALYSIS-a-mode-readiness-2026-07-02.md`.
@@ -254,6 +271,7 @@ A(100) standalone 피벗 착수 전 선행 패치(P0) — 사후대조(진짜 M1
 - `gbc init` — 프로젝트 로컬 hook 설치(머지·백업·멱등), API 키 주입 자동화 + keyless hook 업그레이드.
 - 최초 npm 발행.
 
+[0.5.5]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.5
 [0.5.4]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.4
 [0.5.3]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.3
 [0.5.2]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.2
