@@ -42,10 +42,12 @@ export function buildBlockReason(verdict: Verdict, specEmpty: boolean, source: s
     verdict.missing.length > 0 ? `\n누락(침묵): ${verdict.missing.join(", ")}` : "";
   // 누락 케이스는 .gbc/pending-review.json에 기록돼 있어 'gbc gate review'로 번호 체크리스트
   // 일괄 분류(승인→spec / 미룸→defer)가 가능하다. 개별 처리(직접 구현·gbc defer add)도 유효.
+  // defer 유도 조건화(0.5.5, RCA §4-⑤): defer는 "이 변경의 형제 케이스"를 미루는 채널이다.
+  // 별도 작업단위·로드맵 항목까지 defer로 흡수하면 계획 문서와 이중 추적이 된다(결함A 증폭 경로).
   return (
     `🐢 거북이 게이트 — ${verdict.reason}${missingLine}\n` +
     `→ 누락 케이스를 'gbc gate review'로 한 번에 분류(승인→spec / 미룸→defer)하거나, 지금 이 변경에서 직접 다루세요.` +
-    ` 개별로 미룰 거면 'gbc defer add "<케이스>"'. (명세 소스: ${source})`
+    ` 개별로 미룰 거면 'gbc defer add "<케이스>"' — 단 defer 대상은 이 변경의 형제 케이스만, 별도 작업단위·로드맵 항목은 계획 문서에 두세요. (명세 소스: ${source})`
   );
 }
 
@@ -620,7 +622,9 @@ export function buildStopReminder(all: DeferEntry[]): string {
   return (
     `🐢 미해결 defer ${unresolved.length}건이 남아 있습니다 (${statusBreakdown(unresolved)}):\n` +
     `${formatDeferList(all)}\n` +
-    `${DEFER_PROTOCOL} 다음 세션으로 이월할 거면 의식적으로 확인하세요. (이 리마인드는 1회만 표시됩니다.)`
+    // 문구는 실동작과 일치해야 한다(결함C): 세션 1회 dedup은 존재하지 않고, stop_hook_active
+    // 가드는 턴 내 루프 방지뿐 — 미해결이 남아 있는 한 매 턴 발화가 의도 설계(opt-out=/gbc-mute).
+    `${DEFER_PROTOCOL} 다음 세션으로 이월할 거면 의식적으로 확인하세요. (이 리마인드는 미해결 defer가 남아 있는 동안 매 턴 표시됩니다 — 끄기: /gbc-mute)`
   );
 }
 

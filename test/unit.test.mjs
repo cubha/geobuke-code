@@ -2832,3 +2832,23 @@ test("withdrawDefer: 인덱스 ref로도 resolved는 철회 불가(적격 강제
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ===== 0.5.5 ST4: 안내 문구 계약 (결함C + RCA §4-⑤) =====
+
+test("buildStopReminder: 허위 '1회만 표시' 제거 — 매 턴 표시 + 음소거 안내가 사실 계약 (결함C)", () => {
+  const all = [{ item: "잔여 항목", at: "", status: "open" }];
+  const r = buildStopReminder(all);
+  assert.ok(!r.includes("1회만"), "존재하지 않는 세션 dedup을 약속하지 않는다");
+  assert.match(r, /매 턴 표시/);
+  assert.match(r, /gbc-mute/);
+});
+
+test("buildBlockReason: 침묵누락 안내에 defer 대상 조건화(형제 케이스만) 포함 (⑤)", () => {
+  const r = buildBlockReason(
+    { verdict: "block", missing: ["케이스 X"], reason: "침묵 누락" },
+    false,
+    ".gbc/spec.md",
+  );
+  assert.match(r, /형제 케이스만/);
+  assert.match(r, /계획 문서/);
+});
