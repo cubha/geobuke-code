@@ -100,6 +100,7 @@ const GATE_SYSTEM = `너는 코드 구현 직전에 동작하는 "게이트"다.
     - 코드 주석으로 "나중에"라고만 적고 미룬 항목에 등록 안 한 것도 침묵 누락이다.
     - 계획이 요구한 동작 형태(예: 인라인 에러 메시지)를 충족 못 하고 다른 형태(예: bool만 반환)로 빠뜨린 것도 누락이다.
     - ★ [이미 완료된 항목]에 있는 케이스는 **이전 작업단위에서 이미 처리된 것**이다. 형제 후보에서 제외하고 절대 누락으로 다시 차단(re-flag)하지 마라. 이 편집과 무관한 과거 완료 케이스를 침묵누락이라 막는 것은 오탐이다.
+    - ★ missing에 넣는 항목은 [계획 명세]의 해당 케이스를 **원문 그대로 인용**하라(재서술·요약·ID 재조합 금지). 계획 명세에 적혀 있지 않은 항목을 만들어 넣지 마라 — 편집 본문이 언급하는 미래 작업은 missing이 아니다.
 (c) 위에 해당 없으면 → **pass**.
 
 핵심 균형:
@@ -127,6 +128,42 @@ ${fmt(resolved)}
 
 [현재 편집]
 ${editText}`;
+}
+
+/** 교차검증 매칭용 정규화 — 공백 접기 + 소문자(코드 식별자 케이스 차이 흡수). */
+function normForMatch(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** 우연 부분매칭 방지용 명세 케이스 라인 최소 길이(정규화 후). */
+const MIN_SPEC_LINE = 6;
+
+/**
+ * missing[]을 [계획 명세]와 교차검증해 명세에 근거 없는 항목을 드롭한다(0.5.5, 결함B).
+ * GATE_SYSTEM의 missing 정의("계획에 적힌 형제 케이스")와 verbatim 인용 제약은 프롬프트라
+ * 하드가드가 아니다 — 모델이 편집 본문에서 항목을 발명·재조합한 실증(ANALYSIS-gbc-defect-rca)을
+ * 코드에서 차단한다(scope parseScopeVerdicts 하드가드와 동일 철학). verdict는 바꾸지 않는다
+ * (block 사유는 reason이 담당 — 판정 조작 금지, missing의 *출처 보증*만).
+ * 근거 판정: ①명세 전문이 missing을 포함(원문 인용) 또는 ②missing이 명세 케이스 라인을 포함
+ * (인용+부연). 빈 명세면 전부 드롭(도출 루프가 그 역할 — specEmpty block의 missing은 발명뿐).
+ */
+export function filterMissingBySpec(
+  missing: string[],
+  specText: string,
+): { kept: string[]; dropped: number } {
+  const spec = normForMatch(specText);
+  // 명세 케이스 라인: 마크다운 불릿/체크박스/번호 접두를 벗기고 정규화(인용+부연 매칭용).
+  const lines = specText
+    .split("\n")
+    .map((l) => normForMatch(l.replace(/^\s*(?:[-*]\s*(?:\[[ xX]\]\s*)?|\d+[.)]\s*)/, "")))
+    .filter((l) => l.length >= MIN_SPEC_LINE);
+  const kept = missing.filter((m) => {
+    const nm = normForMatch(m);
+    if (!nm) return false;
+    if (spec && spec.includes(nm)) return true;
+    return lines.some((l) => nm.includes(l));
+  });
+  return { kept, dropped: missing.length - kept.length };
 }
 
 function parseVerdict(raw: string): Verdict {
@@ -278,7 +315,17 @@ export async function judge(
       transport === "api"
         ? await judgeViaApi(GATE_SYSTEM, user, opts.temperature)
         : await judgeViaCli(GATE_SYSTEM, user);
-    return parseVerdict(raw);
+    const verdict = parseVerdict(raw);
+    // missing 출처 하드가드(0.5.5) — 명세 무근거 항목 드롭. block 판정 자체는 유지(reason이 사유
+    // 담당). 드롭 발생은 reason에 정직 고지 — pending-review·defer 유도로 발명 항목이 새는 길 차단.
+    if (verdict.missing.length > 0) {
+      const { kept, dropped } = filterMissingBySpec(verdict.missing, planSpec);
+      if (dropped > 0) {
+        verdict.missing = kept;
+        verdict.reason += ` [명세 무근거 missing ${dropped}건 제외 — 원문 인용 규칙]`;
+      }
+    }
+    return verdict;
   } catch (e) {
     return failOpenVerdict(e);
   }
