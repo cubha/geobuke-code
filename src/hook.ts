@@ -9,7 +9,7 @@ import { isStopHintMuted, isGoldenCapture } from "./config.js";
 import { loadRepos } from "./repos.js";
 import { writePendingReview } from "./review.js";
 import { addGoldenCase, goldenCaseId } from "./golden.js";
-import { enqueueScope, readScopeQueue, clearScopeQueue, collectGrepContext } from "./scope.js";
+import { enqueueScope, readScopeQueue, clearScopeQueue, collectGrepContext, enrichVerdictsWithSpecHash } from "./scope.js";
 import { readProjectSettings, buildUpdateNotice, wasNotified, markNotified } from "./notice.js";
 import {
   isCacheStale,
@@ -365,7 +365,8 @@ export function logScopeVerdicts(
     logEvent(cwd, {
       at: nowIso(),
       session,
-      specHash: "",
+      // 큐잉 시점 작업단위 키(있으면) — session×specHash 조인 성립(0.5.4). 미보강은 기존 규약("").
+      specHash: v.specHash ?? "",
       kind: "scope",
       axis: scopeAxisTag(v),
       axisA: v.axisA,
@@ -423,6 +424,7 @@ async function processScopeQueue(cwd: string, session: string): Promise<string> 
         session,
         queue.map((q) => ({
           file: q.file,
+          specHash: q.specHash,
           axisA: "unknown" as const,
           axisAReason: "CLI 트랜스포트 — scope 판정 생략(지연 예산 초과)",
           rung: "unknown" as const,
@@ -437,7 +439,9 @@ async function processScopeQueue(cwd: string, session: string): Promise<string> 
     // 계획 명세를 판정 입력에 포함 — rung1(YAGNI)은 "요청이 무엇이었나" 없이 판정 불가
     // (스파이크의 rung1 정확도는 명세 존재 조건에서 검증됨 — 판정 조건 정렬).
     const { text: specText } = loadPlanSpec(cwd);
-    const verdicts = await judgeScope(queue, context, filesWithContext, { planSpec: specText });
+    const rawVerdicts = await judgeScope(queue, context, filesWithContext, { planSpec: specText });
+    // 큐잉 시점 specHash 보강 — judgeScope는 계측 무지 유지, 조인키는 이 seam에서만(0.5.4).
+    const verdicts = enrichVerdictsWithSpecHash(rawVerdicts, queue);
     clearScopeQueue(cwd);
     logScopeVerdicts(cwd, session, verdicts, {
       contextMode: context ? "grep" : "none",

@@ -3,9 +3,9 @@
 // 이 파일은 순수 로직·파일 IO만 담당(모델 호출 없음 — 그건 judge.ts judgeScope).
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { gbcDir, readJson, writeJson } from "./store.js";
-import type { ScopeQueueEntry } from "./types.js";
+import type { ScopeQueueEntry, ScopeVerdict } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -43,6 +43,20 @@ export function readScopeQueue(cwd: string): ScopeQueueEntry[] {
 /** 큐 비우기(Stop 훅이 판정 후 호출 — 그 턴 판정분 회수). */
 export function clearScopeQueue(cwd: string): void {
   writeJson(scopeQueuePath(cwd), []);
+}
+
+/**
+ * judgeScope 판정 결과에 큐잉 시점 specHash를 보강한다(순수, file 매칭 — 같은 파일 다건이면 최신 우선).
+ * judgeScope는 계측을 모른 채 유지하고, 조인키 충전은 이 seam에서만 일어난다(0.5.4, A2 사후대조 선행).
+ * 큐에 없는 파일은 빈값("") — 현재 작업단위로 거짓 상관시키지 않는다.
+ */
+export function enrichVerdictsWithSpecHash(
+  verdicts: ScopeVerdict[],
+  queue: ScopeQueueEntry[],
+): ScopeVerdict[] {
+  const hashByFile = new Map<string, string>();
+  for (const q of queue) hashByFile.set(q.file, q.specHash);
+  return verdicts.map((v) => ({ ...v, specHash: hashByFile.get(v.file) ?? "" }));
 }
 
 /** grep 한 매치(file:line:content 파싱 결과). */
@@ -196,8 +210,10 @@ export async function collectGrepContext(
       seenSymbols.add(sym);
       const raw = await grep(sym, cwd);
       const { matches } = parseGrepOutput(raw);
-      // 자기 파일 매치는 제외(다른 파일의 호출부·중복만 단서로).
-      const others = matches.filter((m) => !m.file.endsWith(entry.file) && !entry.file.endsWith(m.file));
+      // 자기 파일 매치는 제외(다른 파일의 호출부·중복만 단서로). cwd 기준 절대경로 동등 비교 —
+      // production은 entry.file=절대(CC file_path) × grep 출력=./상대 조합이라 endsWith가 불일치했다(0.5.4).
+      const entryAbs = resolve(cwd, entry.file);
+      const others = matches.filter((m) => resolve(cwd, m.file) !== entryAbs);
       if (others.length > 0) {
         filesWithContext.add(entry.file);
         allMatches.push(...others);

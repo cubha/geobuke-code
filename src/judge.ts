@@ -146,17 +146,25 @@ export function selectedTransport(): "api" | "cli" {
   return resolveApiKey() ? "api" : "cli";
 }
 
-/** 직접 Anthropic API (haiku). SDK는 여기서만 lazy import → hook 핫패스 보호. */
+/**
+ * Anthropic API 클라이언트 팩토리 — SDK lazy import(핫패스 보호)와 키 해석(env > ~/.gbc/api-key)을
+ * 단일 지점으로(0.5.4). A-mode engine.ts가 클라이언트 생명주기를 가져갈 때 이 seam만 바꾸면 된다.
+ */
+async function createApiClient() {
+  const mod = await import("@anthropic-ai/sdk");
+  const Anthropic = mod.default;
+  // 키를 코드에서 해석해 명시 전달 — 셸 주입 불필요(크로스플랫폼).
+  return new Anthropic({ apiKey: resolveApiKey() ?? undefined });
+}
+
+/** 직접 Anthropic API (haiku). SDK는 팩토리에서만 lazy import → hook 핫패스 보호. */
 async function judgeViaApi(
   system: string,
   user: string,
   temperature?: number,
   model: string = MODEL,
 ): Promise<string> {
-  const mod = await import("@anthropic-ai/sdk");
-  const Anthropic = mod.default;
-  // 키를 코드에서 해석(env 또는 ~/.gbc/api-key)해 명시 전달 — 셸 주입 불필요(크로스플랫폼).
-  const client = new Anthropic({ apiKey: resolveApiKey() ?? undefined });
+  const client = await createApiClient();
   const resp = await client.messages.create({
     model,
     max_tokens: 1024,
@@ -506,9 +514,7 @@ export function parseScopeVerdicts(
 export type ScopeInvoke = (system: string, user: string) => Promise<string>;
 
 async function scopeViaApi(system: string, user: string): Promise<string> {
-  const mod = await import("@anthropic-ai/sdk");
-  const Anthropic = mod.default;
-  const client = new Anthropic({ apiKey: resolveApiKey() ?? undefined });
+  const client = await createApiClient();
   const resp = await client.messages.create({
     model: SCOPE_MODEL,
     max_tokens: 1024,
