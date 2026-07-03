@@ -142,6 +142,23 @@ function maybeUpdateNotice(cwd: string, session: string, ctx?: HookContext): str
 const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|php|c|h|cpp|cc|cs|kt|swift|scala)$/i;
 
 /**
+ * 문서 파일 확장자 — 게이트 결정론 하드가드(0.5.5, 결함A). "동작과 무관한 편집(문서) → 무조건
+ * pass"는 GATE_SYSTEM 1단계의 확정 제품 의도지만, "코드를 서술하는 문서"(분석 보고서·README 기능
+ * 서술)가 haiku의 1단계 분류를 반복적으로 뒤집는 실증 실패 모드(3회: README·분석MD×2 — judge가
+ * "동작과 무관하나"라고 자인하면서 block, ANALYSIS-gbc-defect-rca-2026-07-03). 프롬프트는 하드가드가
+ * 아니므로 코드에서 강제한다(0.5.2 scope 하드가드와 동일 철학).
+ * ⚠️ CODE_FILE_RE whitelist의 부정형(!CODE_FILE_RE)을 쓰지 않는 이유: 미등재 코드 확장자
+ * (.vue/.svelte/.sql/.sh 등)가 게이트를 통째로 우회하는 신규 구멍이 된다. 문서 확장자 blocklist만
+ * 좁게 skip — 설정(.json/.yaml)은 계속 judge 1단계 소관(오판 실증이 문서에 집중, 표면 최소화).
+ */
+const DOC_FILE_RE = /\.(md|mdx|txt|rst|adoc)$/i;
+
+/** 문서 파일 경로인가(게이트 judge 미호출 즉시-pass 대상). 순수 술어 — 최종 확장자만 본다. */
+export function isDocFile(filePath: string): boolean {
+  return DOC_FILE_RE.test(filePath);
+}
+
+/**
  * pass한 동작편집을 scope 큐(.gbc/scope-queue.json)에 넣는다 — Stop 훅이 그 턴 종료 시 실제 grep으로
  * 축A/축B 판정. hot path엔 API·grep 없음(정규화+파일 append만). GBC_NO_SCOPE=1이면 전체 스킵.
  * fail-silent: 큐잉 실패는 게이트를 절대 막지 않는다. 코드파일 편집만(문서/설정 제외).
@@ -185,6 +202,17 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   if (process.env.GBC_NO_GATE === "1") {
     logBypass(cwd, toolName);
     logEvent(cwd, { at: nowIso(), session, specHash: "", kind: "bypass", tool: toolName });
+    process.exit(0);
+  }
+
+  // 문서 하드가드(0.5.5, 결함A) — 문서 확장자는 judge 미호출 즉시 pass. GATE_SYSTEM 1단계
+  // "문서 → 무조건 pass"의 코드 강제(프롬프트 위반 3회 실증 근절). spec 로드 전 초입이라
+  // specHash는 ""(M1 churn 자동 제외·M2는 block만. M3는 session 키라 기존 문서편집과 동일 참여).
+  // 조용한 우회 방지 위해 doc-skip 계측.
+  if (isDocFile(input.tool_input?.file_path ?? "")) {
+    logEvent(cwd, { at: nowIso(), session, specHash: "", kind: "gate", tool: toolName, decision: "doc-skip" });
+    const docNotice = maybeUpdateNotice(cwd, session, ctx);
+    if (docNotice) emit({ systemMessage: docNotice });
     process.exit(0);
   }
 

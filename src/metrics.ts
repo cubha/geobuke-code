@@ -25,7 +25,9 @@ export type EventKind =
   | "verify"
   | "bypass";
 
-export type GateDecision = "pass" | "block" | "failopen" | "cached";
+// doc-skip(0.5.5): 문서 확장자 하드가드가 judge 미호출 통과시킨 편집 — 조용한 우회 방지 계측.
+// specHash=""로 기록돼 M1(churn)·M2(block만)에선 자동 제외, M3(session 키)엔 기존 문서편집과 동일 참여.
+export type GateDecision = "pass" | "block" | "failopen" | "cached" | "doc-skip";
 
 /** scope 판정 계측 열거형(프라이버시: 코드 본문·사유 없이 enum 태그만). */
 export type ScopeAxis = "missing" | "scope" | "rung1" | "rung2" | "rung3";
