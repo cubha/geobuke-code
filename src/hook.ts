@@ -4,7 +4,7 @@
 import { isGatedTool, normalizeEdit } from "./normalize.js";
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated, markGated } from "./state.js";
-import { activeDeferItems, resolvedDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
+import { activeDeferItems, resolvedDeferItems, unresolvedDefers, loadDefers, isClosedStatus } from "./defer.js";
 import { isStopHintMuted, isGoldenCapture } from "./config.js";
 import { loadRepos } from "./repos.js";
 import { writePendingReview } from "./review.js";
@@ -517,7 +517,7 @@ export async function runStop(): Promise<void> {
   let deferMsg = "";
   if (!isStopHintMuted(cwd)) {
     const all = loadDefers(cwd);
-    if (all.filter((d) => d.status !== "resolved").length > 0) deferMsg = buildStopReminder(all);
+    if (all.filter((d) => !isClosedStatus(d.status)).length > 0) deferMsg = buildStopReminder(all);
   }
 
   // ③ 합쳐서 1회 emit(decision:block=사후 표면화 채널). 둘 다 없으면 조용히 정상 stop.
@@ -538,7 +538,7 @@ interface SessionStartInput {
  * (hook엔 추론을 넣지 않는다 — 텍스트만. 자연어/대상 감지·전환 실행은 에이전트 측 책임.)
  */
 const DEFER_PROTOCOL =
-  "규약 — 항목 착수 시 'gbc defer start <ref>'로 진행중 표시, 사용자가 완료를 명시하면 'gbc defer resolve <ref>'로 종결(신호가 모호하면 resolve하지 말고 확인). 되돌리기는 'gbc defer reopen <ref>'. ref=번호|텍스트|all. 모든 자동 전환은 사용자에게 표면화. 작업단위(현재 명세) 전체가 끝나면 'gbc done'으로 명시 종료 — 명세를 아카이브·비우고 게이트를 리셋한다(이걸 안 하면 옛 케이스가 다음 작업단위에 형제로 부활).";
+  "규약 — 항목 착수 시 'gbc defer start <ref>'로 진행중 표시, 사용자가 완료를 명시하면 'gbc defer resolve <ref>'로 종결(신호가 모호하면 resolve하지 말고 확인). 오등록·기각 등 완료가 아닌 정리는 'gbc defer withdraw <ref>'(철회 — resolve와 달리 완료로 기록되지 않음). 되돌리기는 'gbc defer reopen <ref>'. ref=번호|텍스트|all. 모든 자동 전환은 사용자에게 표면화. 작업단위(현재 명세) 전체가 끝나면 'gbc done'으로 명시 종료 — 명세를 아카이브·비우고 게이트를 리셋한다(이걸 안 하면 옛 케이스가 다음 작업단위에 형제로 부활).";
 
 /**
  * 전체 defer 리스트에서 미해결(open+in_progress)만 골라 상태 마커와 함께 한 줄씩 포맷한다.
@@ -548,7 +548,7 @@ const DEFER_PROTOCOL =
 function formatDeferList(all: DeferEntry[]): string {
   return all
     .map((d, i) => ({ d, n: i + 1 }))
-    .filter((x) => x.d.status !== "resolved")
+    .filter((x) => !isClosedStatus(x.d.status))
     .map((x) => `${x.n}. ${x.d.status === "in_progress" ? "▶[진행중]" : "[미착수]"} ${x.d.item}`)
     .join("\n");
 }
@@ -566,7 +566,7 @@ function statusBreakdown(unresolved: DeferEntry[]): string {
  * in_progress를 open과 구분 표면화("진행중 N · 미착수 M") — 착수했지만 미종결 항목이 잊히지 않게.
  */
 export function buildSessionStartHint(all: DeferEntry[]): string {
-  const unresolved = all.filter((d) => d.status !== "resolved");
+  const unresolved = all.filter((d) => !isClosedStatus(d.status));
   if (unresolved.length === 0) return "";
   return (
     `🐢 거북이 게이트 — 미해결 defer ${unresolved.length}건 (${statusBreakdown(unresolved)}, 이전 작업 잔여):\n` +
@@ -595,7 +595,7 @@ export function buildCrossRepoHint(repos: string[], cwd: string): string {
       // 임의 경로(/etc 등)의 .gbc/defers.json을 읽으려 시도하는 간접 확장을 막는다(보안검토 S3).
       // 실디렉터리만 isDirectory()=true; symlink면 false라 skip된다.
       if (!existsSync(abs) || !lstatSync(abs).isDirectory()) continue;
-      unresolved = loadDefers(abs).filter((d) => d.status !== "resolved");
+      unresolved = loadDefers(abs).filter((d) => !isClosedStatus(d.status));
     } catch {
       continue;
     }
@@ -615,7 +615,7 @@ export function buildCrossRepoHint(repos: string[], cwd: string): string {
  * 사라지지 않게(resolve가 리마인드에서 항목을 떨구는 harm 완화).
  */
 export function buildStopReminder(all: DeferEntry[]): string {
-  const unresolved = all.filter((d) => d.status !== "resolved");
+  const unresolved = all.filter((d) => !isClosedStatus(d.status));
   if (unresolved.length === 0) return "";
   return (
     `🐢 미해결 defer ${unresolved.length}건이 남아 있습니다 (${statusBreakdown(unresolved)}):\n` +

@@ -14,13 +14,14 @@ description: 거북이코드 구현-전 게이트를 관리한다. 로드된 계
 
 ## defer 수명주기 — 자연어로 전환한다 (사용자가 명령을 직접 칠 필요 없음)
 
-defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결)** 3상태를 갖는다. 대부분의 경우 사용자는 `gbc defer …`를 직접 입력하지 않는다 — **에이전트가 대화(자연어)와 편집 대상을 감지해 백그라운드에서 전환을 실행**하고, 사용자에게 표면화한다. (명령은 수동 보정용으로 항상 사용 가능.)
+defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결) | withdrawn(철회)** 상태를 갖는다. 대부분의 경우 사용자는 `gbc defer …`를 직접 입력하지 않는다 — **에이전트가 대화(자연어)와 편집 대상을 감지해 백그라운드에서 전환을 실행**하고, 사용자에게 표면화한다. (명령은 수동 보정용으로 항상 사용 가능.)
 
 | 전환 | 트리거(감지) | 에이전트 행동 |
 |---|---|---|
 | **start** (open→진행중) | 그 defer 항목을 **실제로 착수**할 때(NL "이거 할게" 또는 해당 코드 편집 시작) | `gbc defer start <ref>` 자동 실행 + 표면화. 보수적으로 — 실제 착수할 때만(투기적 표시 금지). |
 | **resolve** (→해결) | **사용자의 명시적 완료 선언**("X 끝났어", "점검 OK") | 명확하면 `gbc defer resolve <ref>` 실행 + **반드시 표면화**. |
-| **reopen** (→open) | 사용자가 보류/이월/잘못된 resolve 취소를 요청 | `gbc defer reopen <ref>` 실행 + 표면화. |
+| **withdraw** (→철회) | 사용자가 **완료가 아닌 정리**를 요청("잘못 등록됐어", "이건 기각/불필요") | `gbc defer withdraw <ref>` 실행 + 표면화. **resolve와 구분** — 철회는 완료로 기록되지 않고 게이트 [이미 완료된 항목]에도 안 들어간다. 완료·철회가 모호하면 확인. |
+| **reopen** (→open) | 사용자가 보류/이월/잘못된 resolve·withdraw 취소를 요청 | `gbc defer reopen <ref>` 실행 + 표면화. |
 
 **resolve 모호성 규칙 (load-bearing — 미완성 항목이 조용히 잊히는 harm 차단):**
 - **명확한 완료 선언**("로그인 검증 끝냈어") → 자동 resolve + 표면화.
@@ -37,10 +38,11 @@ defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결
 | 의도 | 명령 |
 |---|---|
 | 게이트 상태·로드된 명세 확인 | `gbc status` |
-| 미룬 항목 목록(상태: 미해결/진행중/해결) | `gbc defer list` |
+| 미룬 항목 목록(상태: 미해결/진행중/해결/철회) | `gbc defer list` |
 | 케이스를 명시적으로 미루기 (→ open) | `gbc defer add "<케이스 설명>"` |
 | 착수 표시 (open → 진행중) | `gbc defer start <번호\|텍스트\|all>` |
 | 종결 표시 (→ 해결) | `gbc defer resolve <번호\|텍스트\|all>` |
+| 철회 — 완료 아닌 정리, 오등록·기각 (→ 철회) | `gbc defer withdraw <번호\|텍스트\|all>` |
 | 백로그로 되돌리기 (→ open) | `gbc defer reopen <번호\|텍스트\|all>` |
 | 승인된 시나리오를 명세에 등록 | `gbc spec add "<케이스>"` |
 | 등록된 케이스 목록 | `gbc spec show` |

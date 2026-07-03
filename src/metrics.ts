@@ -17,6 +17,7 @@ export type EventKind =
   | "defer-add"
   | "defer-start"
   | "defer-resolve"
+  | "defer-withdraw"
   | "defer-reopen"
   | "spec-add"
   | "spec-clear"

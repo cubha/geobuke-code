@@ -26,12 +26,14 @@ export interface EditToolInput {
 }
 
 /**
- * defer 항목 수명주기 상태 (0.2.5+).
+ * defer 항목 수명주기 상태 (0.2.5+, withdrawn은 0.5.5).
  * - open: 미룸 등록·미착수 (이전 resolved:false)
  * - in_progress: 착수해 진행 중 (신규 — start로 진입, 게이트 판정엔 open과 동일하게 '미해결'로 취급)
- * - resolved: 사용자 점검 후 종결 (이전 resolved:true)
+ * - resolved: 사용자 점검 후 종결 (이전 resolved:true) — **완료**로 기록되며 judge [이미 완료된 항목]에 전달
+ * - withdrawn: 철회 종결(0.5.5) — 오등록 정정·기각 등 "완료 아님" 행정 종결. 리마인드·집계에서
+ *   빠지되 judge [이미 완료된 항목]엔 절대 넣지 않는다(철회를 완료로 거짓 진술 금지, 결함D).
  */
-export type DeferStatus = "open" | "in_progress" | "resolved";
+export type DeferStatus = "open" | "in_progress" | "resolved" | "withdrawn";
 
 /** 명시적으로 미룬 항목 (defer-registry 엔트리) */
 export interface DeferEntry {
