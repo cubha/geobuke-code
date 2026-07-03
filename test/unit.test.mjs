@@ -2688,3 +2688,46 @@ test("isDocFile: 코드·미상 확장자/확장자없음/이중확장자는 fal
   assert.equal(isDocFile("Makefile"), false, "확장자 없음");
   assert.equal(isDocFile(""), false, "빈 경로");
 });
+
+// ===== 0.5.5 ST2: missing 명세 교차검증 (결함B — 발명·오매핑 missing 코드 차단) =====
+// filterMissingBySpec은 신규 export — dynamic import(스위트 크래시 방지).
+
+test("filterMissingBySpec: 명세 원문 인용 missing은 유지, 명세에 없는 발명 missing은 드롭", async () => {
+  const { filterMissingBySpec } = await import("../dist/judge.js");
+  const spec = "- [ ] 로그인 실패 시 인라인 에러 메시지 표시\n- [ ] 중복 이메일 검증";
+  const r = filterMissingBySpec(
+    ["로그인 실패 시 인라인 에러 메시지 표시", "SEC-1 XSS remediation 코드 구현"],
+    spec,
+  );
+  assert.deepEqual(r.kept, ["로그인 실패 시 인라인 에러 메시지 표시"]);
+  assert.equal(r.dropped, 1, "명세 무근거 항목은 드롭 카운트");
+});
+
+test("filterMissingBySpec: 인용+부연(케이스 원문 포함) missing은 유지, 공백·대소문자 차이는 흡수", async () => {
+  const { filterMissingBySpec } = await import("../dist/judge.js");
+  const spec = "- [ ] parseBinding은 ::test 접미사를 End-Anchored로 파싱\n- [ ] 중복 이메일 검증";
+  const r = filterMissingBySpec(
+    [
+      "parseBinding은 ::test 접미사를 end-anchored로 파싱 (이 편집에서 미구현)",
+      "중복  이메일   검증",
+    ],
+    spec,
+  );
+  assert.equal(r.kept.length, 2, "케이스 원문을 품은 부연·공백 변형은 근거 있음으로 유지");
+  assert.equal(r.dropped, 0);
+});
+
+test("filterMissingBySpec: 빈 명세면 전부 드롭(발명 차단), 빈 missing이면 무변화", async () => {
+  const { filterMissingBySpec } = await import("../dist/judge.js");
+  const r1 = filterMissingBySpec(["계획 명세 부재", "임의 항목"], "");
+  assert.deepEqual(r1.kept, []);
+  assert.equal(r1.dropped, 2);
+  const r2 = filterMissingBySpec([], "- [ ] 케이스 A");
+  assert.deepEqual(r2.kept, []);
+  assert.equal(r2.dropped, 0);
+});
+
+test("GATE_SYSTEM: missing 원문 인용(verbatim) 제약이 프롬프트에 명시됨", async () => {
+  const { GATE_SYSTEM } = await import("../dist/judge.js");
+  assert.ok(GATE_SYSTEM.includes("원문 그대로 인용"), "verbatim 제약 문구 존재");
+});
