@@ -2664,3 +2664,27 @@ test("pruneSpecArchive: 비정형 파일명(.md)은 정렬·삭제 대상에서 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ===== 0.5.5 ST1: 게이트 문서 하드가드 (결함A — 문서 오판정 3회 재현 근절) =====
+// isDocFile은 신규 export — 스위트 크래시 방지 위해 dynamic import(0.5.4 선례).
+
+test("isDocFile: 문서 확장자(.md/.mdx/.txt/.rst/.adoc)는 대소문자 무관 true", async () => {
+  const { isDocFile } = await import("../dist/hook.js");
+  assert.equal(isDocFile("README.md"), true);
+  assert.equal(isDocFile("docs/analysis/ANALYSIS-x-2026-07-03.MD"), true, "대문자 확장자");
+  assert.equal(isDocFile("/abs/path/guide.mdx"), true);
+  assert.equal(isDocFile("notes.txt"), true);
+  assert.equal(isDocFile("spec.rst"), true);
+  assert.equal(isDocFile("manual.adoc"), true);
+});
+
+test("isDocFile: 코드·미상 확장자/확장자없음/이중확장자는 false(게이트 우회 구멍 금지)", async () => {
+  const { isDocFile } = await import("../dist/hook.js");
+  assert.equal(isDocFile("src/hook.ts"), false);
+  assert.equal(isDocFile("x.md.ts"), false, "이중 확장자 — 최종 확장자가 코드면 게이트 유지");
+  assert.equal(isDocFile("component.vue"), false, "blocklist 미등재 코드 확장자는 게이트 유지");
+  assert.equal(isDocFile("schema.sql"), false);
+  assert.equal(isDocFile("config.json"), false, "설정 파일은 문서 skip 대상 아님(judge 1단계 소관)");
+  assert.equal(isDocFile("Makefile"), false, "확장자 없음");
+  assert.equal(isDocFile(""), false, "빈 경로");
+});
