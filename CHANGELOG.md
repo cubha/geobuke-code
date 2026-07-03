@@ -57,6 +57,36 @@ A(100) standalone 피벗 착수 전 선행 패치(P0) — 사후대조(진짜 M1
 ### Notes
 - **재init 불필요** — SessionStart hook의 출력 형식이 바뀌었지만 hook **명령** 자체는 동일하므로 settings.json 재등록은 불필요하다. 다만 기존 설치처는 새 동작(JSON 청중분리)을 받으려면 전역 패키지를 갱신해야 한다: `gbc update`(또는 `npm i -g geobuke-code@latest`). 로컬 dist 경유 도그푸딩 설치처는 재빌드로 반영된다.
 
+## [0.5.0] - 2026-06-26
+
+> (소급 기록 — 발행 당시 CHANGELOG 누락, 0.5.4 릴리즈메타 정비에서 보충. 정본 상세는 PR #20)
+
+구현 전 게이트에 더해 **구현 후 결과검증**을 추가한다 — gbc 정체성이 "구현 전 게이트"에서 **계획↔구현↔검증 게이트**로 확장. gbc는 테스트를 *실행하지 않고* 표준 결과를 *읽는다*(provider 고정·RCE 차단).
+
+### Added
+- **`gbc verify` — 사후 결과검증 판정 사다리** — verified(JUnit XML이 케이스 통과/실패 증명, `::test` 바인딩) > reviewed(러너 없으면 LLM 최종 코드 독해, `::file` 바인딩 — *동작 증명 아님*) > unverifiable(증거 0이면 정직 미검증). 신규 `src/verify.ts`(runVerify·parseBinding — `::test`/`::file` end-anchored)·`src/junit.ts`(zero-dep JUnit 리더).
+- **케이스 검증 바인딩** — spec 케이스에 `::test <테스트명>`/`::file <경로>` 접미사. `::file`은 cwd 컨테인먼트 + lstat 심링크 거부.
+
+### Notes
+- **fail-open → unverifiable** — 게이트 failOpenVerdict(pass)를 절대 복사하지 않는다. 검증 실패 시 'pass'가 아니라 '모름'을 보고해 거짓 확신을 막는다(사다리 핵심 가드). 미해결 후보는 defer *제안만*(자동 등록 안 함).
+- 문서 정체성 현행화: "구현 전 게이트" → "계획↔구현↔검증".
+
+## [0.4.2] - 2026-06-26
+
+> (소급 기록 — 발행 당시 CHANGELOG 누락, 0.5.4 릴리즈메타 정비에서 보충. 정본 상세는 PR #19)
+
+며칠 지난 완료 spec 케이스가 새 작업단위에서 형제로 부활해 침묵누락 오탐을 내던 defer-spec 드리프트 근본수정. 근본원인 = 작업단위 **"완료" 이벤트 부재**(`.gbc/spec.md`가 append 전용 누적 — 경계는 specHash 시작 트리거뿐, 정리는 수동 spec clear 하나).
+
+### Added
+- **`gbc done` — 작업단위 명시 종료** — spec 본문 아카이브(`.gbc/spec.archive/`) → 비움 + 게이트 리셋(gate reset 로직 불변).
+
+### Fixed
+- **resolved defer → judge `[이미 완료된 항목]` 블록 전달** + GATE_SYSTEM 제외규칙 — 과거 완료 케이스를 침묵누락으로 재플래그(re-flag)하는 오탐 차단.
+- **spec/defer 중복등록 감지** — 정규화 동일 케이스 skip(resolved 재등록은 허용).
+
+### Notes
+- DEFER_PROTOCOL·gate SKILL.md·help에 완료 규약 발화.
+
 ## [0.4.1] - 2026-06-25
 
 게이트 운영 현황을 한 곳에서 조회·해석하는 읽기전용 관측 스킬을 추가한다. 0.4.0이 깐 운영층 명령들(`metrics --all`·`repos list`·`gate snapshot`)이 세션 안에서 발견가능성(discoverability)이 없어 매번 외워 치거나 요청해야 했던 갭을 메운다.
@@ -224,6 +254,21 @@ A(100) standalone 피벗 착수 전 선행 패치(P0) — 사후대조(진짜 M1
 - `gbc init` — 프로젝트 로컬 hook 설치(머지·백업·멱등), API 키 주입 자동화 + keyless hook 업그레이드.
 - 최초 npm 발행.
 
+[0.5.4]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.4
+[0.5.3]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.3
+[0.5.2]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.2
+[0.5.1]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.1
+[0.5.0]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.0
+[0.4.2]: https://github.com/cubha/geobuke-code/releases/tag/v0.4.2
+[0.4.1]: https://github.com/cubha/geobuke-code/releases/tag/v0.4.1
+[0.4.0]: https://github.com/cubha/geobuke-code/releases/tag/v0.4.0
+[0.3.0]: https://github.com/cubha/geobuke-code/releases/tag/v0.3.0
+[0.2.9]: https://github.com/cubha/geobuke-code/releases/tag/v0.2.9
+[0.2.8]: https://github.com/cubha/geobuke-code/releases/tag/v0.2.8
+[0.2.7]: https://github.com/cubha/geobuke-code/releases/tag/v0.2.7
+[0.2.6]: https://github.com/cubha/geobuke-code/releases/tag/v0.2.6
+[0.2.5]: https://github.com/cubha/geobuke-code/releases/tag/v0.2.5
+[0.2.4]: https://github.com/cubha/geobuke-code/releases/tag/v0.2.4
 [0.2.3]: https://github.com/cubha/geobuke-code/releases/tag/v0.2.3
 [0.2.2]: https://github.com/cubha/geobuke-code/releases/tag/v0.2.2
 [0.2.1]: https://github.com/cubha/geobuke-code/releases/tag/v0.2.1
