@@ -31,6 +31,15 @@ export function loadDefers(cwd: string): DeferEntry[] {
   return readJson<RawDeferEntry[]>(deferPath(cwd), []).map(promote);
 }
 
+/**
+ * 종결 상태인가(resolved=완료 | withdrawn=철회) — "미해결" 필터의 단일 술어(0.5.5).
+ * ⚠️ `status !== "resolved"` 부정형을 쓰지 마라: withdrawn 추가로 그 필터는 철회 항목을
+ * '미해결'로 오분류한다(리마인드·집계·dup 체크 전부). 미해결 판정은 반드시 이 술어를 경유.
+ */
+export function isClosedStatus(status: DeferStatus): boolean {
+  return status === "resolved" || status === "withdrawn";
+}
+
 /** 저장은 항상 status 포맷으로 통일 — promote가 옛 resolved 필드를 떨궈 단일 소스 보장(drift 방지) */
 function save(cwd: string, defers: DeferEntry[]): void {
   writeJson(deferPath(cwd), defers);
@@ -40,13 +49,13 @@ function save(cwd: string, defers: DeferEntry[]): void {
  * 명시적으로 항목을 미룬다 (침묵 누락 차단의 유일한 정당 경로).
  * 중복 감지(ST2): 정규화 텍스트가 **미해결(open+in_progress)** 항목과 동일하면 새로 추가하지 않고
  * 기존 엔트리를 added:false로 반환한다 — 같은 '무관' defer가 시점만 달리 누적되던 증상(2026-06-26 진단) 차단.
- * resolved된 동일 텍스트는 막지 않는다(완료 후 같은 케이스가 정당히 재발할 수 있음 → 재-defer 허용).
+ * 종결(resolved·withdrawn)된 동일 텍스트는 막지 않는다(종결 후 같은 케이스가 정당히 재발할 수 있음 → 재-defer 허용).
  * @returns { entry, added } — added=false면 entry는 기존(미해결) 항목.
  */
 export function addDefer(cwd: string, item: string): { entry: DeferEntry; added: boolean } {
   const defers = loadDefers(cwd);
   const normalized = normalizeCase(item);
-  const dup = defers.find((d) => d.status !== "resolved" && d.item === normalized);
+  const dup = defers.find((d) => !isClosedStatus(d.status) && d.item === normalized);
   if (dup) return { entry: dup, added: false };
   const entry: DeferEntry = { item: normalized, at: nowIso(), status: "open" };
   defers.push(entry);
@@ -55,18 +64,19 @@ export function addDefer(cwd: string, item: string): { entry: DeferEntry; added:
 }
 
 /**
- * 미해결(=resolved 아님) defer 항목 텍스트만 (게이트 판정 입력용).
+ * 미해결(=종결 아님) defer 항목 텍스트만 (게이트 판정 입력용).
  * gate-neutral: open + in_progress 모두 '아직 안 끝난 의도적 미룸'으로 judge에 전달 → 차단 로직 무변경.
+ * withdrawn은 미룸이 아니라 철회 — judge [명시적으로 미룬 항목]에 넣지 않는다(0.5.5).
  */
 export function activeDeferItems(cwd: string): string[] {
   return loadDefers(cwd)
-    .filter((d) => d.status !== "resolved")
+    .filter((d) => !isClosedStatus(d.status))
     .map((d) => d.item);
 }
 
 /** 미해결(open+in_progress) defer 엔트리 (Stop hook·SessionStart 리마인드용) */
 export function unresolvedDefers(cwd: string): DeferEntry[] {
-  return loadDefers(cwd).filter((d) => d.status !== "resolved");
+  return loadDefers(cwd).filter((d) => !isClosedStatus(d.status));
 }
 
 /**
@@ -114,15 +124,22 @@ function selectTargets(
   return t ? [t] : [];
 }
 
-/** 선택된 대상을 toStatus로 전환하고 저장. 전환된 엔트리 배열 반환(매칭 0건이면 빈 배열). */
+/**
+ * 선택된 대상을 toStatus로 전환하고 저장. 전환된 엔트리 배열 반환(매칭 0건이면 빈 배열).
+ * strictEligible: 인덱스 ref의 "적격 무시" 예외(사용자가 번호를 안다)까지 무효화하고 eligibleFrom을
+ * 강제한다 — withdraw 전용(0.5.5). resolved를 인덱스로 철회하면 judge [이미 완료된 항목] 엔트리가
+ * 조용히 사라져 재차단 오탐 방지가 상실되므로, resolved 정정은 reopen 경유만 허용(scope-critic 판정).
+ */
 function transition(
   cwd: string,
   ref: string,
   toStatus: DeferStatus,
   eligibleFrom: DeferStatus[],
+  opts: { strictEligible?: boolean } = {},
 ): DeferEntry[] {
   const defers = loadDefers(cwd);
-  const targets = selectTargets(defers, ref, eligibleFrom);
+  let targets = selectTargets(defers, ref, eligibleFrom);
+  if (opts.strictEligible) targets = targets.filter((t) => eligibleFrom.includes(t.status));
   for (const t of targets) t.status = toStatus;
   if (targets.length > 0) save(cwd, defers);
   return targets;
@@ -138,7 +155,17 @@ export function resolveDefer(cwd: string, ref: string): DeferEntry[] {
   return transition(cwd, ref, "resolved", ["open", "in_progress"]);
 }
 
-/** → open (백로그로 되돌리기: 보류/이월 또는 잘못된 resolve 취소). 텍스트/all 적격 = in_progress + resolved. */
+/**
+ * → withdrawn (철회 종결, 0.5.5 결함D) — 오등록 정정·기각 등 "완료 아님" 종결.
+ * resolve와 달리 judge [이미 완료된 항목]에 전달되지 않는다(철회를 완료로 거짓 진술 금지).
+ * 적격 = open + in_progress — 인덱스 ref에도 강제(strictEligible). resolved를 철회로 바꾸는 건
+ * reopen 경유만(인덱스 예외로 허용하면 judge [이미 완료] 엔트리가 조용히 사라짐 — scope-critic 판정).
+ */
+export function withdrawDefer(cwd: string, ref: string): DeferEntry[] {
+  return transition(cwd, ref, "withdrawn", ["open", "in_progress"], { strictEligible: true });
+}
+
+/** → open (백로그로 되돌리기: 보류/이월 또는 잘못된 resolve/withdraw 취소). 텍스트/all 적격 = in_progress + resolved + withdrawn. */
 export function reopenDefer(cwd: string, ref: string): DeferEntry[] {
-  return transition(cwd, ref, "open", ["in_progress", "resolved"]);
+  return transition(cwd, ref, "open", ["in_progress", "resolved", "withdrawn"]);
 }

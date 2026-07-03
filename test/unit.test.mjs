@@ -2664,3 +2664,191 @@ test("pruneSpecArchive: 비정형 파일명(.md)은 정렬·삭제 대상에서 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ===== 0.5.5 ST1: 게이트 문서 하드가드 (결함A — 문서 오판정 3회 재현 근절) =====
+// isDocFile은 신규 export — 스위트 크래시 방지 위해 dynamic import(0.5.4 선례).
+
+test("isDocFile: 문서 확장자(.md/.mdx/.txt/.rst/.adoc)는 대소문자 무관 true", async () => {
+  const { isDocFile } = await import("../dist/hook.js");
+  assert.equal(isDocFile("README.md"), true);
+  assert.equal(isDocFile("docs/analysis/ANALYSIS-x-2026-07-03.MD"), true, "대문자 확장자");
+  assert.equal(isDocFile("/abs/path/guide.mdx"), true);
+  assert.equal(isDocFile("notes.txt"), true);
+  assert.equal(isDocFile("spec.rst"), true);
+  assert.equal(isDocFile("manual.adoc"), true);
+});
+
+test("isDocFile: 코드·미상 확장자/확장자없음/이중확장자는 false(게이트 우회 구멍 금지)", async () => {
+  const { isDocFile } = await import("../dist/hook.js");
+  assert.equal(isDocFile("src/hook.ts"), false);
+  assert.equal(isDocFile("x.md.ts"), false, "이중 확장자 — 최종 확장자가 코드면 게이트 유지");
+  assert.equal(isDocFile("component.vue"), false, "blocklist 미등재 코드 확장자는 게이트 유지");
+  assert.equal(isDocFile("schema.sql"), false);
+  assert.equal(isDocFile("config.json"), false, "설정 파일은 문서 skip 대상 아님(judge 1단계 소관)");
+  assert.equal(isDocFile("Makefile"), false, "확장자 없음");
+  assert.equal(isDocFile(""), false, "빈 경로");
+});
+
+// ===== 0.5.5 ST2: missing 명세 교차검증 (결함B — 발명·오매핑 missing 코드 차단) =====
+// filterMissingBySpec은 신규 export — dynamic import(스위트 크래시 방지).
+
+test("filterMissingBySpec: 명세 원문 인용 missing은 유지, 명세에 없는 발명 missing은 드롭", async () => {
+  const { filterMissingBySpec } = await import("../dist/judge.js");
+  const spec = "- [ ] 로그인 실패 시 인라인 에러 메시지 표시\n- [ ] 중복 이메일 검증";
+  const r = filterMissingBySpec(
+    ["로그인 실패 시 인라인 에러 메시지 표시", "SEC-1 XSS remediation 코드 구현"],
+    spec,
+  );
+  assert.deepEqual(r.kept, ["로그인 실패 시 인라인 에러 메시지 표시"]);
+  assert.equal(r.dropped, 1, "명세 무근거 항목은 드롭 카운트");
+});
+
+test("filterMissingBySpec: 인용+부연(케이스 원문 포함) missing은 유지, 공백·대소문자 차이는 흡수", async () => {
+  const { filterMissingBySpec } = await import("../dist/judge.js");
+  const spec = "- [ ] parseBinding은 ::test 접미사를 End-Anchored로 파싱\n- [ ] 중복 이메일 검증";
+  const r = filterMissingBySpec(
+    [
+      "parseBinding은 ::test 접미사를 end-anchored로 파싱 (이 편집에서 미구현)",
+      "중복  이메일   검증",
+    ],
+    spec,
+  );
+  assert.equal(r.kept.length, 2, "케이스 원문을 품은 부연·공백 변형은 근거 있음으로 유지");
+  assert.equal(r.dropped, 0);
+});
+
+test("filterMissingBySpec: 빈 명세면 전부 드롭(발명 차단), 빈 missing이면 무변화", async () => {
+  const { filterMissingBySpec } = await import("../dist/judge.js");
+  const r1 = filterMissingBySpec(["계획 명세 부재", "임의 항목"], "");
+  assert.deepEqual(r1.kept, []);
+  assert.equal(r1.dropped, 2);
+  const r2 = filterMissingBySpec([], "- [ ] 케이스 A");
+  assert.deepEqual(r2.kept, []);
+  assert.equal(r2.dropped, 0);
+});
+
+test("GATE_SYSTEM: missing 원문 인용(verbatim) 제약이 프롬프트에 명시됨", async () => {
+  const { GATE_SYSTEM } = await import("../dist/judge.js");
+  assert.ok(GATE_SYSTEM.includes("원문 그대로 인용"), "verbatim 제약 문구 존재");
+});
+
+// ===== 0.5.5 ST3: withdrawn 수명주기 (결함D — 행정 종결↔완료 구분) =====
+// withdrawDefer/isClosedStatus는 신규 export — dynamic import(스위트 크래시 방지).
+
+test("withdrawDefer: open/in_progress → withdrawn 전환·저장, resolved는 부적격", async () => {
+  const { withdrawDefer } = await import("../dist/defer.js");
+  const dir = tmp();
+  try {
+    addDefer(dir, "오등록 항목");
+    addDefer(dir, "진행중 항목");
+    addDefer(dir, "완료 항목");
+    const { startDefer } = await import("../dist/defer.js");
+    startDefer(dir, "2");
+    resolveDefer(dir, "3");
+    const changed = withdrawDefer(dir, "all");
+    assert.deepEqual(
+      changed.map((d) => d.item),
+      ["오등록 항목", "진행중 항목"],
+      "all은 open+in_progress만 철회(resolved 불변)",
+    );
+    const statuses = loadDefers(dir).map((d) => d.status);
+    assert.deepEqual(statuses, ["withdrawn", "withdrawn", "resolved"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("withdrawn은 judge 입력 양쪽(active·resolved)에서 제외 — 거짓 진술 차단", async () => {
+  const { withdrawDefer } = await import("../dist/defer.js");
+  const dir = tmp();
+  try {
+    addDefer(dir, "철회될 항목");
+    addDefer(dir, "살아있는 항목");
+    withdrawDefer(dir, "1");
+    assert.deepEqual(activeDeferItems(dir), ["살아있는 항목"], "withdrawn은 미룬 항목 아님");
+    assert.deepEqual(resolvedDeferItems(dir), [], "withdrawn은 [이미 완료된 항목] 아님");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("reopenDefer: withdrawn → open 복구(오철회 정정 경로)", async () => {
+  const { withdrawDefer, reopenDefer: reopen2 } = await import("../dist/defer.js");
+  const dir = tmp();
+  try {
+    addDefer(dir, "실수로 철회");
+    withdrawDefer(dir, "1");
+    const changed = reopen2(dir, "실수로 철회");
+    assert.equal(changed.length, 1);
+    assert.equal(loadDefers(dir)[0].status, "open");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("addDefer: withdrawn 동일 텍스트 재등록 허용(resolved와 동일 — 종결 후 정당 재발)", async () => {
+  const { withdrawDefer } = await import("../dist/defer.js");
+  const dir = tmp();
+  try {
+    addDefer(dir, "케이스 X");
+    withdrawDefer(dir, "1");
+    const r = addDefer(dir, "케이스 X");
+    assert.equal(r.added, true, "철회된 항목은 dup 차단 대상 아님");
+    assert.equal(loadDefers(dir).length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildStopReminder/buildSessionStartHint: withdrawn은 미해결 집계·리스트에서 제외", async () => {
+  const { isClosedStatus } = await import("../dist/defer.js");
+  assert.equal(isClosedStatus("resolved"), true);
+  assert.equal(isClosedStatus("withdrawn"), true);
+  assert.equal(isClosedStatus("open"), false);
+  assert.equal(isClosedStatus("in_progress"), false);
+  const all = [
+    { item: "미착수 A", at: "", status: "open" },
+    { item: "철회 B", at: "", status: "withdrawn" },
+    { item: "완료 C", at: "", status: "resolved" },
+  ];
+  const stop = buildStopReminder(all);
+  assert.match(stop, /미해결 defer 1건/);
+  assert.ok(!stop.includes("철회 B"), "withdrawn은 리마인드 리스트 미표시");
+  const hint = buildSessionStartHint(all);
+  assert.match(hint, /미해결 defer 1건/);
+  assert.ok(!hint.includes("철회 B"));
+});
+
+test("withdrawDefer: 인덱스 ref로도 resolved는 철회 불가(적격 강제 — reopen 경유 원칙)", async () => {
+  const { withdrawDefer } = await import("../dist/defer.js");
+  const dir = tmp();
+  try {
+    addDefer(dir, "완료된 항목");
+    resolveDefer(dir, "1");
+    const changed = withdrawDefer(dir, "1");
+    assert.equal(changed.length, 0, "resolved를 인덱스로 지정해도 withdraw 대상 아님");
+    assert.equal(loadDefers(dir)[0].status, "resolved", "judge [이미 완료] 엔트리 보존");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===== 0.5.5 ST4: 안내 문구 계약 (결함C + RCA §4-⑤) =====
+
+test("buildStopReminder: 허위 '1회만 표시' 제거 — 매 턴 표시 + 음소거 안내가 사실 계약 (결함C)", () => {
+  const all = [{ item: "잔여 항목", at: "", status: "open" }];
+  const r = buildStopReminder(all);
+  assert.ok(!r.includes("1회만"), "존재하지 않는 세션 dedup을 약속하지 않는다");
+  assert.match(r, /매 턴 표시/);
+  assert.match(r, /gbc-mute/);
+});
+
+test("buildBlockReason: 침묵누락 안내에 defer 대상 조건화(형제 케이스만) 포함 (⑤)", () => {
+  const r = buildBlockReason(
+    { verdict: "block", missing: ["케이스 X"], reason: "침묵 누락" },
+    false,
+    ".gbc/spec.md",
+  );
+  assert.match(r, /형제 케이스만/);
+  assert.match(r, /계획 문서/);
+});

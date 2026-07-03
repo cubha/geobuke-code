@@ -4,7 +4,7 @@
 import { isGatedTool, normalizeEdit } from "./normalize.js";
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated, markGated } from "./state.js";
-import { activeDeferItems, resolvedDeferItems, unresolvedDefers, loadDefers } from "./defer.js";
+import { activeDeferItems, resolvedDeferItems, unresolvedDefers, loadDefers, isClosedStatus } from "./defer.js";
 import { isStopHintMuted, isGoldenCapture } from "./config.js";
 import { loadRepos } from "./repos.js";
 import { writePendingReview } from "./review.js";
@@ -42,10 +42,12 @@ export function buildBlockReason(verdict: Verdict, specEmpty: boolean, source: s
     verdict.missing.length > 0 ? `\n누락(침묵): ${verdict.missing.join(", ")}` : "";
   // 누락 케이스는 .gbc/pending-review.json에 기록돼 있어 'gbc gate review'로 번호 체크리스트
   // 일괄 분류(승인→spec / 미룸→defer)가 가능하다. 개별 처리(직접 구현·gbc defer add)도 유효.
+  // defer 유도 조건화(0.5.5, RCA §4-⑤): defer는 "이 변경의 형제 케이스"를 미루는 채널이다.
+  // 별도 작업단위·로드맵 항목까지 defer로 흡수하면 계획 문서와 이중 추적이 된다(결함A 증폭 경로).
   return (
     `🐢 거북이 게이트 — ${verdict.reason}${missingLine}\n` +
     `→ 누락 케이스를 'gbc gate review'로 한 번에 분류(승인→spec / 미룸→defer)하거나, 지금 이 변경에서 직접 다루세요.` +
-    ` 개별로 미룰 거면 'gbc defer add "<케이스>"'. (명세 소스: ${source})`
+    ` 개별로 미룰 거면 'gbc defer add "<케이스>"' — 단 defer 대상은 이 변경의 형제 케이스만, 별도 작업단위·로드맵 항목은 계획 문서에 두세요. (명세 소스: ${source})`
   );
 }
 
@@ -142,6 +144,23 @@ function maybeUpdateNotice(cwd: string, session: string, ctx?: HookContext): str
 const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|php|c|h|cpp|cc|cs|kt|swift|scala)$/i;
 
 /**
+ * 문서 파일 확장자 — 게이트 결정론 하드가드(0.5.5, 결함A). "동작과 무관한 편집(문서) → 무조건
+ * pass"는 GATE_SYSTEM 1단계의 확정 제품 의도지만, "코드를 서술하는 문서"(분석 보고서·README 기능
+ * 서술)가 haiku의 1단계 분류를 반복적으로 뒤집는 실증 실패 모드(3회: README·분석MD×2 — judge가
+ * "동작과 무관하나"라고 자인하면서 block, ANALYSIS-gbc-defect-rca-2026-07-03). 프롬프트는 하드가드가
+ * 아니므로 코드에서 강제한다(0.5.2 scope 하드가드와 동일 철학).
+ * ⚠️ CODE_FILE_RE whitelist의 부정형(!CODE_FILE_RE)을 쓰지 않는 이유: 미등재 코드 확장자
+ * (.vue/.svelte/.sql/.sh 등)가 게이트를 통째로 우회하는 신규 구멍이 된다. 문서 확장자 blocklist만
+ * 좁게 skip — 설정(.json/.yaml)은 계속 judge 1단계 소관(오판 실증이 문서에 집중, 표면 최소화).
+ */
+const DOC_FILE_RE = /\.(md|mdx|txt|rst|adoc)$/i;
+
+/** 문서 파일 경로인가(게이트 judge 미호출 즉시-pass 대상). 순수 술어 — 최종 확장자만 본다. */
+export function isDocFile(filePath: string): boolean {
+  return DOC_FILE_RE.test(filePath);
+}
+
+/**
  * pass한 동작편집을 scope 큐(.gbc/scope-queue.json)에 넣는다 — Stop 훅이 그 턴 종료 시 실제 grep으로
  * 축A/축B 판정. hot path엔 API·grep 없음(정규화+파일 append만). GBC_NO_SCOPE=1이면 전체 스킵.
  * fail-silent: 큐잉 실패는 게이트를 절대 막지 않는다. 코드파일 편집만(문서/설정 제외).
@@ -185,6 +204,17 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   if (process.env.GBC_NO_GATE === "1") {
     logBypass(cwd, toolName);
     logEvent(cwd, { at: nowIso(), session, specHash: "", kind: "bypass", tool: toolName });
+    process.exit(0);
+  }
+
+  // 문서 하드가드(0.5.5, 결함A) — 문서 확장자는 judge 미호출 즉시 pass. GATE_SYSTEM 1단계
+  // "문서 → 무조건 pass"의 코드 강제(프롬프트 위반 3회 실증 근절). spec 로드 전 초입이라
+  // specHash는 ""(M1 churn 자동 제외·M2는 block만. M3는 session 키라 기존 문서편집과 동일 참여).
+  // 조용한 우회 방지 위해 doc-skip 계측.
+  if (isDocFile(input.tool_input?.file_path ?? "")) {
+    logEvent(cwd, { at: nowIso(), session, specHash: "", kind: "gate", tool: toolName, decision: "doc-skip" });
+    const docNotice = maybeUpdateNotice(cwd, session, ctx);
+    if (docNotice) emit({ systemMessage: docNotice });
     process.exit(0);
   }
 
@@ -489,7 +519,7 @@ export async function runStop(): Promise<void> {
   let deferMsg = "";
   if (!isStopHintMuted(cwd)) {
     const all = loadDefers(cwd);
-    if (all.filter((d) => d.status !== "resolved").length > 0) deferMsg = buildStopReminder(all);
+    if (all.filter((d) => !isClosedStatus(d.status)).length > 0) deferMsg = buildStopReminder(all);
   }
 
   // ③ 합쳐서 1회 emit(decision:block=사후 표면화 채널). 둘 다 없으면 조용히 정상 stop.
@@ -510,7 +540,7 @@ interface SessionStartInput {
  * (hook엔 추론을 넣지 않는다 — 텍스트만. 자연어/대상 감지·전환 실행은 에이전트 측 책임.)
  */
 const DEFER_PROTOCOL =
-  "규약 — 항목 착수 시 'gbc defer start <ref>'로 진행중 표시, 사용자가 완료를 명시하면 'gbc defer resolve <ref>'로 종결(신호가 모호하면 resolve하지 말고 확인). 되돌리기는 'gbc defer reopen <ref>'. ref=번호|텍스트|all. 모든 자동 전환은 사용자에게 표면화. 작업단위(현재 명세) 전체가 끝나면 'gbc done'으로 명시 종료 — 명세를 아카이브·비우고 게이트를 리셋한다(이걸 안 하면 옛 케이스가 다음 작업단위에 형제로 부활).";
+  "규약 — 항목 착수 시 'gbc defer start <ref>'로 진행중 표시, 사용자가 완료를 명시하면 'gbc defer resolve <ref>'로 종결(신호가 모호하면 resolve하지 말고 확인). 오등록·기각 등 완료가 아닌 정리는 'gbc defer withdraw <ref>'(철회 — resolve와 달리 완료로 기록되지 않음). 되돌리기는 'gbc defer reopen <ref>'. ref=번호|텍스트|all. 모든 자동 전환은 사용자에게 표면화. 작업단위(현재 명세) 전체가 끝나면 'gbc done'으로 명시 종료 — 명세를 아카이브·비우고 게이트를 리셋한다(이걸 안 하면 옛 케이스가 다음 작업단위에 형제로 부활).";
 
 /**
  * 전체 defer 리스트에서 미해결(open+in_progress)만 골라 상태 마커와 함께 한 줄씩 포맷한다.
@@ -520,7 +550,7 @@ const DEFER_PROTOCOL =
 function formatDeferList(all: DeferEntry[]): string {
   return all
     .map((d, i) => ({ d, n: i + 1 }))
-    .filter((x) => x.d.status !== "resolved")
+    .filter((x) => !isClosedStatus(x.d.status))
     .map((x) => `${x.n}. ${x.d.status === "in_progress" ? "▶[진행중]" : "[미착수]"} ${x.d.item}`)
     .join("\n");
 }
@@ -538,7 +568,7 @@ function statusBreakdown(unresolved: DeferEntry[]): string {
  * in_progress를 open과 구분 표면화("진행중 N · 미착수 M") — 착수했지만 미종결 항목이 잊히지 않게.
  */
 export function buildSessionStartHint(all: DeferEntry[]): string {
-  const unresolved = all.filter((d) => d.status !== "resolved");
+  const unresolved = all.filter((d) => !isClosedStatus(d.status));
   if (unresolved.length === 0) return "";
   return (
     `🐢 거북이 게이트 — 미해결 defer ${unresolved.length}건 (${statusBreakdown(unresolved)}, 이전 작업 잔여):\n` +
@@ -567,7 +597,7 @@ export function buildCrossRepoHint(repos: string[], cwd: string): string {
       // 임의 경로(/etc 등)의 .gbc/defers.json을 읽으려 시도하는 간접 확장을 막는다(보안검토 S3).
       // 실디렉터리만 isDirectory()=true; symlink면 false라 skip된다.
       if (!existsSync(abs) || !lstatSync(abs).isDirectory()) continue;
-      unresolved = loadDefers(abs).filter((d) => d.status !== "resolved");
+      unresolved = loadDefers(abs).filter((d) => !isClosedStatus(d.status));
     } catch {
       continue;
     }
@@ -587,12 +617,14 @@ export function buildCrossRepoHint(repos: string[], cwd: string): string {
  * 사라지지 않게(resolve가 리마인드에서 항목을 떨구는 harm 완화).
  */
 export function buildStopReminder(all: DeferEntry[]): string {
-  const unresolved = all.filter((d) => d.status !== "resolved");
+  const unresolved = all.filter((d) => !isClosedStatus(d.status));
   if (unresolved.length === 0) return "";
   return (
     `🐢 미해결 defer ${unresolved.length}건이 남아 있습니다 (${statusBreakdown(unresolved)}):\n` +
     `${formatDeferList(all)}\n` +
-    `${DEFER_PROTOCOL} 다음 세션으로 이월할 거면 의식적으로 확인하세요. (이 리마인드는 1회만 표시됩니다.)`
+    // 문구는 실동작과 일치해야 한다(결함C): 세션 1회 dedup은 존재하지 않고, stop_hook_active
+    // 가드는 턴 내 루프 방지뿐 — 미해결이 남아 있는 한 매 턴 발화가 의도 설계(opt-out=/gbc-mute).
+    `${DEFER_PROTOCOL} 다음 세션으로 이월할 거면 의식적으로 확인하세요. (이 리마인드는 미해결 defer가 남아 있는 동안 매 턴 표시됩니다 — 끄기: /gbc-mute)`
   );
 }
 

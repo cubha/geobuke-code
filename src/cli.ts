@@ -23,7 +23,7 @@ import {
   archiveSpec,
 } from "./spec.js";
 import { loadState, resetGate } from "./state.js";
-import { addDefer, loadDefers, resolveDefer, startDefer, reopenDefer } from "./defer.js";
+import { addDefer, loadDefers, resolveDefer, startDefer, withdrawDefer, reopenDefer, isClosedStatus } from "./defer.js";
 import { loadRepos, addRepo, removeRepo } from "./repos.js";
 import { readPendingReview, clearPendingReview, resolveRefs } from "./review.js";
 import { isStopHintMuted, setStopHintMuted, isGoldenCapture, setGoldenCapture } from "./config.js";
@@ -239,7 +239,7 @@ async function cmdStatus(): Promise<void> {
   const hash = computeSpecHash(text);
   const state = loadState(cwd);
   const defers = loadDefers(cwd);
-  const unresolved = defers.filter((d) => d.status !== "resolved");
+  const unresolved = defers.filter((d) => !isClosedStatus(d.status));
   const inProgress = defers.filter((d) => d.status === "in_progress").length;
 
   console.log(`🐢 거북이 게이트 상태 — ${cwd}
@@ -302,16 +302,31 @@ function cmdDefer(args: string[]): void {
       open: "미해결",
       in_progress: "진행중",
       resolved: "해결",
+      withdrawn: "철회",
     };
     defers.forEach((d, i) => console.log(`${i + 1}. [${label[d.status]}] ${d.item}`));
-  } else if (sub === "start" || sub === "resolve" || sub === "reopen") {
+  } else if (sub === "start" || sub === "resolve" || sub === "withdraw" || sub === "reopen") {
     const ref = args.slice(1).join(" ").trim();
     if (!ref) {
       console.error(`사용: gbc defer ${sub} <번호|텍스트|all>`);
       process.exit(1);
     }
-    const fn = sub === "start" ? startDefer : sub === "resolve" ? resolveDefer : reopenDefer;
-    const verb = sub === "start" ? "착수" : sub === "resolve" ? "해결" : "되돌림(open)";
+    const fn =
+      sub === "start"
+        ? startDefer
+        : sub === "resolve"
+          ? resolveDefer
+          : sub === "withdraw"
+            ? withdrawDefer
+            : reopenDefer;
+    const verb =
+      sub === "start"
+        ? "착수"
+        : sub === "resolve"
+          ? "해결"
+          : sub === "withdraw"
+            ? "철회(완료 아님)"
+            : "되돌림(open)";
     const changed = fn(cwd, ref);
     if (changed.length > 0) {
       logCli(cwd, `defer-${sub}`, curHash(cwd));
@@ -320,7 +335,7 @@ function cmdDefer(args: string[]): void {
       console.log(`매칭되는 항목 없음(0건): ${ref}`);
     }
   } else {
-    console.error("사용: gbc defer <add|list|start|resolve|reopen|mute|unmute> ...");
+    console.error("사용: gbc defer <add|list|start|resolve|withdraw|reopen|mute|unmute> ...");
     process.exit(1);
   }
 }
@@ -787,7 +802,7 @@ function cmdRepos(args: string[]): void {
         /* 부재/권한오류 → exists=false */
       }
       const gated = isDir && existsSync(join(r, ".gbc"));
-      const unresolved = gated ? loadDefers(r).filter((d) => d.status !== "resolved").length : 0;
+      const unresolved = gated ? loadDefers(r).filter((d) => !isClosedStatus(d.status)).length : 0;
       const mark = !exists
         ? "✗부재"
         : !isDir
