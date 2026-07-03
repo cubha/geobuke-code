@@ -2731,3 +2731,90 @@ test("GATE_SYSTEM: missing 원문 인용(verbatim) 제약이 프롬프트에 명
   const { GATE_SYSTEM } = await import("../dist/judge.js");
   assert.ok(GATE_SYSTEM.includes("원문 그대로 인용"), "verbatim 제약 문구 존재");
 });
+
+// ===== 0.5.5 ST3: withdrawn 수명주기 (결함D — 행정 종결↔완료 구분) =====
+// withdrawDefer/isClosedStatus는 신규 export — dynamic import(스위트 크래시 방지).
+
+test("withdrawDefer: open/in_progress → withdrawn 전환·저장, resolved는 부적격", async () => {
+  const { withdrawDefer } = await import("../dist/defer.js");
+  const dir = tmp();
+  try {
+    addDefer(dir, "오등록 항목");
+    addDefer(dir, "진행중 항목");
+    addDefer(dir, "완료 항목");
+    const { startDefer } = await import("../dist/defer.js");
+    startDefer(dir, "2");
+    resolveDefer(dir, "3");
+    const changed = withdrawDefer(dir, "all");
+    assert.deepEqual(
+      changed.map((d) => d.item),
+      ["오등록 항목", "진행중 항목"],
+      "all은 open+in_progress만 철회(resolved 불변)",
+    );
+    const statuses = loadDefers(dir).map((d) => d.status);
+    assert.deepEqual(statuses, ["withdrawn", "withdrawn", "resolved"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("withdrawn은 judge 입력 양쪽(active·resolved)에서 제외 — 거짓 진술 차단", async () => {
+  const { withdrawDefer } = await import("../dist/defer.js");
+  const dir = tmp();
+  try {
+    addDefer(dir, "철회될 항목");
+    addDefer(dir, "살아있는 항목");
+    withdrawDefer(dir, "1");
+    assert.deepEqual(activeDeferItems(dir), ["살아있는 항목"], "withdrawn은 미룬 항목 아님");
+    assert.deepEqual(resolvedDeferItems(dir), [], "withdrawn은 [이미 완료된 항목] 아님");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("reopenDefer: withdrawn → open 복구(오철회 정정 경로)", async () => {
+  const { withdrawDefer, reopenDefer: reopen2 } = await import("../dist/defer.js");
+  const dir = tmp();
+  try {
+    addDefer(dir, "실수로 철회");
+    withdrawDefer(dir, "1");
+    const changed = reopen2(dir, "실수로 철회");
+    assert.equal(changed.length, 1);
+    assert.equal(loadDefers(dir)[0].status, "open");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("addDefer: withdrawn 동일 텍스트 재등록 허용(resolved와 동일 — 종결 후 정당 재발)", async () => {
+  const { withdrawDefer } = await import("../dist/defer.js");
+  const dir = tmp();
+  try {
+    addDefer(dir, "케이스 X");
+    withdrawDefer(dir, "1");
+    const r = addDefer(dir, "케이스 X");
+    assert.equal(r.added, true, "철회된 항목은 dup 차단 대상 아님");
+    assert.equal(loadDefers(dir).length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildStopReminder/buildSessionStartHint: withdrawn은 미해결 집계·리스트에서 제외", async () => {
+  const { isClosedStatus } = await import("../dist/defer.js");
+  assert.equal(isClosedStatus("resolved"), true);
+  assert.equal(isClosedStatus("withdrawn"), true);
+  assert.equal(isClosedStatus("open"), false);
+  assert.equal(isClosedStatus("in_progress"), false);
+  const all = [
+    { item: "미착수 A", at: "", status: "open" },
+    { item: "철회 B", at: "", status: "withdrawn" },
+    { item: "완료 C", at: "", status: "resolved" },
+  ];
+  const stop = buildStopReminder(all);
+  assert.match(stop, /미해결 defer 1건/);
+  assert.ok(!stop.includes("철회 B"), "withdrawn은 리마인드 리스트 미표시");
+  const hint = buildSessionStartHint(all);
+  assert.match(hint, /미해결 defer 1건/);
+  assert.ok(!hint.includes("철회 B"));
+});
