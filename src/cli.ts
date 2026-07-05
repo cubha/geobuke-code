@@ -32,6 +32,7 @@ import type { ReplayOutcome } from "./golden.js";
 import type { VerdictKind } from "./types.js";
 import { selectedTransport } from "./judge.js";
 import { runVerify } from "./verify.js";
+import { scaffoldVerify } from "./scaffold.js";
 import type { CaseVerdict } from "./types.js";
 import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER, assessRepoHealth } from "./install.js";
 import { readProjectSettings } from "./notice.js";
@@ -410,7 +411,23 @@ function verifySymbol(c: CaseVerdict): string {
  * failed·unverifiable 케이스는 defer 후보로 *제안만* 한다 — 자동 등록·pending-review 재사용 안 함
  * (자동 defer는 누적병 재발+"defer=사람 선언" 원칙 위반 → 사람이 분류).
  */
-async function cmdVerify(): Promise<void> {
+/**
+ * gbc verify --init — 러너 감지→JUnit 배선 스캐폴딩(0.6.0 ST-B+C). 기록은 .gbc/ 하위 템플릿만,
+ * 사용자 파일(package.json 등)은 수정하지 않는다. 실행도 하지 않는다(안내 출력만 — RCE 불변식 보존).
+ */
+function cmdVerifyInit(): void {
+  const cwd = process.cwd();
+  const plan = scaffoldVerify(cwd);
+  console.log(`🐢 verify 배선 스캐폴딩 — 감지 러너: ${plan.runner}`);
+  for (const f of plan.files) console.log(`  📄 생성: ${f.rel}`);
+  for (const line of plan.instructions) console.log(`  ${line}`);
+  console.log(
+    `  이후: 러너를 위 배선으로 실행해 결과를 만들고, spec 케이스에 '::test <테스트명>' 바인딩 후 'gbc verify'.`,
+  );
+}
+
+async function cmdVerify(args: string[] = []): Promise<void> {
+  if (args[0] === "--init") return cmdVerifyInit();
   const cwd = process.cwd();
   const report = await runVerify(cwd);
   logCli(cwd, "verify", curHash(cwd));
@@ -867,6 +884,7 @@ function usage(): void {
   gbc done                            작업단위 명시 종료(명세 아카이브→비움 + 게이트 리셋)
   gbc verify                          사후 결과검증(verified>reviewed>unverifiable) — 케이스↔증거 대조
                                       (바인딩: '<케이스> ::test <테스트명>' / '::file <경로>')
+  gbc verify --init                   러너 감지→JUnit 리포터 배선 스캐폴딩(러너 없으면 node:test 제로설치 템플릿)
   gbc gate reset                      작업단위 게이트만 리셋(명세 보존·같은 단위 재게이트)
   gbc gate review                     block이 도출한 누락 케이스 체크리스트 보기
   gbc gate review --spec <ref> --defer <ref>
@@ -911,7 +929,7 @@ async function main(): Promise<void> {
     case "done":
       return cmdDone();
     case "verify":
-      return cmdVerify();
+      return cmdVerify(rest);
     case "metrics":
       return cmdMetrics(rest);
     case "repos":
