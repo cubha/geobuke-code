@@ -2052,6 +2052,309 @@ test("runVerify: 케이스 없음 → 빈 리포트", async () => {
   }
 });
 
+// ===== 0.6.0 ST-A: provenance 스탬프 (verified 신선도 — stale→unverifiable 강등) =====
+
+test("lastAppliedEditAt: 적용된 편집(pass/cached/failopen) 중 최신 시각, block·doc-skip·비gate 제외", async () => {
+  const { lastAppliedEditAt } = await import("../dist/metrics.js");
+  assert.equal(typeof lastAppliedEditAt, "function", "lastAppliedEditAt 미구현");
+  const at = lastAppliedEditAt([
+    { at: "2026-01-01T00:00:00.000Z", session: "s", specHash: "h", kind: "gate", decision: "pass" },
+    { at: "2026-01-03T00:00:00.000Z", session: "s", specHash: "h", kind: "gate", decision: "cached" },
+    { at: "2026-01-05T00:00:00.000Z", session: "s", specHash: "h", kind: "gate", decision: "block" }, // 편집 거부됨
+    { at: "2026-01-06T00:00:00.000Z", session: "s", specHash: "", kind: "gate", decision: "doc-skip" }, // 문서편집=테스트 무관
+    { at: "2026-01-07T00:00:00.000Z", session: "s", specHash: "h", kind: "verify" }, // 비gate
+  ]);
+  assert.equal(at, "2026-01-03T00:00:00.000Z");
+});
+
+test("lastAppliedEditAt: 적용 편집 이벤트 없음 → null", async () => {
+  const { lastAppliedEditAt } = await import("../dist/metrics.js");
+  assert.equal(lastAppliedEditAt([]), null);
+  assert.equal(
+    lastAppliedEditAt([{ at: "T", session: "s", specHash: "h", kind: "gate", decision: "block" }]),
+    null,
+  );
+});
+
+test("runVerify: stale(결과 mtime < 마지막 편집) → verified를 unverifiable로 강등(pass 복사 금지)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "빈 자격증명 거부 ::test t_empty");
+    writeJunit(dir, `<testsuite><testcase name="t_empty"/></testsuite>`);
+    // 방금 쓴 결과파일 mtime보다 미래의 편집 시각 주입 → stale
+    const r = await runVerify(dir, { lastEditAt: "9999-01-01T00:00:00.000Z" });
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].status, "none");
+    assert.equal(r.cases[0].source, "junit:stale");
+    assert.equal(r.provenance.stale, true);
+    assert.ok(r.provenance.junitMtime, "provenance.junitMtime 있어야 함");
+    assert.equal(r.provenance.lastEditAt, "9999-01-01T00:00:00.000Z");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: stale은 fail도 대칭 강등(거짓경보 차단)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "비번 길이 ::test t_pw");
+    writeJunit(dir, `<testsuite><testcase name="t_pw"><failure/></testcase></testsuite>`);
+    const r = await runVerify(dir, { lastEditAt: "9999-01-01T00:00:00.000Z" });
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].source, "junit:stale");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: fresh(결과 mtime ≥ 마지막 편집) → verified 유지 + provenance 스탬프", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "빈 자격증명 거부 ::test t_empty");
+    writeJunit(dir, `<testsuite><testcase name="t_empty"/></testsuite>`);
+    const r = await runVerify(dir, { lastEditAt: "2000-01-01T00:00:00.000Z" });
+    assert.equal(r.cases[0].level, "verified");
+    assert.equal(r.cases[0].status, "pass");
+    assert.equal(r.provenance.stale, false);
+    assert.equal(r.provenance.unknown, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: 편집신호 부재(lastEditAt=null) → verified 유지 + unknown 정직 고지(강등 안 함)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "케이스 ::test t_x");
+    writeJunit(dir, `<testsuite><testcase name="t_x"/></testsuite>`);
+    const r = await runVerify(dir, { lastEditAt: null });
+    assert.equal(r.cases[0].level, "verified", "신호 부재를 stale로 뭉개면 안 됨");
+    assert.equal(r.provenance.stale, false);
+    assert.equal(r.provenance.unknown, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: 결과파일 자체가 없으면 신선도 판정 대상 아님(stale=false·unknown=false)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "케이스 ::test t_x");
+    const r = await runVerify(dir, { lastEditAt: "9999-01-01T00:00:00.000Z" });
+    assert.equal(r.cases[0].source, "junit:none"); // 기존 경로 유지
+    assert.equal(r.provenance.stale, false);
+    assert.equal(r.provenance.unknown, false);
+    assert.equal(r.provenance.junitMtime, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: stale이어도 ::file(reviewed) 경로는 영향 없음(JUnit 증거에만 적용)", async () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "impl.ts"), "export const ok = 1;", "utf8");
+    addSpecCase(dir, "독해 케이스 ::file impl.ts");
+    writeJunit(dir, `<testsuite><testcase name="t_other"/></testsuite>`);
+    const r = await runVerify(dir, { lastEditAt: "9999-01-01T00:00:00.000Z", reviewer: PASS_REVIEWER });
+    assert.equal(r.cases[0].level, "reviewed");
+    assert.equal(r.cases[0].status, "pass");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===== 0.6.0 ST-D: gbc verify --run (src/run.ts·repos.ts 홈 pin) — 순수부 test-after =====
+
+test("resolveRunCommand: CLI 인자 > 홈 pin 우선순위, 다중 토큰 join", async () => {
+  const { resolveRunCommand } = await import("../dist/run.js");
+  assert.deepEqual(resolveRunCommand(["npm test"], "pinned"), { cmd: "npm test", save: false, source: "arg" });
+  assert.deepEqual(resolveRunCommand(["npm", "test"], null), { cmd: "npm test", save: false, source: "arg" });
+  assert.deepEqual(resolveRunCommand([], "pinned"), { cmd: "pinned", save: false, source: "pin" });
+});
+
+test("resolveRunCommand: 인자·pin 모두 없음 → cmd null(실행 안 함), --save 단독은 error", async () => {
+  const { resolveRunCommand } = await import("../dist/run.js");
+  const none = resolveRunCommand([], null);
+  assert.equal(none.cmd, null);
+  assert.equal(none.source, "none");
+  const bad = resolveRunCommand(["--save"], "pinned");
+  assert.equal(bad.cmd, null, "--save는 pin 폴백 금지(명시 인자 필수)");
+  assert.ok(bad.error);
+});
+
+test("resolveRunCommand: --save + 명령 → save=true (위치 무관)", async () => {
+  const { resolveRunCommand } = await import("../dist/run.js");
+  assert.deepEqual(resolveRunCommand(["--save", "npm test"], null), { cmd: "npm test", save: true, source: "arg" });
+  assert.deepEqual(resolveRunCommand(["npm test", "--save"], null), { cmd: "npm test", save: true, source: "arg" });
+});
+
+test("verify-run 홈 pin: set→get 왕복 + repo별 격리 (HOME 오버라이드 — 실홈 오염 금지)", async () => {
+  const { getVerifyRunPin, setVerifyRunPin } = await import("../dist/repos.js");
+  const fakeHome = tmp();
+  const prevHome = process.env.HOME;
+  try {
+    process.env.HOME = fakeHome;
+    assert.equal(getVerifyRunPin("/repo/a"), null, "미저장 → null");
+    setVerifyRunPin("/repo/a", "npm test");
+    assert.equal(getVerifyRunPin("/repo/a"), "npm test");
+    assert.equal(getVerifyRunPin("/repo/b"), null, "repo별 격리");
+    setVerifyRunPin("/repo/a", "vitest run");
+    assert.equal(getVerifyRunPin("/repo/a"), "vitest run", "덮어쓰기");
+    assert.ok(existsSync(join(fakeHome, ".gbc", "verify-run.json")), "홈(.gbc) 저장 — repo 내부 아님");
+  } finally {
+    process.env.HOME = prevHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test("verify-run 홈 pin: 비-문자열/빈 값 방어 필터(W4 미러)", async () => {
+  const { getVerifyRunPin } = await import("../dist/repos.js");
+  const fakeHome = tmp();
+  const prevHome = process.env.HOME;
+  try {
+    process.env.HOME = fakeHome;
+    mkdirSync(join(fakeHome, ".gbc"), { recursive: true });
+    writeFileSync(
+      join(fakeHome, ".gbc", "verify-run.json"),
+      JSON.stringify({ "/repo/x": 42, "/repo/y": "", "/repo/z": ["rm"] }),
+      "utf8",
+    );
+    assert.equal(getVerifyRunPin("/repo/x"), null);
+    assert.equal(getVerifyRunPin("/repo/y"), null);
+    assert.equal(getVerifyRunPin("/repo/z"), null);
+  } finally {
+    process.env.HOME = prevHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+// ===== 0.6.0 ST-B+C: detect→scaffold + node:test 제로설치 (src/scaffold.ts) =====
+
+async function loadScaffold() {
+  // 구현 전엔 모듈 부재 → 명확한 "구현 누락" RED
+  try {
+    return await import("../dist/scaffold.js");
+  } catch {
+    return {};
+  }
+}
+
+test("detectRunner: vitest > jest > mocha 우선순위(dev/deps 합산)", async () => {
+  const { detectRunner } = await loadScaffold();
+  assert.equal(typeof detectRunner, "function", "detectRunner 미구현");
+  assert.equal(detectRunner({ devDependencies: { vitest: "^2" } }), "vitest");
+  assert.equal(detectRunner({ dependencies: { jest: "^29" } }), "jest");
+  assert.equal(detectRunner({ devDependencies: { mocha: "^10" } }), "mocha");
+  assert.equal(detectRunner({ devDependencies: { vitest: "^2", jest: "^29" } }), "vitest");
+});
+
+test("detectRunner: scripts에 node --test → node-test, 아무것도 없으면 none, package.json 부재(null) → none", async () => {
+  const { detectRunner } = await loadScaffold();
+  assert.equal(detectRunner({ scripts: { test: "node --test 'test/**/*.test.mjs'" } }), "node-test");
+  assert.equal(detectRunner({ scripts: { test: "echo none" } }), "none");
+  assert.equal(detectRunner({}), "none");
+  assert.equal(detectRunner(null), "none");
+});
+
+test("buildScaffoldPlan: vitest — 파일 생성 없이 내장 junit 리포터 배선 안내(.gbc/verify-results.xml 경로 포함)", async () => {
+  const { buildScaffoldPlan } = await loadScaffold();
+  assert.equal(typeof buildScaffoldPlan, "function", "buildScaffoldPlan 미구현");
+  const plan = buildScaffoldPlan("vitest");
+  assert.equal(plan.files.length, 0);
+  const joined = plan.instructions.join("\n");
+  assert.ok(joined.includes("--reporter=junit"), "vitest junit 리포터 안내 필요");
+  assert.ok(joined.includes(".gbc/verify-results.xml"), "표준 결과 경로 안내 필요");
+});
+
+test("buildScaffoldPlan: jest — junit 내장 없음을 정직 안내(jest-junit 설치 필요)", async () => {
+  const { buildScaffoldPlan } = await loadScaffold();
+  const joined = buildScaffoldPlan("jest").instructions.join("\n");
+  assert.ok(joined.includes("jest-junit"), "jest-junit 필요 안내");
+});
+
+test("buildScaffoldPlan: node-test/none — 제로설치 리포터 템플릿 파일(.gbc/junit-reporter.mjs) 생성 계획", async () => {
+  const { buildScaffoldPlan } = await loadScaffold();
+  for (const r of ["node-test", "none"]) {
+    const plan = buildScaffoldPlan(r);
+    assert.equal(plan.files.length, 1, `${r}: 리포터 템플릿 1개`);
+    assert.equal(plan.files[0].rel, join(".gbc", "junit-reporter.mjs"));
+    assert.ok(plan.files[0].content.includes("test:fail"), "리포터가 fail 이벤트 처리해야");
+    const joined = plan.instructions.join("\n");
+    assert.ok(joined.includes("--test-reporter"), "node --test 배선 명령 안내");
+  }
+});
+
+test("scaffoldVerify: cwd package.json 판독→계획 파일을 .gbc/ 하위에만 기록", async () => {
+  const { scaffoldVerify } = await loadScaffold();
+  assert.equal(typeof scaffoldVerify, "function", "scaffoldVerify 미구현");
+  const dir = tmp();
+  try {
+    // 러너 없음 → none → 리포터 템플릿 기록
+    const plan = scaffoldVerify(dir);
+    assert.equal(plan.runner, "none");
+    assert.ok(existsSync(join(dir, ".gbc", "junit-reporter.mjs")), "리포터 템플릿 기록돼야");
+    // vitest 프로젝트 → 파일 기록 없음
+    const dir2 = tmp();
+    try {
+      writeFileSync(join(dir2, "package.json"), JSON.stringify({ devDependencies: { vitest: "^2" } }), "utf8");
+      const plan2 = scaffoldVerify(dir2);
+      assert.equal(plan2.runner, "vitest");
+      assert.ok(!existsSync(join(dir2, ".gbc", "junit-reporter.mjs")), "vitest엔 템플릿 불필요");
+    } finally {
+      rmSync(dir2, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("JUNIT_REPORTER_TEMPLATE: 실제 node:test 이벤트 스트림을 먹여 parseJUnit 왕복 검증(제로설치 계약)", async () => {
+  const { JUNIT_REPORTER_TEMPLATE } = await loadScaffold();
+  assert.ok(typeof JUNIT_REPORTER_TEMPLATE === "string" && JUNIT_REPORTER_TEMPLATE.length > 0, "템플릿 미구현");
+  const dir = tmp();
+  try {
+    const repPath = join(dir, "junit-reporter.mjs");
+    writeFileSync(repPath, JUNIT_REPORTER_TEMPLATE, "utf8");
+    const { default: reporter } = await import(`file://${repPath}`);
+    async function* fakeSource() {
+      yield { type: "test:pass", data: { name: "t_ok", details: { duration_ms: 1 } } };
+      yield { type: "test:fail", data: { name: "t_bad", details: { error: { message: 'x < 1 & "y"' } } } };
+      yield { type: "test:pass", data: { name: "t_skip", skip: true } };
+      yield { type: "test:pass", data: { name: "suite_x", details: { type: "suite" } } }; // describe 블록 제외
+      yield { type: "test:diagnostic", data: { message: "noise" } };
+    }
+    let xml = "";
+    for await (const chunk of reporter(fakeSource())) xml += chunk;
+    const m = parseJUnit(xml);
+    assert.equal(m.get("t_ok"), "pass");
+    assert.equal(m.get("t_bad"), "fail");
+    assert.equal(m.get("t_skip"), "skipped");
+    assert.equal(m.has("suite_x"), false, "suite 항목은 testcase 아님");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: lastEditAt 미주입 시 .gbc/events.jsonl에서 기본 판독", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "케이스 ::test t_e");
+    writeJunit(dir, `<testsuite><testcase name="t_e"/></testsuite>`);
+    // 결과파일보다 미래의 적용 편집 이벤트를 events.jsonl에 기록 → stale로 판독돼야 함
+    writeFileSync(
+      join(dir, ".gbc", "events.jsonl"),
+      JSON.stringify({ at: "9999-01-01T00:00:00.000Z", session: "s", specHash: "h", kind: "gate", decision: "pass" }) + "\n",
+      "utf8",
+    );
+    const r = await runVerify(dir);
+    assert.equal(r.provenance.stale, true);
+    assert.equal(r.cases[0].source, "junit:stale");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── buildSessionStartPayload: SessionStart 출력 청중분리(Option X) ──────────
 test("buildSessionStartPayload: 힌트+안내 둘 다 → additionalContext + systemMessage 분리", () => {
   const out = JSON.parse(buildSessionStartPayload(["🐢 defer 2건", "🌐 타 repo"], "🐢 신버전 0.5.0"));

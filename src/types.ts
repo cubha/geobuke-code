@@ -202,11 +202,33 @@ export interface CaseVerdict {
   source: string;
 }
 
+/**
+ * verified 증거의 신선도 스탬프(0.6.0) — JUnit 결과파일이 마지막 코드 편집 이후 것인지.
+ * stale이면 verified를 unverifiable로 강등한다(옛 pass=거짓확신·옛 fail=거짓경보 대칭 차단,
+ * "정직한 바닥" fail-open 철학 미러). 편집 신호(events.jsonl) 부재는 stale로 뭉개지 않고
+ * unknown으로 정직 고지한다 — hook 미설치 standalone CLI 사용자 전원 오탐 방지.
+ * ⚠️ "마지막 편집"은 gate pass/cached/failopen만 집계한다 — ask-모드에서 사용자가 승인한 block
+ * 편집은 적용됐어도 미포함(PreToolUse 시점 로그라 승인 결과를 구조적으로 알 수 없음, scope-critic ③).
+ * 따라서 fresh는 절대 보증이 아니다. PostToolUse 기반 ask-승인 캡처는 별도 future work.
+ */
+export interface VerifyProvenance {
+  /** JUnit 결과파일 mtime (ISO) — 파일 부재 시 undefined */
+  junitMtime?: string;
+  /** 마지막 적용된 코드 편집 시각 (ISO, events.jsonl gate pass/cached/failopen) — 신호 부재 시 undefined */
+  lastEditAt?: string;
+  /** 결과파일이 마지막 편집보다 오래됨 → verified 강등 발동 */
+  stale: boolean;
+  /** 결과파일은 있으나 편집 신호가 없어 신선도 미평가(강등 안 함) — 정직 고지 마커 */
+  unknown: boolean;
+}
+
 /** 사후검증 리포트 (.gbc/verify-results.xml 등 증거를 읽어 케이스별 판정한 집계) */
 export interface VerifyReport {
   cases: CaseVerdict[];
   /** 생성 시각 (ISO) */
   at: string;
+  /** verified 증거 신선도(0.6.0) — stale 강등·unknown 고지 근거 */
+  provenance: VerifyProvenance;
 }
 
 /** 작업단위 게이트 상태 (.gbc/state.json) */

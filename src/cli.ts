@@ -24,7 +24,9 @@ import {
 } from "./spec.js";
 import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer, startDefer, withdrawDefer, reopenDefer, isClosedStatus } from "./defer.js";
-import { loadRepos, addRepo, removeRepo } from "./repos.js";
+import { loadRepos, addRepo, removeRepo, getVerifyRunPin, setVerifyRunPin } from "./repos.js";
+import { resolveRunCommand, runRunnerCommand } from "./run.js";
+import { statVerifyResults } from "./junit.js";
 import { readPendingReview, clearPendingReview, resolveRefs } from "./review.js";
 import { isStopHintMuted, setStopHintMuted, isGoldenCapture, setGoldenCapture } from "./config.js";
 import { loadGolden, clearGolden, diffVerdict, summarizeReplay } from "./golden.js";
@@ -32,6 +34,7 @@ import type { ReplayOutcome } from "./golden.js";
 import type { VerdictKind } from "./types.js";
 import { selectedTransport } from "./judge.js";
 import { runVerify } from "./verify.js";
+import { scaffoldVerify } from "./scaffold.js";
 import type { CaseVerdict } from "./types.js";
 import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER, assessRepoHealth } from "./install.js";
 import { readProjectSettings } from "./notice.js";
@@ -410,9 +413,78 @@ function verifySymbol(c: CaseVerdict): string {
  * failed·unverifiable 케이스는 defer 후보로 *제안만* 한다 — 자동 등록·pending-review 재사용 안 함
  * (자동 defer는 누적병 재발+"defer=사람 선언" 원칙 위반 → 사람이 분류).
  */
-async function cmdVerify(): Promise<void> {
+/**
+ * gbc verify --init — 러너 감지→JUnit 배선 스캐폴딩(0.6.0 ST-B+C). 기록은 .gbc/ 하위 템플릿만,
+ * 사용자 파일(package.json 등)은 수정하지 않는다. 실행도 하지 않는다(안내 출력만 — RCE 불변식 보존).
+ */
+function cmdVerifyInit(): void {
   const cwd = process.cwd();
-  const report = await runVerify(cwd);
+  const plan = scaffoldVerify(cwd);
+  console.log(`🐢 verify 배선 스캐폴딩 — 감지 러너: ${plan.runner}`);
+  for (const f of plan.files) console.log(`  📄 생성: ${f.rel}`);
+  for (const line of plan.instructions) console.log(`  ${line}`);
+  console.log(
+    `  이후: 러너를 위 배선으로 실행해 결과를 만들고, spec 케이스에 '::test <테스트명>' 바인딩 후 'gbc verify'.`,
+  );
+}
+
+/**
+ * gbc verify --run (0.6.0 ST-D) — 신뢰 소스(CLI 인자·홈 pin) 고정 명령을 실행한 뒤 즉시 판독.
+ * spec-유래 명령은 구조적으로 배제(resolveRunCommand가 spec을 입력으로 받지 않음). 상세·위협모델:
+ * docs/design/DESIGN-verify-run-2026-07-05.md.
+ */
+async function cmdVerifyRun(rest: string[]): Promise<void> {
+  const cwd = process.cwd();
+  // 재귀 가드(advisor #6b) — pin 명령이 --run을 재포함하면 10분 타이머 중첩 폭주.
+  if (process.env.GBC_RUN_ACTIVE === "1") {
+    console.error("🐢 --run 재귀 호출 거부 — pin 명령 안에서 'gbc verify --run'을 다시 부를 수 없습니다.");
+    process.exitCode = 1;
+    return;
+  }
+  const r = resolveRunCommand(rest, getVerifyRunPin(cwd));
+  if (r.error) {
+    console.error(`🐢 ${r.error}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!r.cmd) {
+    console.error(
+      "🐢 실행할 러너 명령이 없습니다 — 신뢰 소스에서만 받습니다(spec 유래 금지):\n" +
+        '   1회성: gbc verify --run "npm test"\n' +
+        '   고정(pin): gbc verify --run --save "npm test"  (이후 인자 없는 --run이 이 명령을 실행)',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (r.save) {
+    setVerifyRunPin(cwd, r.cmd);
+    console.log(`🐢 홈 pin 저장(~/.gbc/verify-run.json) — 이후 'gbc verify --run'(인자 없음)이 이 명령을 그대로 실행합니다.`);
+  }
+  // 가시성=공짜 방어(advisor #2) — 무엇을 어떤 소스로 실행하는지 항상 에코.
+  console.log(`🐢 실행: ${r.cmd} (소스: ${r.source === "arg" ? "CLI 인자" : "홈 pin"})`);
+  const startAt = new Date().toISOString();
+  const out = await runRunnerCommand(r.cmd, cwd);
+  if (!out.ok) console.log(`⚠️ 러너 실행 이상: ${out.reason} — 기존 결과로 판독하되 미갱신 결과는 강등됩니다.`);
+  else if (out.reason) console.log(`ⓘ ${out.reason}`);
+  // run-start mtime 검사(advisor #3) — 결과파일이 이 run에서 갱신되지 않았으면 배선 안내.
+  const mtime = statVerifyResults(cwd);
+  if (!mtime || mtime < startAt) {
+    console.log("⚠️ 러너가 결과파일(.gbc/verify-results.xml)을 갱신하지 않음 — 리포터 배선 확인: gbc verify --init");
+  }
+  // provenance 기준을 run-start로 주입 — 미갱신 옛 결과는 ST-A 메커니즘이 unverifiable로 강등
+  // (events.jsonl 의존 없음 → hook 미설치 standalone에서도 성립).
+  return cmdVerifyReport(cwd, startAt);
+}
+
+async function cmdVerify(args: string[] = []): Promise<void> {
+  if (args[0] === "--init") return cmdVerifyInit();
+  if (args[0] === "--run") return cmdVerifyRun(args.slice(1));
+  return cmdVerifyReport(process.cwd());
+}
+
+/** verify 읽기·판독 경로(공용) — lastEditAt 주입 시 provenance 기준을 대체(--run의 run-start 검사). */
+async function cmdVerifyReport(cwd: string, lastEditAt?: string): Promise<void> {
+  const report = await runVerify(cwd, lastEditAt === undefined ? {} : { lastEditAt });
   logCli(cwd, "verify", curHash(cwd));
 
   if (report.cases.length === 0) {
@@ -426,9 +498,17 @@ async function cmdVerify(): Promise<void> {
   const by = (l: CaseVerdict["level"]) => report.cases.filter((c) => c.level === l).length;
   console.log(`🐢 사후 결과검증 — ${cwd}
   케이스 ${report.cases.length} · ✅verified ${by("verified")} · 🟡reviewed ${by("reviewed")} · ⚪unverifiable ${by("unverifiable")}`);
-  if (by("verified") > 0) {
-    // verified는 디스크의 결과파일을 그대로 읽는다(신선도 검사 없음) — 옛 결과에 대한 거짓 통과 방지.
-    console.log("  ⓘ verified는 현재 .gbc/verify-results.xml 기준 — 코드 변경 후 러너를 재실행하고 verify하세요.");
+  // provenance 신선도(0.6.0) — stale이면 이미 runVerify가 unverifiable로 강등했다(경고는 원인 고지).
+  const p = report.provenance;
+  if (p.stale) {
+    console.log(
+      `  ⚠️ 결과파일이 마지막 편집보다 오래됨(결과 ${p.junitMtime} < 편집 ${p.lastEditAt}) — verified를 unverifiable로 강등. 러너 재실행 후 다시 verify하세요.`,
+    );
+  } else if (by("verified") > 0 && p.unknown) {
+    console.log("  ⓘ verified 신선도 미평가(편집 이벤트 없음) — 코드 변경 후엔 러너를 재실행하고 verify하세요.");
+  } else if (by("verified") > 0) {
+    // "마지막 편집"=gate pass/cached/failopen 집계 — ask-승인된 block 편집은 미포함(절대 보증 아님).
+    console.log(`  ⓘ verified 신선 — 결과(${p.junitMtime}) ≥ 마지막 관측 편집(${p.lastEditAt}). (게이트 관측 기준 — 절대 보증 아님)`);
   }
   console.log("");
   for (const c of report.cases) {
@@ -859,6 +939,9 @@ function usage(): void {
   gbc done                            작업단위 명시 종료(명세 아카이브→비움 + 게이트 리셋)
   gbc verify                          사후 결과검증(verified>reviewed>unverifiable) — 케이스↔증거 대조
                                       (바인딩: '<케이스> ::test <테스트명>' / '::file <경로>')
+  gbc verify --init                   러너 감지→JUnit 리포터 배선 스캐폴딩(러너 없으면 node:test 제로설치 템플릿)
+  gbc verify --run ["<명령>"] [--save] 고정 러너 명령 실행 후 즉시 판독 — 신뢰 소스(인자·홈 pin)만,
+                                      spec 유래 명령 실행 금지(RCE). --save=홈 pin(~/.gbc/verify-run.json) 저장
   gbc gate reset                      작업단위 게이트만 리셋(명세 보존·같은 단위 재게이트)
   gbc gate review                     block이 도출한 누락 케이스 체크리스트 보기
   gbc gate review --spec <ref> --defer <ref>
@@ -903,7 +986,7 @@ async function main(): Promise<void> {
     case "done":
       return cmdDone();
     case "verify":
-      return cmdVerify();
+      return cmdVerify(rest);
     case "metrics":
       return cmdMetrics(rest);
     case "repos":
