@@ -2052,6 +2052,137 @@ test("runVerify: 케이스 없음 → 빈 리포트", async () => {
   }
 });
 
+// ===== 0.6.0 ST-A: provenance 스탬프 (verified 신선도 — stale→unverifiable 강등) =====
+
+test("lastAppliedEditAt: 적용된 편집(pass/cached/failopen) 중 최신 시각, block·doc-skip·비gate 제외", async () => {
+  const { lastAppliedEditAt } = await import("../dist/metrics.js");
+  assert.equal(typeof lastAppliedEditAt, "function", "lastAppliedEditAt 미구현");
+  const at = lastAppliedEditAt([
+    { at: "2026-01-01T00:00:00.000Z", session: "s", specHash: "h", kind: "gate", decision: "pass" },
+    { at: "2026-01-03T00:00:00.000Z", session: "s", specHash: "h", kind: "gate", decision: "cached" },
+    { at: "2026-01-05T00:00:00.000Z", session: "s", specHash: "h", kind: "gate", decision: "block" }, // 편집 거부됨
+    { at: "2026-01-06T00:00:00.000Z", session: "s", specHash: "", kind: "gate", decision: "doc-skip" }, // 문서편집=테스트 무관
+    { at: "2026-01-07T00:00:00.000Z", session: "s", specHash: "h", kind: "verify" }, // 비gate
+  ]);
+  assert.equal(at, "2026-01-03T00:00:00.000Z");
+});
+
+test("lastAppliedEditAt: 적용 편집 이벤트 없음 → null", async () => {
+  const { lastAppliedEditAt } = await import("../dist/metrics.js");
+  assert.equal(lastAppliedEditAt([]), null);
+  assert.equal(
+    lastAppliedEditAt([{ at: "T", session: "s", specHash: "h", kind: "gate", decision: "block" }]),
+    null,
+  );
+});
+
+test("runVerify: stale(결과 mtime < 마지막 편집) → verified를 unverifiable로 강등(pass 복사 금지)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "빈 자격증명 거부 ::test t_empty");
+    writeJunit(dir, `<testsuite><testcase name="t_empty"/></testsuite>`);
+    // 방금 쓴 결과파일 mtime보다 미래의 편집 시각 주입 → stale
+    const r = await runVerify(dir, { lastEditAt: "9999-01-01T00:00:00.000Z" });
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].status, "none");
+    assert.equal(r.cases[0].source, "junit:stale");
+    assert.equal(r.provenance.stale, true);
+    assert.ok(r.provenance.junitMtime, "provenance.junitMtime 있어야 함");
+    assert.equal(r.provenance.lastEditAt, "9999-01-01T00:00:00.000Z");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: stale은 fail도 대칭 강등(거짓경보 차단)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "비번 길이 ::test t_pw");
+    writeJunit(dir, `<testsuite><testcase name="t_pw"><failure/></testcase></testsuite>`);
+    const r = await runVerify(dir, { lastEditAt: "9999-01-01T00:00:00.000Z" });
+    assert.equal(r.cases[0].level, "unverifiable");
+    assert.equal(r.cases[0].source, "junit:stale");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: fresh(결과 mtime ≥ 마지막 편집) → verified 유지 + provenance 스탬프", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "빈 자격증명 거부 ::test t_empty");
+    writeJunit(dir, `<testsuite><testcase name="t_empty"/></testsuite>`);
+    const r = await runVerify(dir, { lastEditAt: "2000-01-01T00:00:00.000Z" });
+    assert.equal(r.cases[0].level, "verified");
+    assert.equal(r.cases[0].status, "pass");
+    assert.equal(r.provenance.stale, false);
+    assert.equal(r.provenance.unknown, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: 편집신호 부재(lastEditAt=null) → verified 유지 + unknown 정직 고지(강등 안 함)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "케이스 ::test t_x");
+    writeJunit(dir, `<testsuite><testcase name="t_x"/></testsuite>`);
+    const r = await runVerify(dir, { lastEditAt: null });
+    assert.equal(r.cases[0].level, "verified", "신호 부재를 stale로 뭉개면 안 됨");
+    assert.equal(r.provenance.stale, false);
+    assert.equal(r.provenance.unknown, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: 결과파일 자체가 없으면 신선도 판정 대상 아님(stale=false·unknown=false)", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "케이스 ::test t_x");
+    const r = await runVerify(dir, { lastEditAt: "9999-01-01T00:00:00.000Z" });
+    assert.equal(r.cases[0].source, "junit:none"); // 기존 경로 유지
+    assert.equal(r.provenance.stale, false);
+    assert.equal(r.provenance.unknown, false);
+    assert.equal(r.provenance.junitMtime, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: stale이어도 ::file(reviewed) 경로는 영향 없음(JUnit 증거에만 적용)", async () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "impl.ts"), "export const ok = 1;", "utf8");
+    addSpecCase(dir, "독해 케이스 ::file impl.ts");
+    writeJunit(dir, `<testsuite><testcase name="t_other"/></testsuite>`);
+    const r = await runVerify(dir, { lastEditAt: "9999-01-01T00:00:00.000Z", reviewer: PASS_REVIEWER });
+    assert.equal(r.cases[0].level, "reviewed");
+    assert.equal(r.cases[0].status, "pass");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: lastEditAt 미주입 시 .gbc/events.jsonl에서 기본 판독", async () => {
+  const dir = tmp();
+  try {
+    addSpecCase(dir, "케이스 ::test t_e");
+    writeJunit(dir, `<testsuite><testcase name="t_e"/></testsuite>`);
+    // 결과파일보다 미래의 적용 편집 이벤트를 events.jsonl에 기록 → stale로 판독돼야 함
+    writeFileSync(
+      join(dir, ".gbc", "events.jsonl"),
+      JSON.stringify({ at: "9999-01-01T00:00:00.000Z", session: "s", specHash: "h", kind: "gate", decision: "pass" }) + "\n",
+      "utf8",
+    );
+    const r = await runVerify(dir);
+    assert.equal(r.provenance.stale, true);
+    assert.equal(r.cases[0].source, "junit:stale");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── buildSessionStartPayload: SessionStart 출력 청중분리(Option X) ──────────
 test("buildSessionStartPayload: 힌트+안내 둘 다 → additionalContext + systemMessage 분리", () => {
   const out = JSON.parse(buildSessionStartPayload(["🐢 defer 2건", "🌐 타 repo"], "🐢 신버전 0.5.0"));
