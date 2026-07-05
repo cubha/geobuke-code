@@ -50,18 +50,23 @@ function verifyRunPath(): string {
   return join(gbcDir(homedir()), "verify-run.json");
 }
 
+/** verify-run.json 판독 — non-object(null·배열 등) 내용은 빈 객체로 방어(크래시 방지, security-auditor Info). */
+function readVerifyRunMap(): Record<string, unknown> {
+  const raw = readJson<unknown>(verifyRunPath(), {});
+  return typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+}
+
 /** repo별 고정(pin) 러너 명령 판독 — 없으면 null. 비-문자열 방어 필터(repos.json W4 미러). */
 export function getVerifyRunPin(repoPath: string): string | null {
   const abs = resolve(repoPath);
-  const raw = readJson<Record<string, unknown>>(verifyRunPath(), {});
-  const cmd = raw[abs];
+  const cmd = readVerifyRunMap()[abs];
   return typeof cmd === "string" && cmd.trim() !== "" ? cmd : null;
 }
 
 /** repo별 러너 명령 pin 저장(덮어쓰기). */
 export function setVerifyRunPin(repoPath: string, cmd: string): void {
   const abs = resolve(repoPath);
-  const raw = readJson<Record<string, unknown>>(verifyRunPath(), {});
+  const raw = readVerifyRunMap();
   raw[abs] = cmd;
   writeJson(verifyRunPath(), raw);
 }

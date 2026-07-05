@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-05
+
+verify 실행형 확장 — 사후 결과검증의 3대 마찰(옛 결과 거짓 verified·러너 배선 진입장벽·실행↔판독 2단계) 제거. **minor 근거**: `--run`이 "gbc는 테스트를 실행하지 않는다" 불변식을 "**spec-유래 명령을 절대 실행하지 않는다**(신뢰 소스 고정 명령만 예외)"로 의도적·국소적으로 재정의. 설계·위협모델: `docs/design/DESIGN-verify-run-2026-07-05.md`(advisor 적대검증 6항목 반영).
+
+### Added
+- **provenance 신선도 스탬프** — JUnit 결과파일이 마지막 관측 편집(events.jsonl gate pass/cached/failopen)보다 오래됐으면 verified를 **unverifiable로 강등**(옛 pass=거짓확신·옛 fail=거짓경보 대칭 차단). 편집 신호 부재(hook 미설치 standalone)는 stale로 뭉개지 않고 "신선도 미평가"로 정직 고지. `VerifyReport.provenance`(junitMtime/lastEditAt/stale/unknown) + 리포트 3분기 캡션(stale 경고/미평가/신선 — "게이트 관측 기준, 절대 보증 아님": ask-승인 block 편집은 구조적 미탐지).
+- **`gbc verify --init`** — 러너 감지(vitest>jest>mocha>node:test) → JUnit 리포터를 `.gbc/verify-results.xml`로 배선하는 명령 안내. 러너 미설치면 **node:test 제로설치 리포터 템플릿**(`.gbc/junit-reporter.mjs`, 의존성 0, Node 20+) 생성. 비파괴(기록은 `.gbc/` 하위 고정 경로만·사용자 파일 무수정)·무실행(안내만). jest/mocha는 JUnit 비내장을 정직 안내(gbc가 npm install 대행 안 함). 실제 node:test 왕복(테스트 실행→XML→verify 판정) 라이브 실증.
+- **`gbc verify --run ["<명령>"] [--save]`** — 신뢰 소스 고정 러너 명령 실행 후 즉시 판독. 명령 소스는 정확히 2개: CLI 인자(1회성)·홈 pin `~/.gbc/verify-run.json`(`--save`, **repo 밖이라 PR이 심을 수 없음** — repo 내부 `.gbc/config.json`안은 `git add -f` 공급망 벡터라 설계 단계 기각). **spec-유래 명령 구조적 배제**(해석 함수가 spec을 입력으로 받지 않음). run-start mtime 검사 — 러너가 결과를 갱신하지 않으면(리포터 미배선·timeout) 옛 결과를 verified로 치지 않고 강등+배선 안내. `GBC_RUN_ACTIVE` 재귀 가드, kill-timeout `GBC_RUN_TIMEOUT_MS`(기본 10분), 실행 전 명령+소스 에코. 러너 exit≠0은 게이트하지 않음(판정은 XML 몫).
+
+### Security
+- README·gate SKILL.md에 **allowlist confused-deputy 경고** 명기 — `Bash(gbc *)` 와일드카드 allowlist 시 `--run "<임의명령>"` 인자형이 에이전트의 무프롬프트 임의 실행권이 되고, `--save`된 pin은 이후 인자 없는 `--run`이 그대로 재실행. gbc를 allowlist하려면 `--run` 인자형 제외 권고.
+- 케이스 필터 실행 요구의 합법 배출구 명문화 — 필터는 `npm test -- -t "이름"`처럼 **명령 리터럴에 직접 pin**(spec-유래 문자열은 명령행에 영원히 오르지 않음).
+
 ## [0.5.5] - 2026-07-03
 
 codebase-viz 도그푸딩 실측 결함 4건 수정 — 게이트 문서 오판정·missing 발명·안내 문구 허위·defer 종결 상태 부족. 근거: `docs/analysis/ANALYSIS-gbc-defect-rca-2026-07-03.md`.
@@ -271,6 +284,7 @@ A(100) standalone 피벗 착수 전 선행 패치(P0) — 사후대조(진짜 M1
 - `gbc init` — 프로젝트 로컬 hook 설치(머지·백업·멱등), API 키 주입 자동화 + keyless hook 업그레이드.
 - 최초 npm 발행.
 
+[0.6.0]: https://github.com/cubha/geobuke-code/releases/tag/v0.6.0
 [0.5.5]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.5
 [0.5.4]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.4
 [0.5.3]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.3
