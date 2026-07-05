@@ -2164,6 +2164,113 @@ test("runVerify: stale이어도 ::file(reviewed) 경로는 영향 없음(JUnit �
   }
 });
 
+// ===== 0.6.0 ST-B+C: detect→scaffold + node:test 제로설치 (src/scaffold.ts) =====
+
+async function loadScaffold() {
+  // 구현 전엔 모듈 부재 → 명확한 "구현 누락" RED
+  try {
+    return await import("../dist/scaffold.js");
+  } catch {
+    return {};
+  }
+}
+
+test("detectRunner: vitest > jest > mocha 우선순위(dev/deps 합산)", async () => {
+  const { detectRunner } = await loadScaffold();
+  assert.equal(typeof detectRunner, "function", "detectRunner 미구현");
+  assert.equal(detectRunner({ devDependencies: { vitest: "^2" } }), "vitest");
+  assert.equal(detectRunner({ dependencies: { jest: "^29" } }), "jest");
+  assert.equal(detectRunner({ devDependencies: { mocha: "^10" } }), "mocha");
+  assert.equal(detectRunner({ devDependencies: { vitest: "^2", jest: "^29" } }), "vitest");
+});
+
+test("detectRunner: scripts에 node --test → node-test, 아무것도 없으면 none, package.json 부재(null) → none", async () => {
+  const { detectRunner } = await loadScaffold();
+  assert.equal(detectRunner({ scripts: { test: "node --test 'test/**/*.test.mjs'" } }), "node-test");
+  assert.equal(detectRunner({ scripts: { test: "echo none" } }), "none");
+  assert.equal(detectRunner({}), "none");
+  assert.equal(detectRunner(null), "none");
+});
+
+test("buildScaffoldPlan: vitest — 파일 생성 없이 내장 junit 리포터 배선 안내(.gbc/verify-results.xml 경로 포함)", async () => {
+  const { buildScaffoldPlan } = await loadScaffold();
+  assert.equal(typeof buildScaffoldPlan, "function", "buildScaffoldPlan 미구현");
+  const plan = buildScaffoldPlan("vitest");
+  assert.equal(plan.files.length, 0);
+  const joined = plan.instructions.join("\n");
+  assert.ok(joined.includes("--reporter=junit"), "vitest junit 리포터 안내 필요");
+  assert.ok(joined.includes(".gbc/verify-results.xml"), "표준 결과 경로 안내 필요");
+});
+
+test("buildScaffoldPlan: jest — junit 내장 없음을 정직 안내(jest-junit 설치 필요)", async () => {
+  const { buildScaffoldPlan } = await loadScaffold();
+  const joined = buildScaffoldPlan("jest").instructions.join("\n");
+  assert.ok(joined.includes("jest-junit"), "jest-junit 필요 안내");
+});
+
+test("buildScaffoldPlan: node-test/none — 제로설치 리포터 템플릿 파일(.gbc/junit-reporter.mjs) 생성 계획", async () => {
+  const { buildScaffoldPlan } = await loadScaffold();
+  for (const r of ["node-test", "none"]) {
+    const plan = buildScaffoldPlan(r);
+    assert.equal(plan.files.length, 1, `${r}: 리포터 템플릿 1개`);
+    assert.equal(plan.files[0].rel, join(".gbc", "junit-reporter.mjs"));
+    assert.ok(plan.files[0].content.includes("test:fail"), "리포터가 fail 이벤트 처리해야");
+    const joined = plan.instructions.join("\n");
+    assert.ok(joined.includes("--test-reporter"), "node --test 배선 명령 안내");
+  }
+});
+
+test("scaffoldVerify: cwd package.json 판독→계획 파일을 .gbc/ 하위에만 기록", async () => {
+  const { scaffoldVerify } = await loadScaffold();
+  assert.equal(typeof scaffoldVerify, "function", "scaffoldVerify 미구현");
+  const dir = tmp();
+  try {
+    // 러너 없음 → none → 리포터 템플릿 기록
+    const plan = scaffoldVerify(dir);
+    assert.equal(plan.runner, "none");
+    assert.ok(existsSync(join(dir, ".gbc", "junit-reporter.mjs")), "리포터 템플릿 기록돼야");
+    // vitest 프로젝트 → 파일 기록 없음
+    const dir2 = tmp();
+    try {
+      writeFileSync(join(dir2, "package.json"), JSON.stringify({ devDependencies: { vitest: "^2" } }), "utf8");
+      const plan2 = scaffoldVerify(dir2);
+      assert.equal(plan2.runner, "vitest");
+      assert.ok(!existsSync(join(dir2, ".gbc", "junit-reporter.mjs")), "vitest엔 템플릿 불필요");
+    } finally {
+      rmSync(dir2, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("JUNIT_REPORTER_TEMPLATE: 실제 node:test 이벤트 스트림을 먹여 parseJUnit 왕복 검증(제로설치 계약)", async () => {
+  const { JUNIT_REPORTER_TEMPLATE } = await loadScaffold();
+  assert.ok(typeof JUNIT_REPORTER_TEMPLATE === "string" && JUNIT_REPORTER_TEMPLATE.length > 0, "템플릿 미구현");
+  const dir = tmp();
+  try {
+    const repPath = join(dir, "junit-reporter.mjs");
+    writeFileSync(repPath, JUNIT_REPORTER_TEMPLATE, "utf8");
+    const { default: reporter } = await import(`file://${repPath}`);
+    async function* fakeSource() {
+      yield { type: "test:pass", data: { name: "t_ok", details: { duration_ms: 1 } } };
+      yield { type: "test:fail", data: { name: "t_bad", details: { error: { message: 'x < 1 & "y"' } } } };
+      yield { type: "test:pass", data: { name: "t_skip", skip: true } };
+      yield { type: "test:pass", data: { name: "suite_x", details: { type: "suite" } } }; // describe 블록 제외
+      yield { type: "test:diagnostic", data: { message: "noise" } };
+    }
+    let xml = "";
+    for await (const chunk of reporter(fakeSource())) xml += chunk;
+    const m = parseJUnit(xml);
+    assert.equal(m.get("t_ok"), "pass");
+    assert.equal(m.get("t_bad"), "fail");
+    assert.equal(m.get("t_skip"), "skipped");
+    assert.equal(m.has("suite_x"), false, "suite 항목은 testcase 아님");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runVerify: lastEditAt 미주입 시 .gbc/events.jsonl에서 기본 판독", async () => {
   const dir = tmp();
   try {
