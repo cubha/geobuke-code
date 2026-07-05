@@ -32,7 +32,7 @@
 - **reviewed** — 러너가 없으면 LLM이 최종 코드를 *독해*해 경량 판정(`::file` 바인딩, 동작 증명 아님)
 - **unverifiable** — 증거가 없으면 정직하게 미검증(거짓 통과·거짓 경보 안 함)
 
-gbc는 테스트를 *실행하지 않고* 표준 결과를 *읽는다* — 러너가 어떤 것이든(jest·vitest·pytest·go…) JUnit만 내면 이식된다 ([`gbc verify`](#사후-결과검증-gbc-verify)).
+gbc는 spec-유래 명령을 *실행하지 않고* 표준 결과를 *읽는다* — 러너가 어떤 것이든(jest·vitest·pytest·go…) JUnit만 내면 이식된다. 실행이 필요하면 사용자가 직접 고정한 명령의 `--run`만(0.6.0) ([`gbc verify`](#사후-결과검증-gbc-verify)).
 
 그 위에 운영을 돕는 얇은 층이 붙는다:
 
