@@ -426,9 +426,17 @@ async function cmdVerify(): Promise<void> {
   const by = (l: CaseVerdict["level"]) => report.cases.filter((c) => c.level === l).length;
   console.log(`🐢 사후 결과검증 — ${cwd}
   케이스 ${report.cases.length} · ✅verified ${by("verified")} · 🟡reviewed ${by("reviewed")} · ⚪unverifiable ${by("unverifiable")}`);
-  if (by("verified") > 0) {
-    // verified는 디스크의 결과파일을 그대로 읽는다(신선도 검사 없음) — 옛 결과에 대한 거짓 통과 방지.
-    console.log("  ⓘ verified는 현재 .gbc/verify-results.xml 기준 — 코드 변경 후 러너를 재실행하고 verify하세요.");
+  // provenance 신선도(0.6.0) — stale이면 이미 runVerify가 unverifiable로 강등했다(경고는 원인 고지).
+  const p = report.provenance;
+  if (p.stale) {
+    console.log(
+      `  ⚠️ 결과파일이 마지막 편집보다 오래됨(결과 ${p.junitMtime} < 편집 ${p.lastEditAt}) — verified를 unverifiable로 강등. 러너 재실행 후 다시 verify하세요.`,
+    );
+  } else if (by("verified") > 0 && p.unknown) {
+    console.log("  ⓘ verified 신선도 미평가(편집 이벤트 없음) — 코드 변경 후엔 러너를 재실행하고 verify하세요.");
+  } else if (by("verified") > 0) {
+    // "마지막 편집"=gate pass/cached/failopen 집계 — ask-승인된 block 편집은 미포함(절대 보증 아님).
+    console.log(`  ⓘ verified 신선 — 결과(${p.junitMtime}) ≥ 마지막 관측 편집(${p.lastEditAt}). (게이트 관측 기준 — 절대 보증 아님)`);
   }
   console.log("");
   for (const c of report.cases) {

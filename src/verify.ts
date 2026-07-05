@@ -1,12 +1,13 @@
 // 사후 결과검증(post-impl verify) — spec 케이스를 *증거*(테스트결과/파일)와 대조해 판정한다.
 // 핵심 불변식: gbc는 테스트를 *실행하지 않는다*. 표준 결과 포맷(JUnit XML)을 *읽고*, 러너가 없으면
 // LLM 독해(reviewed)로 경량 판정하거나 unverifiable로 정직 보고한다(provider 패턴·RCE 차단·이식성).
-import { lstatSync, readFileSync } from "node:fs";
-import { resolve, sep } from "node:path";
-import type { CaseBinding, CaseVerdict, VerifyReport, ReviewVerdict } from "./types.js";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
+import type { CaseBinding, CaseVerdict, VerifyReport, VerifyProvenance, ReviewVerdict } from "./types.js";
 import { readSpecCases } from "./spec.js";
-import { readVerifyResults, JUNIT_DEFAULT_REL } from "./junit.js";
+import { readVerifyResults, statVerifyResults, JUNIT_DEFAULT_REL } from "./junit.js";
 import { judgeReviewed } from "./judge.js";
+import { parseEvents, lastAppliedEditAt } from "./metrics.js";
 
 /**
  * spec 케이스 텍스트에서 검증 바인딩 접미사를 파싱한다.
@@ -35,6 +36,22 @@ export interface VerifyOpts {
   reviewer?: (caseText: string, fileContent: string) => Promise<ReviewVerdict>;
   /** 리포트 시각(ISO) 주입 */
   now?: string;
+  /**
+   * 마지막 적용 편집 시각(ISO) 주입 — provenance 신선도 기준(0.6.0).
+   * undefined=기본(.gbc/events.jsonl 판독) · null=신호 없음(unknown 경로) · string=고정 주입.
+   */
+  lastEditAt?: string | null;
+}
+
+/** .gbc/events.jsonl에서 마지막 적용 편집 시각을 판독(기본 신선도 신호원). 부재/실패면 null. */
+function readLastEditAt(cwd: string): string | null {
+  const path = join(cwd, ".gbc", "events.jsonl");
+  if (!existsSync(path)) return null;
+  try {
+    return lastAppliedEditAt(parseEvents(readFileSync(path, "utf8")));
+  } catch {
+    return null;
+  }
 }
 
 /** unverifiable CaseVerdict 헬퍼. */
@@ -55,12 +72,36 @@ export async function runVerify(cwd: string, opts: VerifyOpts = {}): Promise<Ver
   // JUnit 결과는 run당 1회만 읽는다(케이스마다 재파싱 방지).
   const junit = readVerifyResults(cwd, junitRel);
 
+  // provenance 신선도(0.6.0) — 결과파일 mtime vs 마지막 적용 편집(events.jsonl).
+  // stale이면 verified 대신 unverifiable로 강등(pass·fail 대칭 — 옛 증거로 확신도 경보도 안 함).
+  // 편집 신호 부재는 stale로 뭉개지 않고 unknown 고지(hook 미설치 standalone 오탐 방지).
+  const junitMtime = junit ? (statVerifyResults(cwd, junitRel) ?? undefined) : undefined;
+  const lastEditAt = opts.lastEditAt === undefined ? readLastEditAt(cwd) : opts.lastEditAt;
+  const stale = junitMtime !== undefined && lastEditAt !== null && junitMtime < lastEditAt;
+  const provenance: VerifyProvenance = {
+    junitMtime,
+    lastEditAt: lastEditAt ?? undefined,
+    stale,
+    unknown: junitMtime !== undefined && lastEditAt === null,
+  };
+
   const cases: CaseVerdict[] = [];
   for (const raw of readSpecCases(cwd)) {
     const b = parseBinding(raw);
     if (b.kind === "test") {
       if (!junit) {
         cases.push(unverifiable(b.text, `테스트 결과 파일 없음(${junitRel})`, "junit:none"));
+      } else if (stale) {
+        // 결과 존재 여부와 무관하게 stale이면 verified 승격 금지 — 결과 상태는 참고로만 남긴다.
+        const st = junit.get(b.ref);
+        const hint = st === "pass" || st === "fail" ? `옛 결과=${st} · ` : "";
+        cases.push(
+          unverifiable(
+            b.text,
+            `${hint}stale 강등: 결과(${junitMtime}) < 마지막 편집(${lastEditAt}) — 러너 재실행 필요`,
+            "junit:stale",
+          ),
+        );
       } else {
         const st = junit.get(b.ref);
         if (st === "pass") {
@@ -115,7 +156,7 @@ export async function runVerify(cwd: string, opts: VerifyOpts = {}): Promise<Ver
     }
   }
 
-  return { cases, at: opts.now ?? nowIso() };
+  return { cases, at: opts.now ?? nowIso(), provenance };
 }
 
 function nowIso(): string {

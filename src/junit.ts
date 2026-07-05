@@ -1,7 +1,7 @@
 // JUnit XML 리더 — verified 경로의 증거 소스. gbc는 테스트를 *실행하지 않고* 표준 결과 포맷을 *읽기만*
 // 한다(RCE 차단·이식성). jest/vitest/pytest/go/cargo 등 모든 주요 러너가 JUnit 리포터를 내므로,
 // 이 한 포맷만 읽으면 러너 불문 이식된다(provider 패턴). zero-dep 정규식 파서(런타임 의존성 보존).
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
 /** 테스트 1건의 판정. failure/error=fail, skipped=skipped, 그 외=pass. */
@@ -70,5 +70,19 @@ export function readVerifyResults(cwd: string, relPath: string = JUNIT_DEFAULT_R
     return parseJUnit(readFileSync(path, "utf8"));
   } catch {
     return null;
+  }
+}
+
+/**
+ * 결과파일 mtime(ISO) — provenance 신선도 스탬프(0.6.0). readVerifyResults와 동일 컨테인먼트.
+ * 부재/스탯 실패면 null(신선도 판정 대상 아님).
+ */
+export function statVerifyResults(cwd: string, relPath: string = JUNIT_DEFAULT_REL): string | null {
+  const path = resolve(cwd, relPath);
+  if (path !== cwd && !path.startsWith(cwd + sep)) return null;
+  try {
+    return statSync(path).mtime.toISOString();
+  } catch {
+    return null; /* 부재/권한오류 */
   }
 }

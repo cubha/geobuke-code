@@ -233,6 +233,21 @@ export function computeMetrics(events: GateEvent[]): Metrics {
   };
 }
 
+/**
+ * 마지막 *적용된* 코드 편집(gate) 시각 — verify provenance 신선도 기준(0.6.0).
+ * 포함: pass/cached/failopen(편집이 실제 반영됨). 제외: block(편집 거부됨=미반영),
+ * doc-skip(문서 편집=테스트 결과 무효화 안 함), 비gate 이벤트. 없으면 null(신선도 미평가).
+ */
+export function lastAppliedEditAt(events: GateEvent[]): string | null {
+  const APPLIED: GateDecision[] = ["pass", "cached", "failopen"];
+  let latest: string | null = null;
+  for (const e of events) {
+    if (e.kind !== "gate" || !e.decision || !APPLIED.includes(e.decision)) continue;
+    if (latest === null || e.at > latest) latest = e.at;
+  }
+  return latest;
+}
+
 /** events.jsonl에 이벤트 1줄 append. 실패는 무시(계측이 개발 흐름을 막지 않음). */
 export function logEvent(cwd: string, event: GateEvent): void {
   if (process.env.GBC_NO_METRICS === "1") return;
