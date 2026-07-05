@@ -927,10 +927,11 @@ function usage(): void {
   gbc update [--dry-run]              전역 최신 설치 + 현재 프로젝트 재init (한방 갱신)
   gbc status                          게이트 상태 + 로드된 명세 확인
   gbc defer add "<케이스>"             케이스를 명시적으로 미루기 (→ open)
-  gbc defer list                      미룬 항목 목록 (상태: 미해결/진행중/해결)
+  gbc defer list                      미룬 항목 목록 (상태: 미해결/진행중/해결/철회)
   gbc defer start <번호|텍스트|all>    착수 표시 (open → 진행중)
   gbc defer resolve <번호|텍스트|all>  종결 표시 (→ 해결; 항상 사용자 점검 후)
-  gbc defer reopen <번호|텍스트|all>   백로그로 되돌리기 (→ open)
+  gbc defer withdraw <번호|텍스트|all> 철회 — 오등록·기각 등 완료 아닌 정리 (완료로 기록 안 됨)
+  gbc defer reopen <번호|텍스트|all>   백로그로 되돌리기 (→ open; 잘못된 해결/철회 취소)
   gbc defer mute                      대화 종료(Stop)마다 뜨는 defer 알림 끄기 (영속)
   gbc defer unmute                    Stop defer 알림 다시 켜기
   gbc spec add "<케이스>"              승인된 시나리오를 .gbc/spec.md에 등록
