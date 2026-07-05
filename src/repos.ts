@@ -39,3 +39,29 @@ export function removeRepo(path: string): string[] {
   if (next.length !== repos.length) writeJson(reposPath(), next);
   return next;
 }
+
+// ===== verify --run 홈 pin (0.6.0 ST-D) =====
+// ⚠️ 보안 설계핵심(DESIGN-verify-run-2026-07-05 §4, advisor #1 Critical): --run이 실행할 명령의
+// 저장 위치는 repo 밖 홈(~/.gbc/verify-run.json)이어야 한다 — repo 내부(.gbc/config.json)에 두면
+// PR이 git add -f로 커밋해 와 gitignore를 우회하는 공급망 RCE 벡터가 된다. 홈은 PR이 쓸 수 없어
+// 벡터가 구조적으로 소멸한다(repos.json 동위·미러). 절대 .gbc/config.json으로 옮기지 말 것.
+
+function verifyRunPath(): string {
+  return join(gbcDir(homedir()), "verify-run.json");
+}
+
+/** repo별 고정(pin) 러너 명령 판독 — 없으면 null. 비-문자열 방어 필터(repos.json W4 미러). */
+export function getVerifyRunPin(repoPath: string): string | null {
+  const abs = resolve(repoPath);
+  const raw = readJson<Record<string, unknown>>(verifyRunPath(), {});
+  const cmd = raw[abs];
+  return typeof cmd === "string" && cmd.trim() !== "" ? cmd : null;
+}
+
+/** repo별 러너 명령 pin 저장(덮어쓰기). */
+export function setVerifyRunPin(repoPath: string, cmd: string): void {
+  const abs = resolve(repoPath);
+  const raw = readJson<Record<string, unknown>>(verifyRunPath(), {});
+  raw[abs] = cmd;
+  writeJson(verifyRunPath(), raw);
+}

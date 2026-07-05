@@ -2164,6 +2164,71 @@ test("runVerify: stale이어도 ::file(reviewed) 경로는 영향 없음(JUnit �
   }
 });
 
+// ===== 0.6.0 ST-D: gbc verify --run (src/run.ts·repos.ts 홈 pin) — 순수부 test-after =====
+
+test("resolveRunCommand: CLI 인자 > 홈 pin 우선순위, 다중 토큰 join", async () => {
+  const { resolveRunCommand } = await import("../dist/run.js");
+  assert.deepEqual(resolveRunCommand(["npm test"], "pinned"), { cmd: "npm test", save: false, source: "arg" });
+  assert.deepEqual(resolveRunCommand(["npm", "test"], null), { cmd: "npm test", save: false, source: "arg" });
+  assert.deepEqual(resolveRunCommand([], "pinned"), { cmd: "pinned", save: false, source: "pin" });
+});
+
+test("resolveRunCommand: 인자·pin 모두 없음 → cmd null(실행 안 함), --save 단독은 error", async () => {
+  const { resolveRunCommand } = await import("../dist/run.js");
+  const none = resolveRunCommand([], null);
+  assert.equal(none.cmd, null);
+  assert.equal(none.source, "none");
+  const bad = resolveRunCommand(["--save"], "pinned");
+  assert.equal(bad.cmd, null, "--save는 pin 폴백 금지(명시 인자 필수)");
+  assert.ok(bad.error);
+});
+
+test("resolveRunCommand: --save + 명령 → save=true (위치 무관)", async () => {
+  const { resolveRunCommand } = await import("../dist/run.js");
+  assert.deepEqual(resolveRunCommand(["--save", "npm test"], null), { cmd: "npm test", save: true, source: "arg" });
+  assert.deepEqual(resolveRunCommand(["npm test", "--save"], null), { cmd: "npm test", save: true, source: "arg" });
+});
+
+test("verify-run 홈 pin: set→get 왕복 + repo별 격리 (HOME 오버라이드 — 실홈 오염 금지)", async () => {
+  const { getVerifyRunPin, setVerifyRunPin } = await import("../dist/repos.js");
+  const fakeHome = tmp();
+  const prevHome = process.env.HOME;
+  try {
+    process.env.HOME = fakeHome;
+    assert.equal(getVerifyRunPin("/repo/a"), null, "미저장 → null");
+    setVerifyRunPin("/repo/a", "npm test");
+    assert.equal(getVerifyRunPin("/repo/a"), "npm test");
+    assert.equal(getVerifyRunPin("/repo/b"), null, "repo별 격리");
+    setVerifyRunPin("/repo/a", "vitest run");
+    assert.equal(getVerifyRunPin("/repo/a"), "vitest run", "덮어쓰기");
+    assert.ok(existsSync(join(fakeHome, ".gbc", "verify-run.json")), "홈(.gbc) 저장 — repo 내부 아님");
+  } finally {
+    process.env.HOME = prevHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test("verify-run 홈 pin: 비-문자열/빈 값 방어 필터(W4 미러)", async () => {
+  const { getVerifyRunPin } = await import("../dist/repos.js");
+  const fakeHome = tmp();
+  const prevHome = process.env.HOME;
+  try {
+    process.env.HOME = fakeHome;
+    mkdirSync(join(fakeHome, ".gbc"), { recursive: true });
+    writeFileSync(
+      join(fakeHome, ".gbc", "verify-run.json"),
+      JSON.stringify({ "/repo/x": 42, "/repo/y": "", "/repo/z": ["rm"] }),
+      "utf8",
+    );
+    assert.equal(getVerifyRunPin("/repo/x"), null);
+    assert.equal(getVerifyRunPin("/repo/y"), null);
+    assert.equal(getVerifyRunPin("/repo/z"), null);
+  } finally {
+    process.env.HOME = prevHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
 // ===== 0.6.0 ST-B+C: detect→scaffold + node:test 제로설치 (src/scaffold.ts) =====
 
 async function loadScaffold() {
