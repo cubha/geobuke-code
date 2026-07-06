@@ -179,6 +179,27 @@ function maybeUpdateNotice(cwd: string, session: string, ctx?: HookContext): str
   }
 }
 
+/**
+ * 게이트 판정 출구 공통화(0.6.1 R9) — 업데이트 안내(세션 1회 dedup)를 출구에서 1회 결합해 emit 후
+ * 종료한다. 종전엔 maybeUpdateNotice가 4분기(doc-skip·cached·pass·block)에 교차 삽입돼 판정 로직과
+ * 직교 관심사가 섞여 있었다(A1 evaluateGate 추출 대상 축소를 위한 선행 분리).
+ * ⚠️ 안내는 출구 시점에 계산해야 한다(선계산 금지) — pass/block 경로는 judge와 병렬로 refresh된
+ * 버전 캐시(0.3.0)를 읽어야 그 편집에서 신버전이 즉시 뜬다. fail-open 출구는 이 함수를 쓰지 않는다
+ * (종전에도 안내 미첨부 — 실패 고지 systemMessage와 섞지 않는 기존 동작 보존).
+ */
+function exitGate(
+  cwd: string,
+  session: string,
+  ctx: HookContext | undefined,
+  out?: Record<string, unknown>,
+): never {
+  const notice = maybeUpdateNotice(cwd, session, ctx);
+  const payload: Record<string, unknown> = { ...(out ?? {}) };
+  if (notice) payload.systemMessage = notice;
+  if (Object.keys(payload).length > 0) emit(payload);
+  process.exit(0);
+}
+
 /** 코드 파일 확장자(scope 큐잉 대상 — 문서/설정 편집은 파급반경·사다리 판정 대상 아님). */
 const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|php|c|h|cpp|cc|cs|kt|swift|scala)$/i;
 
@@ -251,9 +272,7 @@ async function preToolUseBody(ctx?: HookContext, onCwd?: (cwd: string) => void):
   // 조용한 우회 방지 위해 doc-skip 계측.
   if (isDocFile(input.tool_input?.file_path ?? "")) {
     logEvent(cwd, { at: nowIso(), session, specHash: "", kind: "gate", tool: toolName, decision: "doc-skip" });
-    const docNotice = maybeUpdateNotice(cwd, session, ctx);
-    if (docNotice) emit({ systemMessage: docNotice });
-    process.exit(0);
+    exitGate(cwd, session, ctx);
   }
 
   const { text: specText, source } = loadPlanSpec(cwd);
@@ -277,13 +296,9 @@ async function preToolUseBody(ctx?: HookContext, onCwd?: (cwd: string) => void):
       tool: toolName,
       decision: "cached",
     });
-    // 업데이트 안내(있으면)를 cached-skip에서도 노출 — 평상 작업은 대부분 통과된 작업단위라
-    // 이 경로가 가장 흔하다. 여기서 빠지면 보이는 배너(PreToolUse systemMessage)가 거의 안 떴음
-    // (0.2.x 가시성 갭). maybeUpdateNotice는 세션당 1회 dedup이라 노이즈 없음(매 세션 첫 편집 1회).
+    // 업데이트 안내를 cached-skip에서도 노출(0.2.x 가시성 갭 해소) — 평상 작업 최빈 경로.
     // permissionDecision 없음 → cached-pass 통과 동작 불변. 네트워크 없음(캐시만 읽음).
-    const cachedNotice = maybeUpdateNotice(cwd, session, ctx);
-    if (cachedNotice) emit({ systemMessage: cachedNotice });
-    process.exit(0);
+    exitGate(cwd, session, ctx);
   }
 
   // judge는 여기서만 동적 import (SDK lazy)
@@ -359,10 +374,8 @@ async function preToolUseBody(ctx?: HookContext, onCwd?: (cwd: string) => void):
       deferCount: defers.length,
     });
     // 업데이트 안내(있으면)만 비차단 노출 — systemMessage 단독은 permissionDecision 없으니
-    // 도구를 자동승인하지 않고(통과 동작 보존) 메시지만 표시한다.
-    const passNotice = maybeUpdateNotice(cwd, session, ctx);
-    if (passNotice) emit({ systemMessage: passNotice });
-    process.exit(0); // 정상 통과 (자동승인 X)
+    // 도구를 자동승인하지 않고(통과 동작 보존) 메시지만 표시한다. 정상 통과(자동승인 X).
+    exitGate(cwd, session, ctx);
   }
 
   // block: 사람 pause (ask 기본) — 사유가 사용자에게 표시됨
@@ -397,19 +410,15 @@ async function preToolUseBody(ctx?: HookContext, onCwd?: (cwd: string) => void):
   });
 
   const mode = process.env.GBC_BLOCK_MODE === "deny" ? "deny" : "ask";
-  const blockOut: Record<string, unknown> = {
+  // 업데이트 안내(있으면)는 exitGate가 같은 출력에 top-level systemMessage로 덧붙인다(차단 동작 불변).
+  exitGate(cwd, session, ctx, {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: mode,
       permissionDecisionReason: reason,
       additionalContext: reason,
     },
-  };
-  // 업데이트 안내(있으면)를 같은 출력에 top-level systemMessage로 덧붙인다(차단 동작 불변).
-  const blockNotice = maybeUpdateNotice(cwd, session, ctx);
-  if (blockNotice) blockOut.systemMessage = blockNotice;
-  emit(blockOut);
-  process.exit(0);
+  });
 }
 
 /** scope 이벤트의 coarse axis 태그 도출 — rung 걸림이 우선, 아니면 파급반경(scope). */
