@@ -16,9 +16,15 @@ export function writePendingReview(cwd: string, p: PendingReview): void {
   writeJson(pendingPath(cwd), p);
 }
 
-/** 펜딩-검토 레코드 읽기. 없으면 null. */
+/**
+ * 펜딩-검토 레코드 읽기. 없으면 null. 형상 가드(0.6.1 R3): valid-JSON이라도 객체가 아니거나
+ * missing이 배열이 아니면 null — cmdGateReview의 missing.length 접근이 throw로 새지 않게.
+ */
 export function readPendingReview(cwd: string): PendingReview | null {
-  return readJson<PendingReview | null>(pendingPath(cwd), null);
+  const raw = readJson<unknown>(pendingPath(cwd), null);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  if (!Array.isArray((raw as { missing?: unknown }).missing)) return null;
+  return raw as PendingReview;
 }
 
 /** 펜딩-검토 레코드 제거(분류 완료 후). 파일 부재면 무동작(idempotent). */

@@ -4,7 +4,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, resolve } from "node:path";
-import { gbcDir, readJson, writeJson } from "./store.js";
+import { gbcDir, readJsonArray, writeJson } from "./store.js";
 import type { ScopeQueueEntry, ScopeVerdict } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -34,10 +34,9 @@ export function enqueueScope(cwd: string, entry: ScopeQueueEntry): void {
   writeJson(scopeQueuePath(cwd), capped);
 }
 
-/** 큐 읽기(부재/파손 시 빈 배열). */
+/** 큐 읽기(부재/파손/비배열 시 빈 배열) — 형상 가드는 store.ts readJsonArray로 통일(0.6.1 R3). */
 export function readScopeQueue(cwd: string): ScopeQueueEntry[] {
-  const raw = readJson<ScopeQueueEntry[]>(scopeQueuePath(cwd), []);
-  return Array.isArray(raw) ? raw : [];
+  return readJsonArray<ScopeQueueEntry>(scopeQueuePath(cwd));
 }
 
 /** 큐 비우기(Stop 훅이 판정 후 호출 — 그 턴 판정분 회수). */
