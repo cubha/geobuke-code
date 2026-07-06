@@ -4,19 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Verdict, ReviewVerdict, ScopeQueueEntry, ScopeVerdict, AxisAVerdict, RungVerdict } from "./types.js";
 
-const MODEL = process.env.GBC_MODEL ?? "claude-haiku-4-5";
-/**
- * scope 판정(축A/축B) 전용 모델 — 게이트 MODEL과 *물리 분리*(GBC_SCOPE_MODEL).
- * 기본 haiku(스파이크: grep 컨텍스트 있으면 haiku·sonnet 동률·오버클레임0). sonnet은 opt-in.
- * GBC_MODEL과 분리하는 이유: 공유 시 게이트/verify/scope 3중으로 sonnet 비용이 배증.
- */
-const SCOPE_MODEL = process.env.GBC_SCOPE_MODEL ?? "claude-haiku-4-5";
-/**
- * verify reviewed 판정 전용 모델(GBC_VERIFY_MODEL, opt-in) — SCOPE_MODEL과 동형 분리.
- * 기본 haiku: A/B 실측(2026-07-02, 8케이스 pass4/fail4 오버클레임 함정 포함)에서
- * haiku·sonnet 정확도 8/8 동률, 지연은 haiku가 절반(~2s vs ~3.5s) → 상향 근거 없음.
- */
-const VERIFY_MODEL = process.env.GBC_VERIFY_MODEL ?? "claude-haiku-4-5";
+const DEFAULT_MODEL = "claude-haiku-4-5";
 const CLI_TIMEOUT_MS = 30000; // claude -p 폴백 상한(행 방지). 초과 시 kill → fail-open.
 
 /**
@@ -24,7 +12,33 @@ const CLI_TIMEOUT_MS = 30000; // claude -p 폴백 상한(행 방지). 초과 시
  * GBC_MODEL은 사용자 env지만, 셸 경로에선 메타문자가 명령으로 새지 않게 화이트리스트만 통과.
  */
 export function safeModel(model: string): string {
-  return /^[\w.-]+$/.test(model) ? model : "claude-haiku-4-5";
+  return /^[\w.-]+$/.test(model) ? model : DEFAULT_MODEL;
+}
+
+// ===== 모델 해석 (0.6.1 R1+R4) — 호출 시점 env 읽기 + 트랜스포트 공통 새니타이즈 =====
+// 모듈 로드시점 상수를 버린 이유(R4): A-모드 in-process 장수 프로세스에서 세션 중 env 변경이
+// 영영 미반영되는 잠복버그. 리졸버가 safeModel을 통과시키는 이유(R1): CLI 경로만 새니타이즈하면
+// API 경로는 오설정 env가 그대로 SDK로 가 거부→fail-open pass로 원인이 은폐된다(트랜스포트 비대칭).
+
+/** 게이트 판정 모델 — GBC_MODEL, 기본 haiku. */
+export function gateModel(env: Record<string, string | undefined> = process.env): string {
+  return safeModel(env.GBC_MODEL ?? DEFAULT_MODEL);
+}
+/**
+ * scope 판정(축A/축B) 전용 모델 — 게이트 모델과 *물리 분리*(GBC_SCOPE_MODEL).
+ * 기본 haiku(스파이크: grep 컨텍스트 있으면 haiku·sonnet 동률·오버클레임0). sonnet은 opt-in.
+ * GBC_MODEL과 분리하는 이유: 공유 시 게이트/verify/scope 3중으로 sonnet 비용이 배증.
+ */
+export function scopeModel(env: Record<string, string | undefined> = process.env): string {
+  return safeModel(env.GBC_SCOPE_MODEL ?? DEFAULT_MODEL);
+}
+/**
+ * verify reviewed 판정 전용 모델(GBC_VERIFY_MODEL, opt-in) — scopeModel과 동형 분리.
+ * 기본 haiku: A/B 실측(2026-07-02, 8케이스 pass4/fail4 오버클레임 함정 포함)에서
+ * haiku·sonnet 정확도 8/8 동률, 지연은 haiku가 절반(~2s vs ~3.5s) → 상향 근거 없음.
+ */
+export function verifyModel(env: Record<string, string | undefined> = process.env): string {
+  return safeModel(env.GBC_VERIFY_MODEL ?? DEFAULT_MODEL);
 }
 
 /**
@@ -194,16 +208,20 @@ async function createApiClient() {
   return new Anthropic({ apiKey: resolveApiKey() ?? undefined });
 }
 
-/** 직접 Anthropic API (haiku). SDK는 팩토리에서만 lazy import → hook 핫패스 보호. */
+/**
+ * 직접 Anthropic API. SDK는 팩토리에서만 lazy import → hook 핫패스 보호.
+ * model 기본값은 호출 시점 해석(gateModel) — 모듈 로드 상수 금지(R4). safeModel을 API 경로에도
+ * 적용(R1): CLI(buildCliInvocation)와 대칭 — 오설정 env가 SDK 거부→fail-open으로 은폐되지 않게.
+ */
 async function judgeViaApi(
   system: string,
   user: string,
   temperature?: number,
-  model: string = MODEL,
+  model: string = gateModel(),
 ): Promise<string> {
   const client = await createApiClient();
   const resp = await client.messages.create({
-    model,
+    model: safeModel(model),
     max_tokens: 1024,
     // temperature는 replay(회귀락)에서만 0으로 핀해 결정성을 높인다. 핫패스는 undefined=API 기본
     // (기존 판정 분포 보존). undefined면 키 자체를 안 보내 SDK 기본을 쓴다.
@@ -218,8 +236,8 @@ async function judgeViaApi(
   return texts.join("");
 }
 
-/** claude -p 폴백 (무설정 도그푸딩용, 느림). CC의 기존 인증 사용. */
-async function judgeViaCli(system: string, user: string, model: string = MODEL): Promise<string> {
+/** claude -p 폴백 (무설정 도그푸딩용, 느림). CC의 기존 인증 사용. model 기본=호출시점 해석(R4). */
+async function judgeViaCli(system: string, user: string, model: string = gateModel()): Promise<string> {
   // native Windows는 claude.cmd라 별도 경로(아래) — POSIX도 W2로 user=stdin 통일(0.5.3).
   if (process.platform === "win32") return judgeViaCliWin(system, user, model);
   return runClaudeCli(buildCliInvocation(system, user, model));
@@ -285,7 +303,7 @@ function runClaudeCli(inv: CliInvocation, opts: { shell?: boolean } = {}): Promi
  *  '판정 품질'만 프롬프트 전달 방식이 다르고, 이는 가시적 fail-open으로 바운드된다.)
  * kill-timeout 필수 — 무응답 stdin이 PreToolUse를 무한 차단하면 ENOENT보다 나쁘다 → fail-open 강제.
  */
-function judgeViaCliWin(system: string, user: string, model: string = MODEL): Promise<string> {
+function judgeViaCliWin(system: string, user: string, model: string = gateModel()): Promise<string> {
   // shell:true 경로라 argv엔 동적 데이터 절대 금지 — system조차 stdin에 결합(기존 검증된 형태 보존).
   return runClaudeCli(
     {
@@ -417,8 +435,8 @@ export async function judgeReviewed(
     opts.invoke ??
     ((system, u) =>
       selectedTransport() === "api"
-        ? judgeViaApi(system, u, undefined, VERIFY_MODEL)
-        : judgeViaCli(system, u, VERIFY_MODEL));
+        ? judgeViaApi(system, u, undefined, verifyModel())
+        : judgeViaCli(system, u, verifyModel()));
   try {
     return parseReviewVerdict(await invoke(REVIEW_SYSTEM, user));
   } catch (e) {
@@ -557,27 +575,8 @@ export function parseScopeVerdicts(
   });
 }
 
-/** transport 무관 호출자(테스트 주입용). 게이트와 동일 선택(api 우선), 단 모델은 SCOPE_MODEL. */
+/** transport 무관 호출자(테스트 주입용). 게이트와 동일 선택(api 우선), 단 모델은 scopeModel(). */
 export type ScopeInvoke = (system: string, user: string) => Promise<string>;
-
-async function scopeViaApi(system: string, user: string): Promise<string> {
-  const client = await createApiClient();
-  const resp = await client.messages.create({
-    model: SCOPE_MODEL,
-    max_tokens: 1024,
-    system,
-    messages: [{ role: "user", content: user }],
-  });
-  const texts: string[] = [];
-  for (const block of resp.content) if (block.type === "text") texts.push(block.text);
-  return texts.join("");
-}
-
-async function scopeViaCli(system: string, user: string): Promise<string> {
-  // win32도 SCOPE_MODEL 명시 전달(0.5.3 보안검토 W2 — 기본값 MODEL로 새면 모델 비용 분리가 깨짐).
-  if (process.platform === "win32") return judgeViaCliWin(system, user, SCOPE_MODEL);
-  return runClaudeCli(buildCliInvocation(system, user, SCOPE_MODEL));
-}
 
 /** scope 판정 하드 타임아웃(ms) — Stop 훅 체감 지연 상한. 초과 시 fail-open(unknown+degraded). */
 export const SCOPE_TIMEOUT_MS = 10000;
@@ -613,8 +612,14 @@ export async function judgeScope(
 ): Promise<ScopeVerdict[]> {
   if (entries.length === 0) return [];
   const user = buildScopeMessage(entries, grepContext, opts.planSpec ?? "");
+  // F5(0.6.1): scopeViaApi/scopeViaCli 별도쌍 제거 — judgeViaApi/judgeViaCli에 scopeModel()만 주입
+  // (win32 SCOPE_MODEL 명시 전달[0.5.3 W2] 의미는 judgeViaCli의 model 파라미터 경유로 동일 보존).
   const invoke: ScopeInvoke =
-    opts.invoke ?? ((s, u) => (selectedTransport() === "api" ? scopeViaApi(s, u) : scopeViaCli(s, u)));
+    opts.invoke ??
+    ((s, u) =>
+      selectedTransport() === "api"
+        ? judgeViaApi(s, u, undefined, scopeModel())
+        : judgeViaCli(s, u, scopeModel()));
   const timeoutMs = opts.timeoutMs ?? SCOPE_TIMEOUT_MS;
   try {
     const raw = await withTimeout(invoke(SCOPE_SYSTEM, user), timeoutMs);
@@ -632,4 +637,4 @@ export async function judgeScope(
   }
 }
 
-export { GATE_SYSTEM, buildUserMessage, parseVerdict, REVIEW_SYSTEM, SCOPE_SYSTEM, SCOPE_MODEL };
+export { GATE_SYSTEM, buildUserMessage, parseVerdict, REVIEW_SYSTEM, SCOPE_SYSTEM };

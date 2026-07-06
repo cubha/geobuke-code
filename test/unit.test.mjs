@@ -89,7 +89,7 @@ import {
   parseScopeVerdicts,
   judgeScope,
   SCOPE_SYSTEM,
-  SCOPE_MODEL,
+  scopeModel,
 } from "../dist/judge.js";
 import { parseJUnit, readVerifyResults, JUNIT_DEFAULT_REL } from "../dist/junit.js";
 import { runVerify } from "../dist/verify.js";
@@ -2504,9 +2504,9 @@ function scopeQ(over = {}) {
   return { file: "src/a.ts", tool: "Edit", edit: "x", specHash: "h", at: "t", ...over };
 }
 
-test("SCOPE_MODEL: 기본 haiku (GBC_SCOPE_MODEL 미설정 시)", () => {
-  // 기본 실행 환경엔 GBC_SCOPE_MODEL 없음 → haiku
-  assert.equal(SCOPE_MODEL, "claude-haiku-4-5");
+test("scopeModel(): 기본 haiku (GBC_SCOPE_MODEL 미설정 시) — 0.6.1 상수→리졸버 승계", () => {
+  // 구 SCOPE_MODEL 상수의 기본값 계약을 리졸버로 승계(상수는 R4 호출시점 전환으로 제거).
+  assert.equal(scopeModel({}), "claude-haiku-4-5");
 });
 
 test("parseScopeVerdicts: 정상 배치 파싱 (컨텍스트 있음 → degraded=false)", () => {
