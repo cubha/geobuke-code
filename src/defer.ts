@@ -1,18 +1,11 @@
 import { join } from "node:path";
-import { gbcDir, readJson, writeJson } from "./store.js";
+import { gbcDir, readJsonArray, writeJson } from "./store.js";
 import { normalizeCase } from "./text.js";
+import { nowIso } from "./time.js";
 import type { DeferEntry, DeferStatus, RawDeferEntry } from "./types.js";
 
 function deferPath(cwd: string): string {
   return join(gbcDir(cwd), "defers.json");
-}
-
-function nowIso(): string {
-  try {
-    return new Date().toISOString();
-  } catch {
-    return "";
-  }
 }
 
 /**
@@ -26,9 +19,9 @@ function promote(raw: RawDeferEntry): DeferEntry {
   return { item: raw.item, at: raw.at, status };
 }
 
-/** 디스크에서 defer 엔트리를 읽어 status 포맷으로 정규화 반환(읽기 시 자동 승격) */
+/** 디스크에서 defer 엔트리를 읽어 status 포맷으로 정규화 반환(읽기 시 자동 승격). 비배열 JSON은 [](R3). */
 export function loadDefers(cwd: string): DeferEntry[] {
-  return readJson<RawDeferEntry[]>(deferPath(cwd), []).map(promote);
+  return readJsonArray<RawDeferEntry>(deferPath(cwd)).map(promote);
 }
 
 /**

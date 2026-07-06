@@ -45,6 +45,8 @@ import {
 } from "./version.js";
 import { logEvent, parseEvents, computeMetrics, tagEventsWithRepo } from "./metrics.js";
 import type { EventKind } from "./metrics.js";
+import { nowIso, nowStamp } from "./time.js";
+import type { DeferStatus, Settings } from "./types.js";
 
 const CLI_PATH = fileURLToPath(import.meta.url);
 const PKG_ROOT = join(dirname(CLI_PATH), ".."); // dist/cli.js → 패키지 루트
@@ -67,14 +69,6 @@ function stopCommand(hookPath: string): string {
   return `node "${hookPath}" hook stop`;
 }
 
-function nowIso(): string {
-  try {
-    return new Date().toISOString();
-  } catch {
-    return "";
-  }
-}
-
 /**
  * 현재 작업단위 명세 해시 (CLI 이벤트의 specHash 상관 키).
  * 빈 spec은 ""(센티넬) — M1 churn 교차세션 합산 방지(computeMetrics가 제외).
@@ -87,14 +81,6 @@ function curHash(cwd: string): string {
 /** CLI 변이 이벤트를 events.jsonl에 기록(메트릭 상관용). specHash는 변이 전 값을 넘긴다. */
 function logCli(cwd: string, kind: EventKind, specHash: string): void {
   logEvent(cwd, { at: nowIso(), session: "", specHash, kind });
-}
-
-function nowStamp(): string {
-  try {
-    return new Date().toISOString().replace(/[:.]/g, "-");
-  } catch {
-    return "backup";
-  }
 }
 
 // ---------- gbc init ----------
@@ -133,8 +119,8 @@ ${
 
   mkdirSync(claudeDir, { recursive: true });
 
-  // settings.json 머지
-  let settings: Record<string, unknown> = {};
+  // settings.json 머지 — hooks 관점 형상은 types.ts Settings 단일 소스(0.6.1 F3).
+  let settings: Settings = {};
   if (existsSync(settingsPath)) {
     const backup = `${settingsPath}.bak-${nowStamp()}`;
     copyFileSync(settingsPath, backup);
@@ -147,7 +133,7 @@ ${
     }
   }
 
-  const hooks = (settings.hooks ??= {}) as Record<string, unknown[]>;
+  const hooks = (settings.hooks ??= {});
   const serialized = JSON.stringify(settings);
 
   // PreToolUse (멱등). 신규면 추가, 이미 있으면 옛 명령(keyless·bash 키주입)을 pure로 정규화.
@@ -238,7 +224,9 @@ async function cmdStatus(): Promise<void> {
     /* 갱신 실패 무시 */
   }
   const cwd = process.cwd();
-  const { text, source } = loadPlanSpec(cwd);
+  const { text, source, warning } = loadPlanSpec(cwd);
+  // R6 순수화로 loadPlanSpec이 stderr 대신 반환하는 컨테인먼트 경고를 CLI가 표면화.
+  if (warning) console.error(warning);
   const hash = computeSpecHash(text);
   const state = loadState(cwd);
   const defers = loadDefers(cwd);
@@ -301,7 +289,8 @@ function cmdDefer(args: string[]): void {
       console.log("(미룬 항목 없음)");
       return;
     }
-    const label: Record<string, string> = {
+    // DeferStatus 전 상태 강제(0.6.1 F4) — 상태 추가 시 레이블 누락이 컴파일 에러로 잡힌다.
+    const label: Record<DeferStatus, string> = {
       open: "미해결",
       in_progress: "진행중",
       resolved: "해결",
@@ -314,22 +303,14 @@ function cmdDefer(args: string[]): void {
       console.error(`사용: gbc defer ${sub} <번호|텍스트|all>`);
       process.exit(1);
     }
-    const fn =
-      sub === "start"
-        ? startDefer
-        : sub === "resolve"
-          ? resolveDefer
-          : sub === "withdraw"
-            ? withdrawDefer
-            : reopenDefer;
-    const verb =
-      sub === "start"
-        ? "착수"
-        : sub === "resolve"
-          ? "해결"
-          : sub === "withdraw"
-            ? "철회(완료 아님)"
-            : "되돌림(open)";
+    // 전환 서브커맨드 룩업(중첩 삼항 정리) — 새 전환 추가 시 여기 한 곳만 확장.
+    const transitions = {
+      start: { fn: startDefer, verb: "착수" },
+      resolve: { fn: resolveDefer, verb: "해결" },
+      withdraw: { fn: withdrawDefer, verb: "철회(완료 아님)" },
+      reopen: { fn: reopenDefer, verb: "되돌림(open)" },
+    } as const;
+    const { fn, verb } = transitions[sub];
     const changed = fn(cwd, ref);
     if (changed.length > 0) {
       logCli(cwd, `defer-${sub}`, curHash(cwd));

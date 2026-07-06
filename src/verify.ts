@@ -8,6 +8,7 @@ import { readSpecCases } from "./spec.js";
 import { readVerifyResults, statVerifyResults, JUNIT_DEFAULT_REL } from "./junit.js";
 import { judgeReviewed } from "./judge.js";
 import { parseEvents, lastAppliedEditAt } from "./metrics.js";
+import { nowIso } from "./time.js";
 
 /**
  * spec 케이스 텍스트에서 검증 바인딩 접미사를 파싱한다.
@@ -157,12 +158,4 @@ export async function runVerify(cwd: string, opts: VerifyOpts = {}): Promise<Ver
   }
 
   return { cases, at: opts.now ?? nowIso(), provenance };
-}
-
-function nowIso(): string {
-  try {
-    return new Date().toISOString();
-  } catch {
-    return "";
-  }
 }

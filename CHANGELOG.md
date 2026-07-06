@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-06
+
+pre-A(1.0.0) 잔여 전량 소화 — A-모드 착수 전 기술부채·하드닝·정리 14건 일괄 처분(전수감사 `docs/analysis/ANALYSIS-061-pre-a-audit-2026-07-06.md`). **hook 계약 무변경 = 기존 설치처 재init 불요.** 0.7.5(#29)·상단 소개 정합화(#31) 문서 커밋 동반 발행.
+
+### Fixed
+- **API 경로 safeModel 미적용(R1)** — 모델 새니타이즈가 CLI 트랜스포트에만 걸려, 오설정 `GBC_*MODEL` env가 API 경로에선 그대로 SDK로 가 거부→fail-open pass로 원인이 은폐되던 트랜스포트 비대칭 해소. 판정 모델은 `gateModel()/scopeModel()/verifyModel()` 리졸버로 일원화 — 호출 시점 env 해석(R4: 모듈 로드시점 상수는 A-모드 in-process 장수 프로세스에서 세션 중 변경 미반영 잠복버그) + 양 트랜스포트 공통 safeModel 통과.
+- **배열 판독 형상 가드 근원 통일(R3)** — `.gbc/*.json`(defers·golden·scope-queue·repos)이 valid-JSON이지만 비배열일 때 `.map` throw→exit 1 비정형 fail-open(failopen.log·계측 누락)으로 새던 것을 `store.ts readJsonArray`로 근원 흡수. `pending-review.json`은 객체/`missing` 배열 형상 가드(비정형이면 null — `gate review` 크래시 제거).
+- **scope 자기파일 비교 realpath 기반(R2)** — 심링크 소스에서 자기 매치가 타 파일 단서로 유입돼 축A/rung2 오분류 재료가 되던 것을 실경로 비교로 차단(realpath 실패=신규 파일·브로큰 링크는 기존 lexical resolve 폴백).
+- **hook stdin 파싱 크래시 벡터** — valid-JSON 비객체 입력(`null`·숫자)이 속성 접근 TypeError→exit 1로 새던 것을 빈 입력과 동일 취급으로 흡수(`parseHookInput`).
+
+### Changed
+- **훅 경계 정형 fail-open(R7 설계결정)** — 디스크/권한 등 인프라 I/O 실패(store.ts `gbcDir`/`writeJson` 등)가 uncaught→exit 1 *비정형* fail-open(계측·고지 전무)으로 새던 것을 훅 경계 `runHookSafely`가 정형 흡수(failopen.log+`systemMessage` 고지+exit 0). store.ts 원시함수는 의도적으로 계속 throw — CLI 경로(`gbc spec add` 등)는 디스크 실패를 성공처럼 삼키면 안 된다(정직성). A-모드 in-process 전환 시 이 경계가 콜백 예외 정책 seam.
+- **업데이트 안내 분기 분리(R9)** — `maybeUpdateNotice`가 게이트 4분기(doc-skip·cached·pass·block)에 교차 삽입돼 있던 것을 단일 출구 `exitGate`로 직교 분리(출력 JSON 동등·안내는 출구 시점 계산 유지). A1 evaluateGate 추출 대상 축소 선행 리팩터.
+- **소청소(R5·R6·F2~F4)** — `buildCrossRepoHint` 단일 lstat 표준화(TOCTOU 패턴 잔존 제거) · `loadPlanSpec` 컨테인먼트 경고 stderr 직출력→반환 `warning` 필드 순수화(`gbc status`가 표면화) · `time.ts` 신설(nowIso ×5·nowStamp ×2 사본 통합) · hook 설정 타입(`Settings` 등) types.ts 단일화 · defer 레이블 `Record<DeferStatus,string>` 좁히기 · dead import 제거.
+
+### Added
+- **runRunnerCommand 스모크 3케이스(R8)** — 유일 의도적 셸 실행 경로(`verify --run`) 무커버 해소: 정상 종료 / 러너 비0 exit=ok+reason(게이트 않음 계약) / timeout-kill. 단위 248.
+
 ## [0.6.0] - 2026-07-05
 
 verify 실행형 확장 — 사후 결과검증의 3대 마찰(옛 결과 거짓 verified·러너 배선 진입장벽·실행↔판독 2단계) 제거. **minor 근거**: `--run`이 "gbc는 테스트를 실행하지 않는다" 불변식을 "**spec-유래 명령을 절대 실행하지 않는다**(신뢰 소스 고정 명령만 예외)"로 의도적·국소적으로 재정의. 설계·위협모델: `docs/design/DESIGN-verify-run-2026-07-05.md`(advisor 적대검증 6항목 반영).
@@ -284,6 +302,7 @@ A(100) standalone 피벗 착수 전 선행 패치(P0) — 사후대조(진짜 M1
 - `gbc init` — 프로젝트 로컬 hook 설치(머지·백업·멱등), API 키 주입 자동화 + keyless hook 업그레이드.
 - 최초 npm 발행.
 
+[0.6.1]: https://github.com/cubha/geobuke-code/releases/tag/v0.6.1
 [0.6.0]: https://github.com/cubha/geobuke-code/releases/tag/v0.6.0
 [0.5.5]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.5
 [0.5.4]: https://github.com/cubha/geobuke-code/releases/tag/v0.5.4

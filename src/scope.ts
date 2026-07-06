@@ -2,9 +2,10 @@
 // PreToolUse가 pass한 동작편집을 여기 큐잉 → Stop 훅이 grep 컨텍스트를 채워 배치 판정한다.
 // 이 파일은 순수 로직·파일 IO만 담당(모델 호출 없음 — 그건 judge.ts judgeScope).
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { promisify } from "node:util";
 import { join, resolve } from "node:path";
-import { gbcDir, readJson, writeJson } from "./store.js";
+import { gbcDir, readJsonArray, writeJson } from "./store.js";
 import type { ScopeQueueEntry, ScopeVerdict } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -34,10 +35,9 @@ export function enqueueScope(cwd: string, entry: ScopeQueueEntry): void {
   writeJson(scopeQueuePath(cwd), capped);
 }
 
-/** 큐 읽기(부재/파손 시 빈 배열). */
+/** 큐 읽기(부재/파손/비배열 시 빈 배열) — 형상 가드는 store.ts readJsonArray로 통일(0.6.1 R3). */
 export function readScopeQueue(cwd: string): ScopeQueueEntry[] {
-  const raw = readJson<ScopeQueueEntry[]>(scopeQueuePath(cwd), []);
-  return Array.isArray(raw) ? raw : [];
+  return readJsonArray<ScopeQueueEntry>(scopeQueuePath(cwd));
 }
 
 /** 큐 비우기(Stop 훅이 판정 후 호출 — 그 턴 판정분 회수). */
@@ -158,6 +158,20 @@ export function extractSymbols(editText: string): string[] {
   return [...out].slice(0, MAX_GREP_SYMBOLS);
 }
 
+/**
+ * 자기파일 비교용 정규 경로(0.6.1 R2) — 심링크를 실경로로 해소해 동일 실체를 같은 키로 만든다.
+ * realpath 실패(파일 미존재: Write 직전 신규 파일·브로큰 링크)는 기존 lexical resolve 폴백 —
+ * 비교 정밀도만 낮아질 뿐 수집 동작은 보존(비차단 권고 경로라 보안 경계 아님).
+ */
+function canonicalPath(cwd: string, p: string): string {
+  const abs = resolve(cwd, p);
+  try {
+    return realpathSync(abs);
+  } catch {
+    return abs;
+  }
+}
+
 /** collectGrepContext 결과 — 프롬프트용 컨텍스트 + 컨텍스트를 얻은 파일 집합(하드가드 입력). */
 export interface GrepCollectResult {
   context: string;
@@ -204,6 +218,8 @@ export async function collectGrepContext(
   const seenSymbols = new Set<string>();
 
   for (const entry of entries) {
+    // 엔트리당 1회만 실경로 해석(심볼 루프 밖) — 매치별 canonicalPath는 남지만 상한(40)이 바운드.
+    const entryAbs = canonicalPath(cwd, entry.file);
     for (const sym of extractSymbols(entry.edit)) {
       if (seenSymbols.size >= MAX_GREP_SYMBOLS) break;
       if (seenSymbols.has(sym)) continue;
@@ -212,8 +228,9 @@ export async function collectGrepContext(
       const { matches } = parseGrepOutput(raw);
       // 자기 파일 매치는 제외(다른 파일의 호출부·중복만 단서로). cwd 기준 절대경로 동등 비교 —
       // production은 entry.file=절대(CC file_path) × grep 출력=./상대 조합이라 endsWith가 불일치했다(0.5.4).
-      const entryAbs = resolve(cwd, entry.file);
-      const others = matches.filter((m) => resolve(cwd, m.file) !== entryAbs);
+      // 0.6.1 R2: 비교는 실경로(canonicalPath) — 심링크 소스에서 링크↔실경로가 서로 다른 lexical
+      // 경로로 갈려 자기 매치가 타 파일 단서로 새던 오분류(근거 없는 축A/rung2 재료)를 차단.
+      const others = matches.filter((m) => canonicalPath(cwd, m.file) !== entryAbs);
       if (others.length > 0) {
         filesWithContext.add(entry.file);
         allMatches.push(...others);

@@ -4,7 +4,7 @@
 import { isGatedTool, normalizeEdit } from "./normalize.js";
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated, markGated } from "./state.js";
-import { activeDeferItems, resolvedDeferItems, unresolvedDefers, loadDefers, isClosedStatus } from "./defer.js";
+import { activeDeferItems, resolvedDeferItems, loadDefers, isClosedStatus } from "./defer.js";
 import { isStopHintMuted, isGoldenCapture } from "./config.js";
 import { loadRepos } from "./repos.js";
 import { writePendingReview } from "./review.js";
@@ -17,9 +17,10 @@ import {
   refreshVersionCache,
   shouldRefreshCache,
 } from "./version.js";
-import { appendFileSync, existsSync, lstatSync } from "node:fs";
+import { appendFileSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { gbcDir } from "./store.js";
+import { nowIso } from "./time.js";
 import { logEvent } from "./metrics.js";
 import type { EditToolInput, Verdict, DeferEntry, ScopeVerdict } from "./types.js";
 
@@ -86,21 +87,59 @@ function readStdin(): Promise<string> {
   });
 }
 
+/**
+ * hook stdin 입력 파싱(순수, 0.6.1 F1) — 3핸들러에 복붙돼 있던 "파싱 실패→안전 통과" 불변식의
+ * 단일 소스. 빈 입력={}(입력 없음으로 통과), 파싱 실패=null(호출자가 즉시 exit 0 fail-open).
+ * valid-JSON 비객체(null·숫자·문자열)도 {}로 — 종전엔 JSON.parse("null")이 input에 그대로 실려
+ * 속성 접근 TypeError→exit1 비정형 fail-open으로 샜다(빈 입력과 동일 취급이 불변식에 정합).
+ */
+export function parseHookInput<T>(raw: string): T | null {
+  if (!raw) return {} as T;
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return (typeof v === "object" && v !== null ? v : {}) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 훅 공통 정형 fail-open 경계(0.6.1 R7 설계결정). store.ts 원시 I/O(gbcDir mkdir·writeJson)는
+ * 의도적으로 계속 throw한다 — CLI 경로('gbc spec add' 등)는 디스크 실패를 성공처럼 삼키면 안 된다.
+ * 훅 경로만 이 경계가 흡수: 종전 uncaught→main().catch exit 1은 PreToolUse 계약상 비차단이라
+ * fail-open이긴 했지만 failopen.log·고지·계측이 전부 빠진 *비정형*이었다. 여기서 정형화
+ * (best-effort 계측 + systemMessage 고지 + exit 0). A-mode in-process 전환 시 이 경계가
+ * 콜백 예외 정책으로 1:1 치환되는 seam이다.
+ */
+async function runHookSafely(
+  kind: string,
+  body: (onCwd: (cwd: string) => void) => Promise<void>,
+): Promise<void> {
+  // body가 input에서 확정한 cwd를 되돌려 받는다(onCwd) — catch의 failopen.log가 process.cwd()가
+  // 아니라 실제 대상 프로젝트 .gbc/에 남게(input.cwd || process.cwd() 컨벤션 정합, scope-critic ②b).
+  let cwd = process.cwd();
+  try {
+    await body((c) => (cwd = c));
+  } catch (e) {
+    try {
+      logFailOpen(cwd, kind, String(e).slice(0, 160));
+    } catch {
+      /* 계측 실패는 무시 — fail-open 자체를 막지 않는다 */
+    }
+    emit({
+      systemMessage: `🐢 거북이 게이트 — 내부 오류로 검사 없이 안전 통과(fail-open): ${String(e).slice(0, 120)}`,
+    });
+    process.exit(0);
+  }
+}
+
 function emit(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj));
 }
 
-function nowIso(): string {
-  try {
-    return new Date().toISOString();
-  } catch {
-    return "";
-  }
-}
-
 function logBypass(cwd: string, toolName: string): void {
   try {
-    appendFileSync(join(gbcDir(cwd), "bypass.log"), `${new Date().toISOString()} ${toolName}\n`);
+    appendFileSync(join(gbcDir(cwd), "bypass.log"), `${nowIso()} ${toolName}\n`);
   } catch {
     /* 계측 실패는 무시 */
   }
@@ -111,7 +150,7 @@ function logFailOpen(cwd: string, toolName: string, reason: string): void {
   try {
     appendFileSync(
       join(gbcDir(cwd), "failopen.log"),
-      `${new Date().toISOString()} ${toolName} ${reason}\n`,
+      `${nowIso()} ${toolName} ${reason}\n`,
     );
   } catch {
     /* 계측 실패는 무시 */
@@ -138,6 +177,27 @@ function maybeUpdateNotice(cwd: string, session: string, ctx?: HookContext): str
   } catch {
     return "";
   }
+}
+
+/**
+ * 게이트 판정 출구 공통화(0.6.1 R9) — 업데이트 안내(세션 1회 dedup)를 출구에서 1회 결합해 emit 후
+ * 종료한다. 종전엔 maybeUpdateNotice가 4분기(doc-skip·cached·pass·block)에 교차 삽입돼 판정 로직과
+ * 직교 관심사가 섞여 있었다(A1 evaluateGate 추출 대상 축소를 위한 선행 분리).
+ * ⚠️ 안내는 출구 시점에 계산해야 한다(선계산 금지) — pass/block 경로는 judge와 병렬로 refresh된
+ * 버전 캐시(0.3.0)를 읽어야 그 편집에서 신버전이 즉시 뜬다. fail-open 출구는 이 함수를 쓰지 않는다
+ * (종전에도 안내 미첨부 — 실패 고지 systemMessage와 섞지 않는 기존 동작 보존).
+ */
+function exitGate(
+  cwd: string,
+  session: string,
+  ctx: HookContext | undefined,
+  out?: Record<string, unknown>,
+): never {
+  const notice = maybeUpdateNotice(cwd, session, ctx);
+  const payload: Record<string, unknown> = { ...(out ?? {}) };
+  if (notice) payload.systemMessage = notice;
+  if (Object.keys(payload).length > 0) emit(payload);
+  process.exit(0);
 }
 
 /** 코드 파일 확장자(scope 큐잉 대상 — 문서/설정 편집은 파급반경·사다리 판정 대상 아님). */
@@ -182,19 +242,18 @@ function maybeEnqueueScope(
   }
 }
 
-/** PreToolUse: 코드 변경 직전 게이트 */
-export async function runPreToolUse(ctx?: HookContext): Promise<void> {
-  let input: PreToolUseInput = {};
-  try {
-    const raw = await readStdin();
-    input = raw ? (JSON.parse(raw) as PreToolUseInput) : {};
-  } catch {
-    // 입력 파싱 실패 → 안전하게 통과(fail-open)
-    process.exit(0);
-  }
+/** PreToolUse: 코드 변경 직전 게이트 — 정형 fail-open 경계(runHookSafely) 경유. */
+export function runPreToolUse(ctx?: HookContext): Promise<void> {
+  return runHookSafely("pre-tool-use", (onCwd) => preToolUseBody(ctx, onCwd));
+}
+
+async function preToolUseBody(ctx?: HookContext, onCwd?: (cwd: string) => void): Promise<void> {
+  const input = parseHookInput<PreToolUseInput>(await readStdin());
+  if (input === null) process.exit(0); // 입력 파싱 실패 → 안전하게 통과(fail-open)
 
   const toolName = input.tool_name ?? "";
   const cwd = input.cwd || process.cwd();
+  onCwd?.(cwd);
   const session = input.session_id ?? "";
 
   // 코드 변경 도구가 아니면 즉시 통과
@@ -213,9 +272,7 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   // 조용한 우회 방지 위해 doc-skip 계측.
   if (isDocFile(input.tool_input?.file_path ?? "")) {
     logEvent(cwd, { at: nowIso(), session, specHash: "", kind: "gate", tool: toolName, decision: "doc-skip" });
-    const docNotice = maybeUpdateNotice(cwd, session, ctx);
-    if (docNotice) emit({ systemMessage: docNotice });
-    process.exit(0);
+    exitGate(cwd, session, ctx);
   }
 
   const { text: specText, source } = loadPlanSpec(cwd);
@@ -239,13 +296,9 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
       tool: toolName,
       decision: "cached",
     });
-    // 업데이트 안내(있으면)를 cached-skip에서도 노출 — 평상 작업은 대부분 통과된 작업단위라
-    // 이 경로가 가장 흔하다. 여기서 빠지면 보이는 배너(PreToolUse systemMessage)가 거의 안 떴음
-    // (0.2.x 가시성 갭). maybeUpdateNotice는 세션당 1회 dedup이라 노이즈 없음(매 세션 첫 편집 1회).
+    // 업데이트 안내를 cached-skip에서도 노출(0.2.x 가시성 갭 해소) — 평상 작업 최빈 경로.
     // permissionDecision 없음 → cached-pass 통과 동작 불변. 네트워크 없음(캐시만 읽음).
-    const cachedNotice = maybeUpdateNotice(cwd, session, ctx);
-    if (cachedNotice) emit({ systemMessage: cachedNotice });
-    process.exit(0);
+    exitGate(cwd, session, ctx);
   }
 
   // judge는 여기서만 동적 import (SDK lazy)
@@ -321,10 +374,8 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
       deferCount: defers.length,
     });
     // 업데이트 안내(있으면)만 비차단 노출 — systemMessage 단독은 permissionDecision 없으니
-    // 도구를 자동승인하지 않고(통과 동작 보존) 메시지만 표시한다.
-    const passNotice = maybeUpdateNotice(cwd, session, ctx);
-    if (passNotice) emit({ systemMessage: passNotice });
-    process.exit(0); // 정상 통과 (자동승인 X)
+    // 도구를 자동승인하지 않고(통과 동작 보존) 메시지만 표시한다. 정상 통과(자동승인 X).
+    exitGate(cwd, session, ctx);
   }
 
   // block: 사람 pause (ask 기본) — 사유가 사용자에게 표시됨
@@ -359,19 +410,15 @@ export async function runPreToolUse(ctx?: HookContext): Promise<void> {
   });
 
   const mode = process.env.GBC_BLOCK_MODE === "deny" ? "deny" : "ask";
-  const blockOut: Record<string, unknown> = {
+  // 업데이트 안내(있으면)는 exitGate가 같은 출력에 top-level systemMessage로 덧붙인다(차단 동작 불변).
+  exitGate(cwd, session, ctx, {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: mode,
       permissionDecisionReason: reason,
       additionalContext: reason,
     },
-  };
-  // 업데이트 안내(있으면)를 같은 출력에 top-level systemMessage로 덧붙인다(차단 동작 불변).
-  const blockNotice = maybeUpdateNotice(cwd, session, ctx);
-  if (blockNotice) blockOut.systemMessage = blockNotice;
-  emit(blockOut);
-  process.exit(0);
+  });
 }
 
 /** scope 이벤트의 coarse axis 태그 도출 — rung 걸림이 우선, 아니면 파급반경(scope). */
@@ -493,19 +540,19 @@ async function processScopeQueue(cwd: string, session: string): Promise<string> 
 }
 
 /** Stop: scope 판정(축A/축B) + 미해결 defer 리마인드. stop_hook_active 가드로 턴당 1회. */
-export async function runStop(): Promise<void> {
-  let input: StopInput = {};
-  try {
-    const raw = await readStdin();
-    input = raw ? (JSON.parse(raw) as StopInput) : {};
-  } catch {
-    process.exit(0);
-  }
+export function runStop(): Promise<void> {
+  return runHookSafely("stop", stopBody);
+}
+
+async function stopBody(onCwd?: (cwd: string) => void): Promise<void> {
+  const input = parseHookInput<StopInput>(await readStdin());
+  if (input === null) process.exit(0); // 입력 파싱 실패 → 안전하게 통과(fail-open)
 
   // 이미 한 번 리마인드해 계속 진행 중이면 루프 방지 위해 통과(scope·defer 둘 다 1회만)
   if (input.stop_hook_active === true) process.exit(0);
 
   const cwd = input.cwd || process.cwd();
+  onCwd?.(cwd);
   const session = (input as { session_id?: string }).session_id ?? "";
 
   // ① scope 판정(축A/축B) — defer와 독립. 큐가 있으면 grep+판정해 사후 표면화. GBC_NO_SCOPE로 opt-out.
@@ -593,10 +640,10 @@ export function buildCrossRepoHint(repos: string[], cwd: string): string {
     if (abs === here) continue;
     let unresolved: DeferEntry[];
     try {
-      // lstatSync(statSync 아님)로 심볼릭 링크를 거부한다 — 등록된 symlink가 가리키는 cwd 밖
-      // 임의 경로(/etc 등)의 .gbc/defers.json을 읽으려 시도하는 간접 확장을 막는다(보안검토 S3).
-      // 실디렉터리만 isDirectory()=true; symlink면 false라 skip된다.
-      if (!existsSync(abs) || !lstatSync(abs).isDirectory()) continue;
+      // 단일 lstatSync로 부재/symlink를 한 번에 판정(0.6.1 R5) — existsSync+lstatSync 분리는
+      // 자기 프로젝트가 W1에서 폐기한 TOCTOU 패턴(cli.ts cmdMetrics·cmdRepos 표준과 통일).
+      // lstat은 링크를 안 따라가 symlink면 isDirectory()=false(보안검토 S3), 부재는 throw→catch skip.
+      if (!lstatSync(abs).isDirectory()) continue;
       unresolved = loadDefers(abs).filter((d) => !isClosedStatus(d.status));
     } catch {
       continue;
@@ -652,15 +699,15 @@ export function buildSessionStartPayload(contextParts: string[], userNotice: str
  * 직접 배너). 둘 다 없으면 무출력. GBC_NO_SESSION_HINT·GBC_NO_UPDATE_NOTICE로 각각 opt-out.
  * 결정론적(LLM·코드비교 없음)·비차단(exit 0).
  */
-export async function runSessionStart(ctx?: HookContext): Promise<void> {
-  let input: SessionStartInput = {};
-  try {
-    const raw = await readStdin();
-    input = raw ? (JSON.parse(raw) as SessionStartInput) : {};
-  } catch {
-    process.exit(0);
-  }
+export function runSessionStart(ctx?: HookContext): Promise<void> {
+  return runHookSafely("session-start", (onCwd) => sessionStartBody(ctx, onCwd));
+}
+
+async function sessionStartBody(ctx?: HookContext, onCwd?: (cwd: string) => void): Promise<void> {
+  const input = parseHookInput<SessionStartInput>(await readStdin());
+  if (input === null) process.exit(0); // 입력 파싱 실패 → 안전하게 통과(fail-open)
   const cwd = input.cwd || process.cwd();
+  onCwd?.(cwd);
   // 청중분리(Option X): contextParts는 additionalContext(Claude 컨텍스트), userNotice는
   // systemMessage(사용자 직접 배너). buildSessionStartPayload가 JSON 직렬화.
   const contextParts: string[] = [];

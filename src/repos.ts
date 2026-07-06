@@ -3,7 +3,7 @@
 // (~/.gbc/api-key·~/.gbc/version-check.json과 동위. gbcDir(homedir())가 ~/.gbc를 보장.)
 import { homedir } from "node:os";
 import { join, resolve, isAbsolute } from "node:path";
-import { gbcDir, readJson, writeJson } from "./store.js";
+import { gbcDir, readJson, readJsonArray, writeJson } from "./store.js";
 
 function reposPath(): string {
   return join(gbcDir(homedir()), "repos.json");
@@ -15,9 +15,10 @@ function reposPath(): string {
  * 통과시켜, 깨진/악의적 항목이 cmdMetrics --all 등의 읽기 대상이 되는 걸 차단한다(symlink 가드와 다층).
  */
 export function loadRepos(): string[] {
-  const raw = readJson<unknown>(reposPath(), []);
-  if (!Array.isArray(raw)) return [];
-  return raw.filter((r): r is string => typeof r === "string" && isAbsolute(r));
+  // 배열 형상은 readJsonArray(0.6.1 R3 단일 소스), 항목 신뢰 필터(문자열·절대경로)는 여기 유지.
+  return readJsonArray<unknown>(reposPath()).filter(
+    (r): r is string => typeof r === "string" && isAbsolute(r),
+  );
 }
 
 /** repo 등록(절대경로 정규화·멱등 dedup). 반환=등록 후 전체 목록. */

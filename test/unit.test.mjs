@@ -89,7 +89,7 @@ import {
   parseScopeVerdicts,
   judgeScope,
   SCOPE_SYSTEM,
-  SCOPE_MODEL,
+  scopeModel,
 } from "../dist/judge.js";
 import { parseJUnit, readVerifyResults, JUNIT_DEFAULT_REL } from "../dist/junit.js";
 import { runVerify } from "../dist/verify.js";
@@ -2504,9 +2504,9 @@ function scopeQ(over = {}) {
   return { file: "src/a.ts", tool: "Edit", edit: "x", specHash: "h", at: "t", ...over };
 }
 
-test("SCOPE_MODEL: 기본 haiku (GBC_SCOPE_MODEL 미설정 시)", () => {
-  // 기본 실행 환경엔 GBC_SCOPE_MODEL 없음 → haiku
-  assert.equal(SCOPE_MODEL, "claude-haiku-4-5");
+test("scopeModel(): 기본 haiku (GBC_SCOPE_MODEL 미설정 시) — 0.6.1 상수→리졸버 승계", () => {
+  // 구 SCOPE_MODEL 상수의 기본값 계약을 리졸버로 승계(상수는 R4 호출시점 전환으로 제거).
+  assert.equal(scopeModel({}), "claude-haiku-4-5");
 });
 
 test("parseScopeVerdicts: 정상 배치 파싱 (컨텍스트 있음 → degraded=false)", () => {
@@ -3154,4 +3154,200 @@ test("buildBlockReason: 침묵누락 안내에 defer 대상 조건화(형제 케
   );
   assert.match(r, /형제 케이스만/);
   assert.match(r, /계획 문서/);
+});
+
+// ===== 0.6.1 ST1: 모델 해석 일원화 — 호출시점 env + 트랜스포트 공통 새니타이즈 (R1+R4+F5) =====
+
+test("gateModel/scopeModel/verifyModel: env 주입 해석 + 미설정 기본 haiku", async () => {
+  const j = await import("../dist/judge.js");
+  assert.equal(typeof j.gateModel, "function", "gateModel 미구현");
+  assert.equal(typeof j.scopeModel, "function", "scopeModel 미구현");
+  assert.equal(typeof j.verifyModel, "function", "verifyModel 미구현");
+  assert.equal(j.gateModel({ GBC_MODEL: "claude-3-x" }), "claude-3-x");
+  assert.equal(j.scopeModel({ GBC_SCOPE_MODEL: "claude-3-y" }), "claude-3-y");
+  assert.equal(j.verifyModel({ GBC_VERIFY_MODEL: "claude-3-z" }), "claude-3-z");
+  assert.equal(j.gateModel({}), "claude-haiku-4-5");
+  assert.equal(j.scopeModel({}), "claude-haiku-4-5");
+  assert.equal(j.verifyModel({}), "claude-haiku-4-5");
+});
+
+test("모델 해석: 프로세스 env를 호출 시점에 읽는다 (import 후 변경 반영 — R4 장수 프로세스)", async () => {
+  const j = await import("../dist/judge.js");
+  const prev = process.env.GBC_SCOPE_MODEL;
+  try {
+    process.env.GBC_SCOPE_MODEL = "claude-late-set";
+    assert.equal(j.scopeModel(), "claude-late-set", "모듈 로드시점 상수 고정이면 이 값이 반영될 수 없다");
+  } finally {
+    if (prev === undefined) delete process.env.GBC_SCOPE_MODEL;
+    else process.env.GBC_SCOPE_MODEL = prev;
+  }
+});
+
+test("모델 해석: 트랜스포트 공통 새니타이즈 — 비화이트리스트 모델은 기본 haiku (R1 API 경로 포함)", async () => {
+  const j = await import("../dist/judge.js");
+  assert.equal(j.gateModel({ GBC_MODEL: "bad model; rm -rf /" }), "claude-haiku-4-5");
+  assert.equal(j.scopeModel({ GBC_SCOPE_MODEL: "x&&y" }), "claude-haiku-4-5");
+  assert.equal(j.verifyModel({ GBC_VERIFY_MODEL: "`cmd`" }), "claude-haiku-4-5");
+});
+
+// ===== 0.6.1 ST2: readJsonArray 형상 가드 통일 (R3) =====
+// valid-JSON-비배열(defers.json 등)이 .map throw→비정형 fail-open(exit1)으로 새던 것을
+// store.ts 근원에서 흡수한다. scope.ts:38·repos.ts:17에 산개된 Array.isArray 가드의 단일화.
+
+test("readJsonArray: 부재→[] · valid-JSON 비배열→[] · 정상 배열→그대로", async () => {
+  const s = await import("../dist/store.js");
+  assert.equal(typeof s.readJsonArray, "function", "readJsonArray 미구현");
+  const dir = tmp();
+  try {
+    const p = join(dir, "x.json");
+    assert.deepEqual(s.readJsonArray(p), [], "파일 부재 → 빈 배열");
+    writeFileSync(p, JSON.stringify({ corrupt: true }));
+    assert.deepEqual(s.readJsonArray(p), [], "valid-JSON 객체 → 빈 배열(throw 금지)");
+    writeFileSync(p, "not json{{");
+    assert.deepEqual(s.readJsonArray(p), [], "파손 JSON → 빈 배열");
+    writeFileSync(p, JSON.stringify([{ a: 1 }]));
+    assert.deepEqual(s.readJsonArray(p), [{ a: 1 }], "정상 배열 → 그대로");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadDefers: defers.json이 비배열 JSON이어도 throw 없이 [] (비정형 fail-open 근절)", () => {
+  const dir = tmp();
+  try {
+    mkdirSync(join(dir, ".gbc"), { recursive: true });
+    writeFileSync(join(dir, ".gbc", "defers.json"), JSON.stringify({ corrupt: true }));
+    assert.deepEqual(loadDefers(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadGolden: golden.json이 비배열 JSON이어도 throw 없이 []", async () => {
+  const { loadGolden } = await import("../dist/golden.js");
+  const dir = tmp();
+  try {
+    mkdirSync(join(dir, ".gbc"), { recursive: true });
+    writeFileSync(join(dir, ".gbc", "golden.json"), JSON.stringify("oops"));
+    assert.deepEqual(loadGolden(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readPendingReview: missing이 배열이 아닌 레코드는 null (gate review 크래시 방지)", () => {
+  const dir = tmp();
+  try {
+    mkdirSync(join(dir, ".gbc"), { recursive: true });
+    writeFileSync(join(dir, ".gbc", "pending-review.json"), JSON.stringify({ missing: "not-array", reason: "r", source: "s", at: "t" }));
+    assert.equal(readPendingReview(dir), null, "형상 불일치 → null(비정형 throw 금지)");
+    writeFileSync(join(dir, ".gbc", "pending-review.json"), JSON.stringify(["array-not-object"]));
+    assert.equal(readPendingReview(dir), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===== 0.6.1 ST3: scope 자기파일 비교 realpath 기반 (R2) =====
+// 심링크 소스(모노repo 링크 등)에서 lexical resolve 비교가 자기 파일 매치를 타 파일로
+// 오분류 → 근거 없는 축A/rung2 확신의 재료가 되던 정밀도 저하를 실경로 비교로 해소.
+
+test("collectGrepContext: 심링크 자기파일 매치는 제외 (realpath 동일 실체 비교)", async () => {
+  const dir = tmp();
+  try {
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "real.ts"), "export function fooBarBaz() {}\n");
+    symlinkSync(join(dir, "src", "real.ts"), join(dir, "src", "linked.ts"));
+    // 편집 대상은 심링크 경로, grep은 실경로로 매치를 보고하는 시나리오(동일 실체).
+    const grep = async () => "src/real.ts:1: export function fooBarBaz()\n";
+    const r = await collectGrepContext(
+      dir,
+      [{ file: "src/linked.ts", tool: "Edit", edit: "export function fooBarBaz() {}", specHash: "h", at: "t" }],
+      { grep },
+    );
+    assert.equal(r.filesWithContext.size, 0, "자기 파일(동일 실체) 매치만 있으면 컨텍스트 없음");
+    assert.equal(r.context, "", "자기 매치가 타 파일 단서로 새면 안 됨");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("collectGrepContext: realpath 실패(브로큰 링크 등)는 lexical resolve 폴백으로 기존 동작 유지", async () => {
+  const dir = tmp();
+  try {
+    mkdirSync(join(dir, "src"), { recursive: true });
+    // 편집 파일이 디스크에 아직 없음(Write 직전) — realpath 불가 → lexical 비교 폴백.
+    const grep = async () => "src/other.ts:1: fooBarBaz()\n";
+    const r = await collectGrepContext(
+      dir,
+      [{ file: "src/ghost.ts", tool: "Write", edit: "export function fooBarBaz() {}", specHash: "h", at: "t" }],
+      { grep },
+    );
+    assert.equal(r.filesWithContext.size, 1, "타 파일 매치는 여전히 수집");
+    assert.ok(r.context.includes("src/other.ts"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===== 0.6.1 ST4: hook stdin 파싱 fail-open 단일화 (F1) =====
+// 3핸들러에 바이트 동일 복붙돼 있던 "파싱 실패→안전 통과" 불변식을 순수 함수 하나로 모은다.
+
+test("parseHookInput: 빈 입력→{} · 파싱 실패→null(fail-open 신호) · 정상 JSON→객체", async () => {
+  const h = await import("../dist/hook.js");
+  assert.equal(typeof h.parseHookInput, "function", "parseHookInput 미구현");
+  assert.deepEqual(h.parseHookInput(""), {}, "빈 stdin = 입력 없음으로 통과");
+  assert.equal(h.parseHookInput("not-json{{"), null, "파싱 실패는 null — 호출자가 즉시 exit 0");
+  assert.deepEqual(h.parseHookInput('{"cwd":"/x"}'), { cwd: "/x" });
+});
+
+test("parseHookInput: valid-JSON 비객체(null·숫자·문자열)는 {} — 속성 접근 크래시 차단", async () => {
+  const h = await import("../dist/hook.js");
+  // 종전 복붙 코드는 JSON.parse("null")→null을 input에 그대로 실어 input.tool_name TypeError
+  // →exit1 비정형 fail-open으로 샜다. 비객체는 빈 입력과 동일 취급이 불변식에 정합.
+  assert.deepEqual(h.parseHookInput("null"), {});
+  assert.deepEqual(h.parseHookInput("5"), {});
+  assert.deepEqual(h.parseHookInput('"str"'), {});
+});
+
+// ===== 0.6.1 ST7: runRunnerCommand 스모크 (R8) =====
+// 코드베이스 유일 의도적 셸 실행 경로(verify --run)의 무커버 해소. 판정은 XML 몫이라
+// exit≠0도 ok:true(+reason)가 계약 — 그 계약과 timeout-kill 경로를 고정한다.
+
+test("runRunnerCommand: 정상 종료(echo) → ok:true·reason 없음", async () => {
+  const { runRunnerCommand } = await import("../dist/run.js");
+  const dir = tmp();
+  try {
+    const out = await runRunnerCommand("echo gbc-smoke", dir, 10000);
+    assert.equal(out.ok, true);
+    assert.equal(out.reason, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRunnerCommand: 러너 비0 exit → ok:true + reason에 exit 코드 (게이트 않음 계약)", async () => {
+  const { runRunnerCommand } = await import("../dist/run.js");
+  const dir = tmp();
+  try {
+    const out = await runRunnerCommand("exit 3", dir, 10000);
+    assert.equal(out.ok, true, "러너 실패는 spawn 계층 실패가 아니다 — 판정은 XML 몫");
+    assert.match(out.reason ?? "", /exit 3/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runRunnerCommand: 타임아웃 → kill + ok:false·reason에 timeout", async () => {
+  const { runRunnerCommand } = await import("../dist/run.js");
+  const dir = tmp();
+  try {
+    const started = Date.now();
+    const out = await runRunnerCommand("sleep 30", dir, 500);
+    assert.equal(out.ok, false);
+    assert.match(out.reason ?? "", /timeout/);
+    assert.ok(Date.now() - started < 10000, "타임아웃이 30s sleep을 기다리지 않고 kill");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
