@@ -3247,3 +3247,45 @@ test("readPendingReview: missing이 배열이 아닌 레코드는 null (gate rev
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ===== 0.6.1 ST3: scope 자기파일 비교 realpath 기반 (R2) =====
+// 심링크 소스(모노repo 링크 등)에서 lexical resolve 비교가 자기 파일 매치를 타 파일로
+// 오분류 → 근거 없는 축A/rung2 확신의 재료가 되던 정밀도 저하를 실경로 비교로 해소.
+
+test("collectGrepContext: 심링크 자기파일 매치는 제외 (realpath 동일 실체 비교)", async () => {
+  const dir = tmp();
+  try {
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "real.ts"), "export function fooBarBaz() {}\n");
+    symlinkSync(join(dir, "src", "real.ts"), join(dir, "src", "linked.ts"));
+    // 편집 대상은 심링크 경로, grep은 실경로로 매치를 보고하는 시나리오(동일 실체).
+    const grep = async () => "src/real.ts:1: export function fooBarBaz()\n";
+    const r = await collectGrepContext(
+      dir,
+      [{ file: "src/linked.ts", tool: "Edit", edit: "export function fooBarBaz() {}", specHash: "h", at: "t" }],
+      { grep },
+    );
+    assert.equal(r.filesWithContext.size, 0, "자기 파일(동일 실체) 매치만 있으면 컨텍스트 없음");
+    assert.equal(r.context, "", "자기 매치가 타 파일 단서로 새면 안 됨");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("collectGrepContext: realpath 실패(브로큰 링크 등)는 lexical resolve 폴백으로 기존 동작 유지", async () => {
+  const dir = tmp();
+  try {
+    mkdirSync(join(dir, "src"), { recursive: true });
+    // 편집 파일이 디스크에 아직 없음(Write 직전) — realpath 불가 → lexical 비교 폴백.
+    const grep = async () => "src/other.ts:1: fooBarBaz()\n";
+    const r = await collectGrepContext(
+      dir,
+      [{ file: "src/ghost.ts", tool: "Write", edit: "export function fooBarBaz() {}", specHash: "h", at: "t" }],
+      { grep },
+    );
+    assert.equal(r.filesWithContext.size, 1, "타 파일 매치는 여전히 수집");
+    assert.ok(r.context.includes("src/other.ts"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
