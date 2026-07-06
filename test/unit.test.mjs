@@ -3155,3 +3155,37 @@ test("buildBlockReason: 침묵누락 안내에 defer 대상 조건화(형제 케
   assert.match(r, /형제 케이스만/);
   assert.match(r, /계획 문서/);
 });
+
+// ===== 0.6.1 ST1: 모델 해석 일원화 — 호출시점 env + 트랜스포트 공통 새니타이즈 (R1+R4+F5) =====
+
+test("gateModel/scopeModel/verifyModel: env 주입 해석 + 미설정 기본 haiku", async () => {
+  const j = await import("../dist/judge.js");
+  assert.equal(typeof j.gateModel, "function", "gateModel 미구현");
+  assert.equal(typeof j.scopeModel, "function", "scopeModel 미구현");
+  assert.equal(typeof j.verifyModel, "function", "verifyModel 미구현");
+  assert.equal(j.gateModel({ GBC_MODEL: "claude-3-x" }), "claude-3-x");
+  assert.equal(j.scopeModel({ GBC_SCOPE_MODEL: "claude-3-y" }), "claude-3-y");
+  assert.equal(j.verifyModel({ GBC_VERIFY_MODEL: "claude-3-z" }), "claude-3-z");
+  assert.equal(j.gateModel({}), "claude-haiku-4-5");
+  assert.equal(j.scopeModel({}), "claude-haiku-4-5");
+  assert.equal(j.verifyModel({}), "claude-haiku-4-5");
+});
+
+test("모델 해석: 프로세스 env를 호출 시점에 읽는다 (import 후 변경 반영 — R4 장수 프로세스)", async () => {
+  const j = await import("../dist/judge.js");
+  const prev = process.env.GBC_SCOPE_MODEL;
+  try {
+    process.env.GBC_SCOPE_MODEL = "claude-late-set";
+    assert.equal(j.scopeModel(), "claude-late-set", "모듈 로드시점 상수 고정이면 이 값이 반영될 수 없다");
+  } finally {
+    if (prev === undefined) delete process.env.GBC_SCOPE_MODEL;
+    else process.env.GBC_SCOPE_MODEL = prev;
+  }
+});
+
+test("모델 해석: 트랜스포트 공통 새니타이즈 — 비화이트리스트 모델은 기본 haiku (R1 API 경로 포함)", async () => {
+  const j = await import("../dist/judge.js");
+  assert.equal(j.gateModel({ GBC_MODEL: "bad model; rm -rf /" }), "claude-haiku-4-5");
+  assert.equal(j.scopeModel({ GBC_SCOPE_MODEL: "x&&y" }), "claude-haiku-4-5");
+  assert.equal(j.verifyModel({ GBC_VERIFY_MODEL: "`cmd`" }), "claude-haiku-4-5");
+});
