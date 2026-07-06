@@ -4,20 +4,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDir } from "./store.js";
+import { nowIso } from "./time.js";
 import { hasStalePreToolUse, hasSessionStartHook } from "./install.js";
 import { readVersionCache, buildVersionNotice } from "./version.js";
 
-interface HookCmd {
-  type: string;
-  command: string;
-}
-interface HookEntry {
-  matcher?: string;
-  hooks: HookCmd[];
-}
-interface Settings {
-  hooks?: Record<string, HookEntry[]>;
-}
+import type { Settings } from "./types.js";
 
 /** 프로젝트 로컬 .claude/settings.json 읽기(없거나 깨지면 빈 객체). read-only. */
 export function readProjectSettings(cwd: string): Settings {
@@ -65,7 +56,7 @@ export function wasNotified(cwd: string, session: string): boolean {
 /** 이 세션을 '안내함'으로 기록. 기록 실패는 무시(안내가 게이트를 방해하지 않게). */
 export function markNotified(cwd: string, session: string): void {
   try {
-    writeFileSync(notifiedPath(cwd), JSON.stringify({ session, at: new Date().toISOString() }));
+    writeFileSync(notifiedPath(cwd), JSON.stringify({ session, at: nowIso() }));
   } catch {
     /* 안내 기록 실패는 무시(fail-silent) */
   }

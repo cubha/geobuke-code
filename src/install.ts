@@ -2,17 +2,7 @@
 // 키 주입은 셸이 아니라 gbc 코드(judge.ts resolveApiKey)가 처리한다 → hook 명령은
 // 셸 무관 순수 형태라 native Windows(cmd.exe)/bash/zsh/Mac에서 동일하게 동작한다.
 
-interface HookCmd {
-  type: string;
-  command: string;
-}
-interface HookEntry {
-  matcher?: string;
-  hooks: HookCmd[];
-}
-interface Settings {
-  hooks?: Record<string, HookEntry[]>;
-}
+import type { Settings } from "./types.js";
 
 /**
  * dev(도그푸딩) 설치용 hook 경로 placeholder. `gbc init --dev`가 절대경로(CLI_PATH) 대신 이걸

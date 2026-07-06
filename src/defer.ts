@@ -1,18 +1,11 @@
 import { join } from "node:path";
 import { gbcDir, readJsonArray, writeJson } from "./store.js";
 import { normalizeCase } from "./text.js";
+import { nowIso } from "./time.js";
 import type { DeferEntry, DeferStatus, RawDeferEntry } from "./types.js";
 
 function deferPath(cwd: string): string {
   return join(gbcDir(cwd), "defers.json");
-}
-
-function nowIso(): string {
-  try {
-    return new Date().toISOString();
-  } catch {
-    return "";
-  }
 }
 
 /**

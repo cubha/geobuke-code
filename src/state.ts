@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { gbcDir, readJson, writeJson } from "./store.js";
+import { nowIso } from "./time.js";
 import type { GateState } from "./types.js";
 
 function statePath(cwd: string): string {
@@ -8,15 +9,6 @@ function statePath(cwd: string): string {
 
 export function loadState(cwd: string): GateState | null {
   return readJson<GateState | null>(statePath(cwd), null);
-}
-
-function nowIso(): string {
-  // Date.now/new Date()는 일부 실행환경에서 금지될 수 있어 안전하게 처리
-  try {
-    return new Date().toISOString();
-  } catch {
-    return "";
-  }
 }
 
 /**

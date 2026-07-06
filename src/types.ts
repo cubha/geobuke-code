@@ -231,6 +231,27 @@ export interface VerifyReport {
   provenance: VerifyProvenance;
 }
 
+// ===== .claude/settings.json hook 설정 형상(0.6.1 F3) =====
+// install.ts↔notice.ts에 동일 인터페이스가 사본으로 존재하던 것을 단일화. cli.ts cmdInit의
+// settings 머지도 이 타입을 쓴다(런타임엔 다른 키가 공존하지만 여기선 hooks 관점만 좁혀 본다).
+
+/** hook 명령 한 건({type:"command", command:"node ..."}). */
+export interface HookCmd {
+  type: string;
+  command: string;
+}
+
+/** settings.json hooks.<Event> 배열의 엔트리(matcher 선택). */
+export interface HookEntry {
+  matcher?: string;
+  hooks: HookCmd[];
+}
+
+/** .claude/settings.json의 hooks 관점 형상. */
+export interface Settings {
+  hooks?: Record<string, HookEntry[]>;
+}
+
 /** 작업단위 게이트 상태 (.gbc/state.json) */
 export interface GateState {
   /** 현재 작업단위를 식별하는 계획 명세 해시 */

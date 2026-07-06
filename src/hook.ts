@@ -4,7 +4,7 @@
 import { isGatedTool, normalizeEdit } from "./normalize.js";
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated, markGated } from "./state.js";
-import { activeDeferItems, resolvedDeferItems, unresolvedDefers, loadDefers, isClosedStatus } from "./defer.js";
+import { activeDeferItems, resolvedDeferItems, loadDefers, isClosedStatus } from "./defer.js";
 import { isStopHintMuted, isGoldenCapture } from "./config.js";
 import { loadRepos } from "./repos.js";
 import { writePendingReview } from "./review.js";
@@ -17,9 +17,10 @@ import {
   refreshVersionCache,
   shouldRefreshCache,
 } from "./version.js";
-import { appendFileSync, existsSync, lstatSync } from "node:fs";
+import { appendFileSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { gbcDir } from "./store.js";
+import { nowIso } from "./time.js";
 import { logEvent } from "./metrics.js";
 import type { EditToolInput, Verdict, DeferEntry, ScopeVerdict } from "./types.js";
 
@@ -136,17 +137,9 @@ function emit(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj));
 }
 
-function nowIso(): string {
-  try {
-    return new Date().toISOString();
-  } catch {
-    return "";
-  }
-}
-
 function logBypass(cwd: string, toolName: string): void {
   try {
-    appendFileSync(join(gbcDir(cwd), "bypass.log"), `${new Date().toISOString()} ${toolName}\n`);
+    appendFileSync(join(gbcDir(cwd), "bypass.log"), `${nowIso()} ${toolName}\n`);
   } catch {
     /* 계측 실패는 무시 */
   }
@@ -157,7 +150,7 @@ function logFailOpen(cwd: string, toolName: string, reason: string): void {
   try {
     appendFileSync(
       join(gbcDir(cwd), "failopen.log"),
-      `${new Date().toISOString()} ${toolName} ${reason}\n`,
+      `${nowIso()} ${toolName} ${reason}\n`,
     );
   } catch {
     /* 계측 실패는 무시 */
@@ -638,10 +631,10 @@ export function buildCrossRepoHint(repos: string[], cwd: string): string {
     if (abs === here) continue;
     let unresolved: DeferEntry[];
     try {
-      // lstatSync(statSync 아님)로 심볼릭 링크를 거부한다 — 등록된 symlink가 가리키는 cwd 밖
-      // 임의 경로(/etc 등)의 .gbc/defers.json을 읽으려 시도하는 간접 확장을 막는다(보안검토 S3).
-      // 실디렉터리만 isDirectory()=true; symlink면 false라 skip된다.
-      if (!existsSync(abs) || !lstatSync(abs).isDirectory()) continue;
+      // 단일 lstatSync로 부재/symlink를 한 번에 판정(0.6.1 R5) — existsSync+lstatSync 분리는
+      // 자기 프로젝트가 W1에서 폐기한 TOCTOU 패턴(cli.ts cmdMetrics·cmdRepos 표준과 통일).
+      // lstat은 링크를 안 따라가 symlink면 isDirectory()=false(보안검토 S3), 부재는 throw→catch skip.
+      if (!lstatSync(abs).isDirectory()) continue;
       unresolved = loadDefers(abs).filter((d) => !isClosedStatus(d.status));
     } catch {
       continue;
