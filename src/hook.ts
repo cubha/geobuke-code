@@ -86,6 +86,52 @@ function readStdin(): Promise<string> {
   });
 }
 
+/**
+ * hook stdin 입력 파싱(순수, 0.6.1 F1) — 3핸들러에 복붙돼 있던 "파싱 실패→안전 통과" 불변식의
+ * 단일 소스. 빈 입력={}(입력 없음으로 통과), 파싱 실패=null(호출자가 즉시 exit 0 fail-open).
+ * valid-JSON 비객체(null·숫자·문자열)도 {}로 — 종전엔 JSON.parse("null")이 input에 그대로 실려
+ * 속성 접근 TypeError→exit1 비정형 fail-open으로 샜다(빈 입력과 동일 취급이 불변식에 정합).
+ */
+export function parseHookInput<T>(raw: string): T | null {
+  if (!raw) return {} as T;
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return (typeof v === "object" && v !== null ? v : {}) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 훅 공통 정형 fail-open 경계(0.6.1 R7 설계결정). store.ts 원시 I/O(gbcDir mkdir·writeJson)는
+ * 의도적으로 계속 throw한다 — CLI 경로('gbc spec add' 등)는 디스크 실패를 성공처럼 삼키면 안 된다.
+ * 훅 경로만 이 경계가 흡수: 종전 uncaught→main().catch exit 1은 PreToolUse 계약상 비차단이라
+ * fail-open이긴 했지만 failopen.log·고지·계측이 전부 빠진 *비정형*이었다. 여기서 정형화
+ * (best-effort 계측 + systemMessage 고지 + exit 0). A-mode in-process 전환 시 이 경계가
+ * 콜백 예외 정책으로 1:1 치환되는 seam이다.
+ */
+async function runHookSafely(
+  kind: string,
+  body: (onCwd: (cwd: string) => void) => Promise<void>,
+): Promise<void> {
+  // body가 input에서 확정한 cwd를 되돌려 받는다(onCwd) — catch의 failopen.log가 process.cwd()가
+  // 아니라 실제 대상 프로젝트 .gbc/에 남게(input.cwd || process.cwd() 컨벤션 정합, scope-critic ②b).
+  let cwd = process.cwd();
+  try {
+    await body((c) => (cwd = c));
+  } catch (e) {
+    try {
+      logFailOpen(cwd, kind, String(e).slice(0, 160));
+    } catch {
+      /* 계측 실패는 무시 — fail-open 자체를 막지 않는다 */
+    }
+    emit({
+      systemMessage: `🐢 거북이 게이트 — 내부 오류로 검사 없이 안전 통과(fail-open): ${String(e).slice(0, 120)}`,
+    });
+    process.exit(0);
+  }
+}
+
 function emit(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj));
 }
@@ -182,19 +228,18 @@ function maybeEnqueueScope(
   }
 }
 
-/** PreToolUse: 코드 변경 직전 게이트 */
-export async function runPreToolUse(ctx?: HookContext): Promise<void> {
-  let input: PreToolUseInput = {};
-  try {
-    const raw = await readStdin();
-    input = raw ? (JSON.parse(raw) as PreToolUseInput) : {};
-  } catch {
-    // 입력 파싱 실패 → 안전하게 통과(fail-open)
-    process.exit(0);
-  }
+/** PreToolUse: 코드 변경 직전 게이트 — 정형 fail-open 경계(runHookSafely) 경유. */
+export function runPreToolUse(ctx?: HookContext): Promise<void> {
+  return runHookSafely("pre-tool-use", (onCwd) => preToolUseBody(ctx, onCwd));
+}
+
+async function preToolUseBody(ctx?: HookContext, onCwd?: (cwd: string) => void): Promise<void> {
+  const input = parseHookInput<PreToolUseInput>(await readStdin());
+  if (input === null) process.exit(0); // 입력 파싱 실패 → 안전하게 통과(fail-open)
 
   const toolName = input.tool_name ?? "";
   const cwd = input.cwd || process.cwd();
+  onCwd?.(cwd);
   const session = input.session_id ?? "";
 
   // 코드 변경 도구가 아니면 즉시 통과
@@ -493,19 +538,19 @@ async function processScopeQueue(cwd: string, session: string): Promise<string> 
 }
 
 /** Stop: scope 판정(축A/축B) + 미해결 defer 리마인드. stop_hook_active 가드로 턴당 1회. */
-export async function runStop(): Promise<void> {
-  let input: StopInput = {};
-  try {
-    const raw = await readStdin();
-    input = raw ? (JSON.parse(raw) as StopInput) : {};
-  } catch {
-    process.exit(0);
-  }
+export function runStop(): Promise<void> {
+  return runHookSafely("stop", stopBody);
+}
+
+async function stopBody(onCwd?: (cwd: string) => void): Promise<void> {
+  const input = parseHookInput<StopInput>(await readStdin());
+  if (input === null) process.exit(0); // 입력 파싱 실패 → 안전하게 통과(fail-open)
 
   // 이미 한 번 리마인드해 계속 진행 중이면 루프 방지 위해 통과(scope·defer 둘 다 1회만)
   if (input.stop_hook_active === true) process.exit(0);
 
   const cwd = input.cwd || process.cwd();
+  onCwd?.(cwd);
   const session = (input as { session_id?: string }).session_id ?? "";
 
   // ① scope 판정(축A/축B) — defer와 독립. 큐가 있으면 grep+판정해 사후 표면화. GBC_NO_SCOPE로 opt-out.
@@ -652,15 +697,15 @@ export function buildSessionStartPayload(contextParts: string[], userNotice: str
  * 직접 배너). 둘 다 없으면 무출력. GBC_NO_SESSION_HINT·GBC_NO_UPDATE_NOTICE로 각각 opt-out.
  * 결정론적(LLM·코드비교 없음)·비차단(exit 0).
  */
-export async function runSessionStart(ctx?: HookContext): Promise<void> {
-  let input: SessionStartInput = {};
-  try {
-    const raw = await readStdin();
-    input = raw ? (JSON.parse(raw) as SessionStartInput) : {};
-  } catch {
-    process.exit(0);
-  }
+export function runSessionStart(ctx?: HookContext): Promise<void> {
+  return runHookSafely("session-start", (onCwd) => sessionStartBody(ctx, onCwd));
+}
+
+async function sessionStartBody(ctx?: HookContext, onCwd?: (cwd: string) => void): Promise<void> {
+  const input = parseHookInput<SessionStartInput>(await readStdin());
+  if (input === null) process.exit(0); // 입력 파싱 실패 → 안전하게 통과(fail-open)
   const cwd = input.cwd || process.cwd();
+  onCwd?.(cwd);
   // 청중분리(Option X): contextParts는 additionalContext(Claude 컨텍스트), userNotice는
   // systemMessage(사용자 직접 배너). buildSessionStartPayload가 JSON 직렬화.
   const contextParts: string[] = [];
