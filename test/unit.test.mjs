@@ -3289,3 +3289,23 @@ test("collectGrepContext: realpath 실패(브로큰 링크 등)는 lexical resol
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ===== 0.6.1 ST4: hook stdin 파싱 fail-open 단일화 (F1) =====
+// 3핸들러에 바이트 동일 복붙돼 있던 "파싱 실패→안전 통과" 불변식을 순수 함수 하나로 모은다.
+
+test("parseHookInput: 빈 입력→{} · 파싱 실패→null(fail-open 신호) · 정상 JSON→객체", async () => {
+  const h = await import("../dist/hook.js");
+  assert.equal(typeof h.parseHookInput, "function", "parseHookInput 미구현");
+  assert.deepEqual(h.parseHookInput(""), {}, "빈 stdin = 입력 없음으로 통과");
+  assert.equal(h.parseHookInput("not-json{{"), null, "파싱 실패는 null — 호출자가 즉시 exit 0");
+  assert.deepEqual(h.parseHookInput('{"cwd":"/x"}'), { cwd: "/x" });
+});
+
+test("parseHookInput: valid-JSON 비객체(null·숫자·문자열)는 {} — 속성 접근 크래시 차단", async () => {
+  const h = await import("../dist/hook.js");
+  // 종전 복붙 코드는 JSON.parse("null")→null을 input에 그대로 실어 input.tool_name TypeError
+  // →exit1 비정형 fail-open으로 샜다. 비객체는 빈 입력과 동일 취급이 불변식에 정합.
+  assert.deepEqual(h.parseHookInput("null"), {});
+  assert.deepEqual(h.parseHookInput("5"), {});
+  assert.deepEqual(h.parseHookInput('"str"'), {});
+});
