@@ -22,45 +22,12 @@ import { join, resolve } from "node:path";
 import { gbcDir } from "./store.js";
 import { nowIso } from "./time.js";
 import { logEvent } from "./metrics.js";
+import { isDocFile, buildBlockReason, shouldCacheVerdict, CODE_FILE_RE } from "./gate-core.js";
 import type { EditToolInput, Verdict, DeferEntry, ScopeVerdict } from "./types.js";
 
-/**
- * 차단 사유 메시지를 빌드한다. 두 차단 종류를 다르게 안내한다:
- * - specEmpty=true (시나리오 미지정): 에이전트가 요청에서 시나리오를 도출 → 사용자 검증 →
- *   'gbc spec add'로 등록 후 재시도하도록 지시한다(도출 루프 트리거). 자동 등록 금지.
- * - specEmpty=false (침묵 누락): 지금 다루거나 'gbc defer add'로 명시 미루도록 안내한다.
- */
-export function buildBlockReason(verdict: Verdict, specEmpty: boolean, source: string): string {
-  if (specEmpty) {
-    return (
-      `🐢 거북이 게이트 — ${verdict.reason}\n` +
-      `→ [에이전트] 사용자 요청에서 의도·동작 시나리오를 도출해 사용자에게 제시·검증받은 뒤, ` +
-      `승인된 케이스를 'gbc spec add "<케이스>"'로 등록하고 재시도하세요. ` +
-      `사용자 승인 없이 자동 등록하지 마세요. (명세 소스: ${source})`
-    );
-  }
-  const missingLine =
-    verdict.missing.length > 0 ? `\n누락(침묵): ${verdict.missing.join(", ")}` : "";
-  // 누락 케이스는 .gbc/pending-review.json에 기록돼 있어 'gbc gate review'로 번호 체크리스트
-  // 일괄 분류(승인→spec / 미룸→defer)가 가능하다. 개별 처리(직접 구현·gbc defer add)도 유효.
-  // defer 유도 조건화(0.5.5, RCA §4-⑤): defer는 "이 변경의 형제 케이스"를 미루는 채널이다.
-  // 별도 작업단위·로드맵 항목까지 defer로 흡수하면 계획 문서와 이중 추적이 된다(결함A 증폭 경로).
-  return (
-    `🐢 거북이 게이트 — ${verdict.reason}${missingLine}\n` +
-    `→ 누락 케이스를 'gbc gate review'로 한 번에 분류(승인→spec / 미룸→defer)하거나, 지금 이 변경에서 직접 다루세요.` +
-    ` 개별로 미룰 거면 'gbc defer add "<케이스>"' — 단 defer 대상은 이 변경의 형제 케이스만, 별도 작업단위·로드맵 항목은 계획 문서에 두세요. (명세 소스: ${source})`
-  );
-}
-
-/**
- * pass verdict를 작업단위 캐시(markGated)에 넣어도 되는가.
- * - fail-open(판정 실패 안전통과)은 제외 — 일시 장애가 작업단위 내내 게이트를 무력화하는 것을 막는다.
- * - 빈 명세(specEmpty)도 제외 — 빈-spec hash는 상수라 한번 캐시되면 영원히 무효화 안 됨
- *   (= 게이트 교차세션 영구 우회, 2026-06-22 진단·수정). 빈 명세는 항상 재판정해야 한다.
- */
-export function shouldCacheVerdict(verdict: Verdict, specEmpty: boolean): boolean {
-  return verdict.verdict === "pass" && !verdict.failOpen && !specEmpty;
-}
+// 순수 게이트 헬퍼는 gate-core.ts로 이관(0.7.0 A1 ST1) — hook은 재export로 기존 import 계약 보존
+// (test/unit.test.mjs가 hook.js에서 buildBlockReason·shouldCacheVerdict·isDocFile를 import).
+export { isDocFile, buildBlockReason, shouldCacheVerdict };
 
 interface PreToolUseInput {
   tool_name?: string;
@@ -200,25 +167,8 @@ function exitGate(
   process.exit(0);
 }
 
-/** 코드 파일 확장자(scope 큐잉 대상 — 문서/설정 편집은 파급반경·사다리 판정 대상 아님). */
-const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|php|c|h|cpp|cc|cs|kt|swift|scala)$/i;
-
-/**
- * 문서 파일 확장자 — 게이트 결정론 하드가드(0.5.5, 결함A). "동작과 무관한 편집(문서) → 무조건
- * pass"는 GATE_SYSTEM 1단계의 확정 제품 의도지만, "코드를 서술하는 문서"(분석 보고서·README 기능
- * 서술)가 haiku의 1단계 분류를 반복적으로 뒤집는 실증 실패 모드(3회: README·분석MD×2 — judge가
- * "동작과 무관하나"라고 자인하면서 block, ANALYSIS-gbc-defect-rca-2026-07-03). 프롬프트는 하드가드가
- * 아니므로 코드에서 강제한다(0.5.2 scope 하드가드와 동일 철학).
- * ⚠️ CODE_FILE_RE whitelist의 부정형(!CODE_FILE_RE)을 쓰지 않는 이유: 미등재 코드 확장자
- * (.vue/.svelte/.sql/.sh 등)가 게이트를 통째로 우회하는 신규 구멍이 된다. 문서 확장자 blocklist만
- * 좁게 skip — 설정(.json/.yaml)은 계속 judge 1단계 소관(오판 실증이 문서에 집중, 표면 최소화).
- */
-const DOC_FILE_RE = /\.(md|mdx|txt|rst|adoc)$/i;
-
-/** 문서 파일 경로인가(게이트 judge 미호출 즉시-pass 대상). 순수 술어 — 최종 확장자만 본다. */
-export function isDocFile(filePath: string): boolean {
-  return DOC_FILE_RE.test(filePath);
-}
+// CODE_FILE_RE·DOC_FILE_RE·isDocFile은 gate-core.ts로 이관(0.7.0 A1 ST1). CODE_FILE_RE는 상단에서
+// import(maybeEnqueueScope 사용), isDocFile은 상단에서 재export(test 계약 보존).
 
 /**
  * pass한 동작편집을 scope 큐(.gbc/scope-queue.json)에 넣는다 — Stop 훅이 그 턴 종료 시 실제 grep으로
