@@ -179,8 +179,124 @@ export function defaultGateDeps(refreshDuringJudge?: () => Promise<void>): GateD
  * 게이트 판정 코어(순수 오케스트레이션 + 효과 디스크립터). process.exit·emit·파일쓰기 없음.
  * infra throw(loadPlanSpec·isGated 디스크 실패)는 밖으로 던진다 — 호출부가 자기 경계로 감싼다
  * (stdin=runHookSafely, SDK=ST4 정형채널). judge 자체 실패는 judge 내부가 failOpenVerdict로 흡수.
- * STUB(ST1 RED) — 구현은 preToolUseBody(hook.ts) 판정 흐름의 behavior-preserving 이식.
+ * preToolUseBody(hook.ts) 판정 흐름의 behavior-preserving 이식 — 분기·부수효과·계측이 1:1 대응한다.
  */
-export async function evaluateGate(_input: GateInput, _deps: GateDeps): Promise<GateDecision> {
-  throw new Error("evaluateGate: not implemented (ST1 RED)");
+export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<GateDecision> {
+  const env = input.env ?? process.env;
+  const toolName = input.toolName ?? "";
+  const { cwd } = input;
+  const session = input.session ?? "";
+
+  // ① 코드 변경 도구가 아니면 즉시 통과 — 무출력·무계측(passthrough).
+  if (!isGatedTool(toolName)) {
+    return { kind: "passthrough", output: { mode: "exit-silent" }, effects: {} };
+  }
+
+  // ② 명시적 우회(GBC_NO_GATE=1) — 계측만 남기고 통과.
+  if (env.GBC_NO_GATE === "1") {
+    return {
+      kind: "bypass",
+      output: { mode: "exit-silent" },
+      effects: { logBypass: true },
+      event: { at: nowIso(), session, specHash: "", kind: "bypass", tool: toolName },
+    };
+  }
+
+  // ③ 문서 하드가드(0.5.5) — 문서 확장자는 judge 미호출 즉시 pass. spec 로드 전 초입이라 specHash="".
+  if (isDocFile(input.toolInput?.file_path ?? "")) {
+    return {
+      kind: "doc-skip",
+      output: { mode: "exit-gate" },
+      effects: {},
+      event: { at: nowIso(), session, specHash: "", kind: "gate", tool: toolName, decision: "doc-skip" },
+    };
+  }
+
+  const { text: specText, source } = deps.loadPlanSpec(cwd);
+  const specHash = computeSpecHash(specText);
+  const specEmpty = specText.trim() === "";
+  // 계측용 해시: 빈 spec은 ""(센티넬)로 기록 → M1 churn 교차세션 합산 방지.
+  const logHash = specEmpty ? "" : specHash;
+
+  // ④ 작업단위 1회 캐시 — 빈 명세는 절대 조회하지 않는다(상수 hash 영구우회 방지, read-side 가드).
+  if (!specEmpty && deps.isGated(cwd, specHash)) {
+    return {
+      kind: "cached",
+      output: { mode: "exit-gate" },
+      effects: {},
+      event: { at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName, decision: "cached" },
+    };
+  }
+
+  // ⑤ judge 호출(모델). 버전캐시 refresh는 judge와 *병렬*로만(seam a) — judge 직전 발화·직후 await.
+  //    cached/doc-skip 경로엔 여기 도달 못 하므로 네트워크가 절대 안 실린다(0.2.7 보존).
+  const editText = normalizeEdit(toolName, input.toolInput ?? {});
+  const defers = deps.activeDeferItems(cwd);
+  const resolved = deps.resolvedDeferItems(cwd);
+  const refreshP = deps.refreshDuringJudge ? deps.refreshDuringJudge() : null;
+  const verdict = await deps.judge(specText, editText, defers, resolved);
+  if (refreshP) await refreshP; // judge 동안 이미 완료 — 이 편집의 notice가 갱신된 캐시를 읽도록
+
+  const effects: GateEffects = {};
+
+  // ⑥ 골든셋 캡처(opt-in) — judge가 실제 평가한 cache-miss edit만, fail-open 제외(실판정 아님).
+  if (!verdict.failOpen && deps.isGoldenCapture(cwd)) {
+    effects.goldenCapture = {
+      id: goldenCaseId(toolName, editText, specText),
+      at: nowIso(),
+      tool: toolName,
+      edit: editText,
+      spec: specText,
+      defers,
+      resolved,
+      expected: { verdict: verdict.verdict, missing: verdict.missing, reason: verdict.reason },
+    };
+  }
+
+  // ⑦ pass 분기 — fail-open(판정 실패)을 먼저 분기(빈-spec 정상 pass 오분류 방지).
+  if (verdict.verdict === "pass") {
+    if (verdict.failOpen) {
+      // 판정 실패로 안전 통과. 캐시·큐잉하지 않고(작업단위 무력화 방지) notice 미첨부 직접 emit로 고지.
+      return {
+        kind: "fail-open",
+        output: {
+          mode: "emit-direct",
+          permission: { decision: "allow", reason: verdict.reason },
+          userMessage: `🐢 거북이 게이트 — 판정 실패로 안전 통과(fail-open). 이 편집은 게이트 검사를 받지 못했습니다: ${verdict.reason}`,
+        },
+        effects: { ...effects, logFailOpen: verdict.reason },
+        event: { at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName, decision: "failopen" },
+      };
+    }
+    // 정상 pass. 단 빈 명세 pass는 절대 캐시하지 않는다(상수 hash 영구 우회 방지).
+    if (shouldCacheVerdict(verdict, specEmpty)) effects.markGated = { specHash, reason: verdict.reason };
+    // scope 큐잉(축A/축B) — 판정된 pass 편집을 Stop서 파급반경·사다리 판정하도록 예약(코드파일 가드는 커밋부).
+    effects.enqueueScope = { toolName, input: input.toolInput ?? {}, editText, specHash: logHash };
+    return {
+      kind: "pass",
+      output: { mode: "exit-gate" },
+      effects,
+      event: {
+        at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName,
+        decision: "pass", deferCount: defers.length,
+      },
+    };
+  }
+
+  // ⑧ block: 사람 pause(ask 기본, GBC_BLOCK_MODE=deny면 deny). 사유가 사용자에게 표시된다.
+  const reason = buildBlockReason(verdict, specEmpty, source);
+  // 침묵-누락 케이스(missing[])를 펜딩-검토에 기록 → 'gbc gate review'가 번호 체크리스트로 회수.
+  if (verdict.missing.length > 0) {
+    effects.pendingReview = { missing: verdict.missing, reason: verdict.reason, source, at: nowIso() };
+  }
+  const mode = env.GBC_BLOCK_MODE === "deny" ? "deny" : "ask";
+  return {
+    kind: "block",
+    output: { mode: "exit-gate", permission: { decision: mode, reason } },
+    effects,
+    event: {
+      at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName,
+      decision: "block", missing: verdict.missing, deferCount: defers.length,
+    },
+  };
 }

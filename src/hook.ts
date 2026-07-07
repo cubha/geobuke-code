@@ -1,14 +1,13 @@
 // PreToolUse / Stop hook 핸들러.
 // 핫패스 보호: 이 파일은 SDK를 import하지 않는다. judge.ts가 API 호출 시에만 lazy import.
 // "이미 게이트됨 → exit 0"은 상태파일만 읽고 즉시 종료(judge 미호출).
-import { isGatedTool, normalizeEdit } from "./normalize.js";
-import { loadPlanSpec, computeSpecHash } from "./spec.js";
-import { isGated, markGated } from "./state.js";
-import { activeDeferItems, resolvedDeferItems, loadDefers, isClosedStatus } from "./defer.js";
-import { isStopHintMuted, isGoldenCapture } from "./config.js";
+import { loadPlanSpec } from "./spec.js";
+import { markGated } from "./state.js";
+import { loadDefers, isClosedStatus } from "./defer.js";
+import { isStopHintMuted } from "./config.js";
 import { loadRepos } from "./repos.js";
 import { writePendingReview } from "./review.js";
-import { addGoldenCase, goldenCaseId } from "./golden.js";
+import { addGoldenCase } from "./golden.js";
 import { enqueueScope, readScopeQueue, clearScopeQueue, collectGrepContext, enrichVerdictsWithSpecHash } from "./scope.js";
 import { readProjectSettings, buildUpdateNotice, wasNotified, markNotified } from "./notice.js";
 import {
@@ -22,7 +21,15 @@ import { join, resolve } from "node:path";
 import { gbcDir } from "./store.js";
 import { nowIso } from "./time.js";
 import { logEvent } from "./metrics.js";
-import { isDocFile, buildBlockReason, shouldCacheVerdict, CODE_FILE_RE } from "./gate-core.js";
+import {
+  isDocFile,
+  buildBlockReason,
+  shouldCacheVerdict,
+  CODE_FILE_RE,
+  evaluateGate,
+  defaultGateDeps,
+} from "./gate-core.js";
+import type { GateDecision } from "./gate-core.js";
 import type { EditToolInput, Verdict, DeferEntry, ScopeVerdict } from "./types.js";
 
 // 순수 게이트 헬퍼는 gate-core.ts로 이관(0.7.0 A1 ST1) — hook은 재export로 기존 import 계약 보존
@@ -201,174 +208,91 @@ async function preToolUseBody(ctx?: HookContext, onCwd?: (cwd: string) => void):
   const input = parseHookInput<PreToolUseInput>(await readStdin());
   if (input === null) process.exit(0); // 입력 파싱 실패 → 안전하게 통과(fail-open)
 
-  const toolName = input.tool_name ?? "";
   const cwd = input.cwd || process.cwd();
   onCwd?.(cwd);
   const session = input.session_id ?? "";
 
-  // 코드 변경 도구가 아니면 즉시 통과
-  if (!isGatedTool(toolName)) process.exit(0);
+  // 버전캐시 refresh seam(a) — judge와 병렬로만 발화(cached/doc-skip 경로엔 안 실림, 0.2.7 보존).
+  // shouldRefreshCache는 thunk 안에서 평가 → evaluateGate가 judge 경로에 도달할 때만 판정(기존 호출
+  // 시점·병렬성 1:1). refreshVersionCache는 내부 fail-silent(reject 불가)라 judge 경로를 깨지 않는다.
+  const refresh = (): Promise<void> =>
+    shouldRefreshCache(Boolean(ctx?.cliPath)) ? refreshVersionCache() : Promise.resolve();
 
-  // 명시적 우회 (계측됨)
-  if (process.env.GBC_NO_GATE === "1") {
-    logBypass(cwd, toolName);
-    logEvent(cwd, { at: nowIso(), session, specHash: "", kind: "bypass", tool: toolName });
-    process.exit(0);
+  const decision = await evaluateGate(
+    { toolName: input.tool_name ?? "", toolInput: input.tool_input ?? {}, cwd, session },
+    defaultGateDeps(refresh),
+  );
+  applyGateDecision(cwd, session, ctx, decision);
+}
+
+/**
+ * GateDecision의 effects를 실제 디스크·계측에 커밋한다(stdin·SDK 공통 — ST4가 재사용). 개별 쓰기
+ * 실패는 게이트를 막지 않는다(fail-silent, 기존 hook 동작 보존). logEvent는 내부 fail-silent.
+ */
+function commitGateEffects(cwd: string, decision: GateDecision): void {
+  const e = decision.effects;
+  const tool = decision.event?.tool ?? "";
+  if (e.logBypass) logBypass(cwd, tool);
+  if (e.logFailOpen) logFailOpen(cwd, tool, e.logFailOpen);
+  if (e.markGated) markGated(cwd, e.markGated.specHash, e.markGated.reason);
+  if (e.enqueueScope) {
+    maybeEnqueueScope(cwd, e.enqueueScope.toolName, e.enqueueScope.input, e.enqueueScope.editText, e.enqueueScope.specHash);
   }
-
-  // 문서 하드가드(0.5.5, 결함A) — 문서 확장자는 judge 미호출 즉시 pass. GATE_SYSTEM 1단계
-  // "문서 → 무조건 pass"의 코드 강제(프롬프트 위반 3회 실증 근절). spec 로드 전 초입이라
-  // specHash는 ""(M1 churn 자동 제외·M2는 block만. M3는 session 키라 기존 문서편집과 동일 참여).
-  // 조용한 우회 방지 위해 doc-skip 계측.
-  if (isDocFile(input.tool_input?.file_path ?? "")) {
-    logEvent(cwd, { at: nowIso(), session, specHash: "", kind: "gate", tool: toolName, decision: "doc-skip" });
-    exitGate(cwd, session, ctx);
-  }
-
-  const { text: specText, source } = loadPlanSpec(cwd);
-  const specHash = computeSpecHash(specText);
-  const specEmpty = specText.trim() === "";
-  // 계측용 해시: 빈 spec은 ""(센티넬)로 기록 → M1 churn 교차세션 합산 방지.
-  const logHash = specEmpty ? "" : specHash;
-
-  // 작업단위 1회: 이미 게이트 통과한 단위면 즉시 통과 (judge 미호출, 핫패스)
-  // 계측: cached-skip도 기록해야 M3(작업단위당 edit 반복)이 진짜 횟수를 잡는다.
-  // ⚠️ 빈 명세는 캐시를 절대 조회하지 않는다(read-side 가드) — 빈-spec hash는 상수라
-  //    한번 캐시된 pass가 영원히 무효화되지 않아 게이트가 교차세션으로 영구 무력화되던
-  //    결함(2026-06-22 진단)을 근본 차단. 빈 명세는 항상 재판정: judge [1단계] 사소한
-  //    편집 pass, [2단계]a 동작 편집 block. (기존에 오염된 state.json도 자동으로 무시됨)
-  if (!specEmpty && isGated(cwd, specHash)) {
-    logEvent(cwd, {
-      at: nowIso(),
-      session,
-      specHash: logHash,
-      kind: "gate",
-      tool: toolName,
-      decision: "cached",
-    });
-    // 업데이트 안내를 cached-skip에서도 노출(0.2.x 가시성 갭 해소) — 평상 작업 최빈 경로.
-    // permissionDecision 없음 → cached-pass 통과 동작 불변. 네트워크 없음(캐시만 읽음).
-    exitGate(cwd, session, ctx);
-  }
-
-  // judge는 여기서만 동적 import (SDK lazy)
-  const { judge } = await import("./judge.js");
-  const editText = normalizeEdit(toolName, input.tool_input ?? {});
-  const defers = activeDeferItems(cwd);
-  // 완료된 케이스를 judge에 [이미 완료된 항목]으로 함께 전달 → 과거 작업단위의 resolved 케이스를
-  // "미처리 형제"로 오인해 재차단하던 드리프트 완화(2026-06-26). active와 상호배타(filter 분리).
-  const resolved = resolvedDeferItems(cwd);
-  // ①신버전 캐시 자동 refresh(0.3.0) — 사용자가 'gbc status'를 안 쳐도 캐시가 최신이 되게.
-  // judge(네트워크·≥1.5s)와 *병렬*로만 건다 → 핫패스 지연 0. cache-miss(여기 = judge 도는
-  // 비-핫패스)에서만 stale일 때. cached-skip 핫패스엔 절대 네트워크 안 넣는다(0.2.7 원칙 보존).
-  // refreshVersionCache는 내부 fail-silent(reject 불가)라 judge 경로를 깨지 않는다.
-  const refreshP = shouldRefreshCache(Boolean(ctx?.cliPath)) ? refreshVersionCache() : null;
-  const verdict = await judge(specText, editText, defers, resolved);
-  if (refreshP) await refreshP; // judge 동안 이미 완료 — 이 편집의 notice가 갱신된 캐시를 읽도록
-
-  // 골든셋 캡처(A2, opt-in) — judge가 실제 평가한 cache-miss edit만, fail-open 제외(실판정 아님).
-  // editText(편집 본문)는 events.jsonl이 절대 저장 안 하는 내용 → 캡처는 .gbc/golden.json에 로컬만.
-  // 캡처 실패는 게이트를 막지 않는다(fail-silent). cached-skip 경로는 위에서 이미 return돼 도달 안 함.
-  if (!verdict.failOpen && isGoldenCapture(cwd)) {
+  if (e.goldenCapture) {
     try {
-      addGoldenCase(cwd, {
-        id: goldenCaseId(toolName, editText, specText),
-        at: nowIso(),
-        tool: toolName,
-        edit: editText,
-        spec: specText,
-        defers,
-        resolved,
-        expected: { verdict: verdict.verdict, missing: verdict.missing, reason: verdict.reason },
-      });
+      addGoldenCase(cwd, e.goldenCapture);
     } catch {
       /* 캡처 실패는 무시(fail-silent) */
     }
   }
-
-  if (verdict.verdict === "pass") {
-    // fail-open(판정 실패) 먼저 분기 — 빈-spec 정상 pass가 fail-open으로 오분류되지 않게.
-    if (verdict.failOpen) {
-      // 판정 실패로 안전 통과. 캐시하지 않아(작업단위 무력화 방지) 다음 편집에서 재판정.
-      // 계측 + systemMessage로 사용자에게 "게이트가 검사 못 했음"을 알린다(조용한 무력화 방지).
-      logFailOpen(cwd, toolName, verdict.reason);
-      logEvent(cwd, {
-        at: nowIso(),
-        session,
-        specHash: logHash,
-        kind: "gate",
-        tool: toolName,
-        decision: "failopen",
-      });
-      emit({
-        systemMessage: `🐢 거북이 게이트 — 판정 실패로 안전 통과(fail-open). 이 편집은 게이트 검사를 받지 못했습니다: ${verdict.reason}`,
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "allow",
-          permissionDecisionReason: verdict.reason,
-        },
-      });
-      process.exit(0);
-    }
-    // 정상 pass. 단 빈 명세 pass는 절대 캐시하지 않는다(상수 hash 영구 우회 방지).
-    if (shouldCacheVerdict(verdict, specEmpty)) markGated(cwd, specHash, verdict.reason);
-    // scope 큐잉(축A/축B) — 판정된 pass 편집을 Stop서 파급반경·사다리 판정하도록 예약(API 없음).
-    maybeEnqueueScope(cwd, toolName, input.tool_input ?? {}, editText, logHash);
-    logEvent(cwd, {
-      at: nowIso(),
-      session,
-      specHash: logHash,
-      kind: "gate",
-      tool: toolName,
-      decision: "pass",
-      deferCount: defers.length,
-    });
-    // 업데이트 안내(있으면)만 비차단 노출 — systemMessage 단독은 permissionDecision 없으니
-    // 도구를 자동승인하지 않고(통과 동작 보존) 메시지만 표시한다. 정상 통과(자동승인 X).
-    exitGate(cwd, session, ctx);
-  }
-
-  // block: 사람 pause (ask 기본) — 사유가 사용자에게 표시됨
-  // 시나리오 미지정(명세 빈약)과 침묵 누락을 다르게 안내한다.
-  const reason = buildBlockReason(verdict, specText.trim() === "", source);
-
-  // 침묵-누락 케이스(missing[])를 펜딩-검토에 기록 → 'gbc gate review'가 번호 체크리스트로 회수.
-  // judge의 missing[]가 buildBlockReason prose로만 평탄화돼 사라지던 seam 보존(A1). missing 없으면
-  // (시나리오 미지정 등) 기록 안 함 = 검토할 케이스 없음. 쓰기 실패는 게이트를 깨지 않는다(fail-silent).
-  if (verdict.missing.length > 0) {
+  if (e.pendingReview) {
     try {
-      writePendingReview(cwd, {
-        missing: verdict.missing,
-        reason: verdict.reason,
-        source,
-        at: nowIso(),
-      });
+      writePendingReview(cwd, e.pendingReview);
     } catch {
       /* 펜딩 기록 실패는 무시 — 안내(reason)는 이미 미룸/직접처리 경로를 담고 있다 */
     }
   }
+  if (decision.event) logEvent(cwd, decision.event);
+}
 
-  logEvent(cwd, {
-    at: nowIso(),
-    session,
-    specHash: logHash,
-    kind: "gate",
-    tool: toolName,
-    decision: "block",
-    missing: verdict.missing,
-    deferCount: defers.length,
-  });
-
-  const mode = process.env.GBC_BLOCK_MODE === "deny" ? "deny" : "ask";
-  // 업데이트 안내(있으면)는 exitGate가 같은 출력에 top-level systemMessage로 덧붙인다(차단 동작 불변).
-  exitGate(cwd, session, ctx, {
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: mode,
-      permissionDecisionReason: reason,
-      additionalContext: reason,
-    },
-  });
+/**
+ * GateDecision을 stdin hook 응답으로 번역한다(effects 커밋 후 output.mode에 따라 exit/emit). never.
+ * - exit-silent: 무출력 종료(passthrough·bypass).
+ * - exit-gate: 버전 안내 첨부 출구(exitGate). block은 permission 동반, doc-skip/cached/pass는 notice-only.
+ * - emit-direct: 안내 미첨부 직접 emit(fail-open — 실패 고지와 안내를 섞지 않는 기존 동작 보존).
+ */
+function applyGateDecision(
+  cwd: string,
+  session: string,
+  ctx: HookContext | undefined,
+  decision: GateDecision,
+): never {
+  commitGateEffects(cwd, decision);
+  const { mode, permission, userMessage } = decision.output;
+  if (mode === "exit-silent") process.exit(0);
+  if (mode === "emit-direct") {
+    emit({
+      systemMessage: userMessage,
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: permission?.decision ?? "allow",
+        permissionDecisionReason: permission?.reason ?? "",
+      },
+    });
+    process.exit(0);
+  }
+  // exit-gate: 업데이트 안내(있으면)는 exitGate가 같은 출력에 top-level systemMessage로 결합한다.
+  if (permission) {
+    exitGate(cwd, session, ctx, {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: permission.decision,
+        permissionDecisionReason: permission.reason,
+        additionalContext: permission.reason,
+      },
+    });
+  }
+  exitGate(cwd, session, ctx);
 }
 
 /** scope 이벤트의 coarse axis 태그 도출 — rung 걸림이 우선, 아니면 파급반경(scope). */

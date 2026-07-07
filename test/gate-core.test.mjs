@@ -199,3 +199,18 @@ test("golden capture: isGoldenCapture=true·non-failopen이면 goldenCapture 디
   assert.ok(d.effects.goldenCapture.spec, "명세 스냅샷");
   assert.equal(d.effects.goldenCapture.expected.verdict, "pass");
 });
+
+test("golden capture: block verdict도 캡처된다(원본은 pass/block 분기 *전*에 캡처) — pendingReview와 공존", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "block", missing: ["케이스 A 로그인 검증"], reason: "누락" }),
+      isGoldenCapture: () => true,
+    }),
+  );
+  assert.equal(d.kind, "block");
+  assert.ok(d.effects.goldenCapture, "block도 골든 캡처(decisionFlip 회귀락은 양방향)");
+  assert.equal(d.effects.goldenCapture.expected.verdict, "block");
+  assert.deepEqual(d.effects.goldenCapture.expected.missing, ["케이스 A 로그인 검증"]);
+  assert.ok(d.effects.pendingReview, "golden과 pendingReview는 같은 block 판정에서 공존");
+});
