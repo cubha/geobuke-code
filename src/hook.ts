@@ -226,10 +226,10 @@ async function preToolUseBody(ctx?: HookContext, onCwd?: (cwd: string) => void):
 }
 
 /**
- * GateDecision의 effects를 실제 디스크·계측에 커밋한다(stdin·SDK 공통 — ST4가 재사용). 개별 쓰기
+ * GateDecision의 effects를 실제 디스크·계측에 커밋한다(stdin·SDK 공통 — ST4 gate-sdk가 재사용). 개별 쓰기
  * 실패는 게이트를 막지 않는다(fail-silent, 기존 hook 동작 보존). logEvent는 내부 fail-silent.
  */
-function commitGateEffects(cwd: string, decision: GateDecision): void {
+export function commitGateEffects(cwd: string, decision: GateDecision): void {
   const e = decision.effects;
   const tool = decision.event?.tool ?? "";
   if (e.logBypass) logBypass(cwd, tool);
