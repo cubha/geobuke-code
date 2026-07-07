@@ -22,8 +22,33 @@ import { commitGateEffects } from "./hook.js";
  * - exit-gate + permission(block) → hookSpecificOutput{permissionDecision: ask|deny, reason, additionalContext}.
  * - emit-direct(fail-open) → systemMessage(고지) + hookSpecificOutput{permissionDecision: allow, reason}.
  */
-export function gateDecisionToHookOutput(_decision: GateDecision): SyncHookJSONOutput {
-  throw new Error("gateDecisionToHookOutput: not implemented (ST4 RED)");
+export function gateDecisionToHookOutput(decision: GateDecision): SyncHookJSONOutput {
+  const { mode, permission, userMessage } = decision.output;
+  if (mode === "emit-direct") {
+    // fail-open: allow + 고지(안내 미첨부). stdin의 emit-direct 미러.
+    return {
+      systemMessage: userMessage,
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: permission?.decision ?? "allow",
+        permissionDecisionReason: permission?.reason ?? "",
+      },
+    };
+  }
+  if (mode === "exit-gate" && permission) {
+    // block: ask|deny + 사유(additionalContext까지 = stdin 차단 출력 미러).
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: permission.decision,
+        permissionDecisionReason: permission.reason,
+        additionalContext: permission.reason,
+      },
+    };
+  }
+  // exit-silent(passthrough/bypass) + exit-gate permission 없음(doc-skip/cached/pass) → 의견 없음(통과).
+  // 버전 업데이트 안내는 stdin 전용이라 SDK 경로엔 첨부하지 않는다.
+  return {};
 }
 
 /**
