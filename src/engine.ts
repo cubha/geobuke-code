@@ -35,8 +35,10 @@ export interface EngineResult {
   auth: { authenticating: boolean; output: string[]; error?: string } | null;
   /** extraction.jsonl에 기록된 레코드 수. */
   records: number;
-  /** 결과가 에러였는지(SDKResultError 또는 result.is_error). */
+  /** 결과가 에러였는지(SDKResultError·result.is_error·iteration throw). */
   isError: boolean;
+  /** iteration이 throw했을 때의 사유(부분 결과와 함께 반환) — 정상 종료면 undefined. */
+  error?: string;
 }
 
 /** 콘텐츠 블록 최소 형상(BetaMessage.content 원소 — 우리가 읽는 필드만). */
@@ -133,30 +135,38 @@ export async function runEngine(opts: EngineOptions): Promise<EngineResult> {
     isError: false,
   };
 
-  for await (const msg of query({ prompt: opts.prompt, options })) {
-    const m = msg as SDKMessage & {
-      session_id?: string;
-      total_cost_usd?: number;
-      num_turns?: number;
-      is_error?: boolean;
-      isAuthenticating?: boolean;
-      output?: string[];
-      error?: string;
-      subtype?: string;
-    };
-    if (m.session_id) result.sessionId = m.session_id;
-    for (const rec of mapSdkMessage(msg)) {
-      appendExtraction(opts.cwd, rec);
-      result.records++;
+  // ⚠️ query()는 결과 메시지를 yield한 *뒤* 에러 조건(예: error_max_turns)에서 throw할 수 있다(ST7 실측).
+  // 그 경우에도 이미 수집한 ⓑ(cost·auth)·부분 extraction을 유실하지 않도록, iteration을 감싸 부분 결과를
+  // 반환한다(rethrow 금지). 호출부(gbc run)는 isError로 판단하고 측정치를 그대로 출력한다.
+  try {
+    for await (const msg of query({ prompt: opts.prompt, options })) {
+      const m = msg as SDKMessage & {
+        session_id?: string;
+        total_cost_usd?: number;
+        num_turns?: number;
+        is_error?: boolean;
+        isAuthenticating?: boolean;
+        output?: string[];
+        error?: string;
+        subtype?: string;
+      };
+      if (m.session_id) result.sessionId = m.session_id;
+      for (const rec of mapSdkMessage(msg)) {
+        appendExtraction(opts.cwd, rec);
+        result.records++;
+      }
+      if (m.type === "result") {
+        result.costUsd = m.total_cost_usd ?? 0;
+        result.numTurns = m.num_turns ?? 0;
+        result.isError = m.subtype !== "success" || m.is_error === true;
+      }
+      if (m.type === "auth_status") {
+        result.auth = { authenticating: Boolean(m.isAuthenticating), output: m.output ?? [], error: m.error };
+      }
     }
-    if (m.type === "result") {
-      result.costUsd = m.total_cost_usd ?? 0;
-      result.numTurns = m.num_turns ?? 0;
-      result.isError = m.subtype !== "success" || m.is_error === true;
-    }
-    if (m.type === "auth_status") {
-      result.auth = { authenticating: Boolean(m.isAuthenticating), output: m.output ?? [], error: m.error };
-    }
+  } catch (e) {
+    result.isError = true;
+    result.error = String(e).slice(0, 300);
   }
   return result;
 }

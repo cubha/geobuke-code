@@ -93,10 +93,13 @@ export function makeSdkPreToolUseHook(cwd: string, deps?: GateDeps): HookCallbac
 /**
  * pause 응답(사람 입력)을 PermissionResult로 해석한다(순수·결정론 — TDD 대상).
  * y/yes(대소문자·공백 무관) → allow, 그 외(빈 입력·n·EOF) → deny(기본 거부 = 고무도장 방지).
+ * ⚠️ allow 분기는 반드시 updatedInput(도구 원본 인자)을 담아야 한다 — SDK PermissionResult 런타임
+ *    zod 스키마가 allow에 updatedInput(record)을 요구한다(.d.ts optional과 불일치, ST7 E2E 실측:
+ *    누락 시 모든 권한요청이 ZodError로 실패해 도구가 하나도 실행 안 됨). 인자 변경 없이 그대로 통과.
  */
-export function interpretPauseAnswer(answer: string): PermissionResult {
+export function interpretPauseAnswer(answer: string, input: Record<string, unknown> = {}): PermissionResult {
   return /^\s*y(es)?\s*$/i.test(answer)
-    ? { behavior: "allow" }
+    ? { behavior: "allow", updatedInput: input }
     : { behavior: "deny", message: "사용자가 도구 실행을 거부함 (pause)" };
 }
 
@@ -108,7 +111,8 @@ export function interpretPauseAnswer(answer: string): PermissionResult {
  */
 export function makeStdinPauseCanUseTool(opts: { autoAllow?: boolean } = {}): CanUseTool {
   return async (toolName, input) => {
-    if (opts.autoAllow) return { behavior: "allow" };
+    // allow 시 updatedInput 필수(SDK zod 스키마, ST7). autoAllow도 원본 인자를 그대로 담아 통과.
+    if (opts.autoAllow) return { behavior: "allow", updatedInput: input };
     const file = typeof (input as { file_path?: unknown })?.file_path === "string"
       ? ` ${(input as { file_path: string }).file_path}`
       : "";
@@ -117,7 +121,7 @@ export function makeStdinPauseCanUseTool(opts: { autoAllow?: boolean } = {}): Ca
       const answer = await new Promise<string>((resolve) =>
         rl.question(`🐢 [pause] ${toolName}${file} 실행을 허용할까요? (y/N): `, resolve),
       );
-      return interpretPauseAnswer(answer);
+      return interpretPauseAnswer(answer, input);
     } finally {
       rl.close();
     }

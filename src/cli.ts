@@ -911,12 +911,15 @@ async function cmdRun(args: string[]): Promise<void> {
   const autoAllow = args.includes("--yes") || args.includes("-y");
   const mi = args.indexOf("--model");
   const model = mi >= 0 ? args[mi + 1] : undefined;
+  const ti = args.indexOf("--max-turns");
+  const maxTurns = ti >= 0 ? Number(args[ti + 1]) : undefined;
+  const valueIdxs = new Set([mi >= 0 ? mi + 1 : -1, ti >= 0 ? ti + 1 : -1]);
   const prompt = args
-    .filter((a, i) => !a.startsWith("-") && !(mi >= 0 && i === mi + 1))
+    .filter((a, i) => !a.startsWith("-") && !valueIdxs.has(i))
     .join(" ")
     .trim();
   if (!prompt) {
-    console.error('사용: gbc run "<프롬프트>" [--yes] [--model <모델>]');
+    console.error('사용: gbc run "<프롬프트>" [--yes] [--model <모델>] [--max-turns <N>]');
     process.exit(1);
   }
   const { runEngine } = await import("./engine.js");
@@ -926,12 +929,14 @@ async function cmdRun(args: string[]): Promise<void> {
       prompt,
       cwd,
       ...(model ? { model } : {}),
+      ...(maxTurns && Number.isFinite(maxTurns) ? { maxTurns } : {}),
       preToolUse: makeSdkPreToolUseHook(cwd),
       canUseTool: makeStdinPauseCanUseTool({ autoAllow }),
     });
     console.log(
-      `\n🐢 gbc run 완료 — session=${res.sessionId} turns=${res.numTurns} cost=$${res.costUsd} records=${res.records}${res.isError ? " (error)" : ""}`,
+      `\n🐢 gbc run ${res.isError ? "종료(error)" : "완료"} — session=${res.sessionId} turns=${res.numTurns} cost=$${res.costUsd} records=${res.records}`,
     );
+    if (res.error) console.log(`사유: ${res.error}`);
     if (res.auth) {
       console.log(
         `인증 상태: authenticating=${res.auth.authenticating}${res.auth.error ? ` error=${res.auth.error}` : ""} ${res.auth.output.join(" ")}`.trim(),
