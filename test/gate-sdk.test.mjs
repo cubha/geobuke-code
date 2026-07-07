@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gateDecisionToHookOutput, makeSdkPreToolUseHook } from "../dist/gate-sdk.js";
+import { gateDecisionToHookOutput, makeSdkPreToolUseHook, interpretPauseAnswer, makeStdinPauseCanUseTool } from "../dist/gate-sdk.js";
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "gbc-gate-sdk-"));
@@ -111,4 +111,26 @@ test("콜백: evaluateGate infra throw → 정형 fail-open(allow + systemMessag
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+// ===== interpretPauseAnswer / canUseTool pause (ST5) =====
+
+test("interpretPauseAnswer: y/yes(공백·대소문자 무관) → allow", () => {
+  assert.equal(interpretPauseAnswer("y").behavior, "allow");
+  assert.equal(interpretPauseAnswer("Y").behavior, "allow");
+  assert.equal(interpretPauseAnswer("yes").behavior, "allow");
+  assert.equal(interpretPauseAnswer("  YES  ").behavior, "allow");
+});
+
+test("interpretPauseAnswer: 빈 입력·n·기타 → deny(기본 거부=고무도장 방지)", () => {
+  assert.equal(interpretPauseAnswer("").behavior, "deny");
+  assert.equal(interpretPauseAnswer("n").behavior, "deny");
+  assert.equal(interpretPauseAnswer("무엇이든").behavior, "deny");
+  assert.ok(interpretPauseAnswer("").message, "deny는 사유 포함");
+});
+
+test("makeStdinPauseCanUseTool: autoAllow=true는 프롬프트 없이 즉시 allow(비대화형)", async () => {
+  const canUse = makeStdinPauseCanUseTool({ autoAllow: true });
+  const r = await canUse("Bash", { command: "ls" }, { signal: undefined });
+  assert.equal(r.behavior, "allow");
 });

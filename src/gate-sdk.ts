@@ -9,9 +9,12 @@ import type {
   HookInput,
   PreToolUseHookInput,
   SyncHookJSONOutput,
+  CanUseTool,
+  PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { GateDecision, GateDeps } from "./gate-core.js";
 import type { EditToolInput } from "./types.js";
+import { createInterface } from "node:readline";
 import { evaluateGate, defaultGateDeps } from "./gate-core.js";
 import { commitGateEffects } from "./hook.js";
 
@@ -81,6 +84,42 @@ export function makeSdkPreToolUseHook(cwd: string, deps?: GateDeps): HookCallbac
           permissionDecisionReason: String(e).slice(0, 120),
         },
       };
+    }
+  };
+}
+
+// ===== ST5 canUseTool 사람-pause primitive =====
+
+/**
+ * pause 응답(사람 입력)을 PermissionResult로 해석한다(순수·결정론 — TDD 대상).
+ * y/yes(대소문자·공백 무관) → allow, 그 외(빈 입력·n·EOF) → deny(기본 거부 = 고무도장 방지).
+ */
+export function interpretPauseAnswer(answer: string): PermissionResult {
+  return /^\s*y(es)?\s*$/i.test(answer)
+    ? { behavior: "allow" }
+    : { behavior: "deny", message: "사용자가 도구 실행을 거부함 (pause)" };
+}
+
+/**
+ * canUseTool 사람-pause 팩토리 — 도구 실행 직전 stdin으로 사람에게 허용을 묻는 최소 blocking primitive
+ * (고무도장 방지). PreToolUse 게이트(자동 판정)와 직교: 게이트가 통과시켜도 사람이 최종 pause할 수 있다.
+ * autoAllow=true면 비대화형(CI·E2E 자동)용으로 즉시 allow. 프롬프트는 stderr로(SDK stdout 스트림 미오염).
+ * readline 배선은 대화형이라 TDD 제외 — 결정론 코어는 interpretPauseAnswer가 담당(수동 검증은 ST7 E2E).
+ */
+export function makeStdinPauseCanUseTool(opts: { autoAllow?: boolean } = {}): CanUseTool {
+  return async (toolName, input) => {
+    if (opts.autoAllow) return { behavior: "allow" };
+    const file = typeof (input as { file_path?: unknown })?.file_path === "string"
+      ? ` ${(input as { file_path: string }).file_path}`
+      : "";
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      const answer = await new Promise<string>((resolve) =>
+        rl.question(`🐢 [pause] ${toolName}${file} 실행을 허용할까요? (y/N): `, resolve),
+      );
+      return interpretPauseAnswer(answer);
+    } finally {
+      rl.close();
     }
   };
 }
