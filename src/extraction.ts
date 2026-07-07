@@ -45,24 +45,60 @@ const REDACTED = "[REDACTED]";
  * 과다-redaction(일반 산문·경로 훼손)을 피하려 확정 패턴만: Anthropic/OpenAI 키, Bearer,
  * KEY/TOKEN/SECRET/PASSWORD 대입(키 이름은 남기고 값만). 조인·분석에 쓰는 구조 필드엔 적용 안 함.
  */
-export function redactSecrets(_text: string): string {
-  throw new Error("redactSecrets: not implemented (ST2 RED)");
+export function redactSecrets(text: string): string {
+  return text
+    // Anthropic 키(sk-ant-…) / 일반 sk-… 롱토큰
+    .replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, REDACTED)
+    .replace(/\bsk-[A-Za-z0-9]{20,}\b/g, REDACTED)
+    // Bearer 토큰
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{8,}/g, `Bearer ${REDACTED}`)
+    // KEY/TOKEN/SECRET/PASSWORD 대입(env·json·kv) — 키 이름 보존, 값만 마스킹.
+    // 값: 따옴표 안(공백 허용) 또는 비따옴표 비공백 토큰. 키 이름과 구분자(=/:)는 원문 보존.
+    .replace(
+      /\b([A-Za-z_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD))\b("?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,}]+)/gi,
+      (_m, key, sep) => `${key}${sep}${REDACTED}`,
+    );
 }
 
 /**
  * 레코드를 한 줄 JSON으로 직렬화(순수). text는 redact 후 MAX_TEXT로 캡하고, 그래도 라인이 MAX_LINE을
  * 넘으면 text를 요약 토큰으로 대체해 한 줄을 보장한다(events.jsonl serializeEvent 미러).
  */
-export function serializeRecord(_rec: ExtractionRecord): string {
-  throw new Error("serializeRecord: not implemented (ST2 RED)");
+export function serializeRecord(rec: ExtractionRecord): string {
+  const out: ExtractionRecord = { ...rec };
+  if (typeof out.text === "string") {
+    let t = redactSecrets(out.text);
+    if (t.length > MAX_TEXT) t = t.slice(0, MAX_TEXT) + "…(절단)";
+    out.text = t;
+  }
+  let line = JSON.stringify(out);
+  if (line.length >= MAX_LINE && out.text !== undefined) {
+    out.text = `(text ${rec.text?.length ?? 0}자 생략 — 라인 상한)`;
+    line = JSON.stringify(out);
+  }
+  if (line.length >= MAX_LINE) line = line.slice(0, MAX_LINE - 1);
+  return line;
 }
 
 /**
  * jsonl 원시 텍스트를 레코드 배열로 파싱(빈 줄·깨진 줄 skip). session+kind 문자열이 있어야 레코드로 인정
  * (events.jsonl parseEvents 미러 — 형상 오염 흡수).
  */
-export function parseExtraction(_raw: string): ExtractionRecord[] {
-  throw new Error("parseExtraction: not implemented (ST2 RED)");
+export function parseExtraction(raw: string): ExtractionRecord[] {
+  const out: ExtractionRecord[] = [];
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const obj = JSON.parse(t);
+      if (obj && typeof obj === "object" && typeof obj.session === "string" && typeof obj.kind === "string") {
+        out.push(obj as ExtractionRecord);
+      }
+    } catch {
+      /* 깨진 줄 skip */
+    }
+  }
+  return out;
 }
 
 /** .gbc/extraction.jsonl 경로. */
@@ -77,9 +113,23 @@ export function extractionPath(cwd: string): string {
  * STUB(ST2 RED).
  */
 export function appendExtraction(
-  _cwd: string,
-  _rec: ExtractionRecord,
-  _opts: { maxBytes?: number } = {},
+  cwd: string,
+  rec: ExtractionRecord,
+  opts: { maxBytes?: number } = {},
 ): void {
-  throw new Error("appendExtraction: not implemented (ST2 RED)");
+  if (process.env.GBC_NO_EXTRACTION === "1") return;
+  const maxBytes = opts.maxBytes ?? MAX_EXTRACTION_BYTES;
+  try {
+    const path = extractionPath(cwd);
+    // 상한 이상이면 append 전에 1세대 로테이션(.jsonl→.1.jsonl, 기존 .1 덮어씀). stat 실패(파일 부재)는
+    // 로테이션 없이 그대로 append(최초 기록).
+    try {
+      if (statSync(path).size >= maxBytes) renameSync(path, path.replace(/\.jsonl$/, ".1.jsonl"));
+    } catch {
+      /* stat/rename 실패(부재·권한) → 로테이션 생략, append는 시도 */
+    }
+    appendFileSync(path, serializeRecord(rec) + "\n");
+  } catch {
+    /* append 실패는 삼킨다(fail-silent — 계측이 A-mode 실행을 막지 않는다) */
+  }
 }
