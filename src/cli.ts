@@ -899,6 +899,58 @@ function cmdRepos(args: string[]): void {
   }
 }
 
+// ---------- gbc run (A-mode 스파이크, 0.7.0 A1) ----------
+/**
+ * gbc run "<프롬프트>" [--yes] [--model <m>] — A-mode 엔진 실행(agent-sdk in-process 게이트).
+ * PreToolUse=gbc 게이트 콜백(evaluateGate), canUseTool=사람-pause(--yes면 자동 허용). agent-sdk는
+ * optionalDependency라 미설치 시 설치 안내. 결과로 ⓑ 실측(session·turns·cost·인증)을 출력한다.
+ * engine/gate-sdk는 동적 import — 이 경로에 진입할 때만 agent-sdk가 로드된다(B-모드 핫패스 무영향).
+ */
+async function cmdRun(args: string[]): Promise<void> {
+  const cwd = process.cwd();
+  const autoAllow = args.includes("--yes") || args.includes("-y");
+  const mi = args.indexOf("--model");
+  const model = mi >= 0 ? args[mi + 1] : undefined;
+  const prompt = args
+    .filter((a, i) => !a.startsWith("-") && !(mi >= 0 && i === mi + 1))
+    .join(" ")
+    .trim();
+  if (!prompt) {
+    console.error('사용: gbc run "<프롬프트>" [--yes] [--model <모델>]');
+    process.exit(1);
+  }
+  const { runEngine } = await import("./engine.js");
+  const { makeSdkPreToolUseHook, makeStdinPauseCanUseTool } = await import("./gate-sdk.js");
+  try {
+    const res = await runEngine({
+      prompt,
+      cwd,
+      ...(model ? { model } : {}),
+      preToolUse: makeSdkPreToolUseHook(cwd),
+      canUseTool: makeStdinPauseCanUseTool({ autoAllow }),
+    });
+    console.log(
+      `\n🐢 gbc run 완료 — session=${res.sessionId} turns=${res.numTurns} cost=$${res.costUsd} records=${res.records}${res.isError ? " (error)" : ""}`,
+    );
+    if (res.auth) {
+      console.log(
+        `인증 상태: authenticating=${res.auth.authenticating}${res.auth.error ? ` error=${res.auth.error}` : ""} ${res.auth.output.join(" ")}`.trim(),
+      );
+    }
+  } catch (e) {
+    const msg = String(e);
+    if (/Cannot find (module|package)|ERR_MODULE_NOT_FOUND|claude-agent-sdk/.test(msg)) {
+      console.error(
+        "🐢 A-mode 엔진(@anthropic-ai/claude-agent-sdk)이 설치되지 않았습니다.\n" +
+          "   설치: npm i @anthropic-ai/claude-agent-sdk",
+      );
+    } else {
+      console.error(`🐢 gbc run 실패: ${msg.slice(0, 300)}`);
+    }
+    process.exit(1);
+  }
+}
+
 function usage(): void {
   console.log(`🐢 gbc — 거북이코드 구현-전 게이트
 
@@ -932,6 +984,9 @@ function usage(): void {
                                       골든셋 캡처 토글·상태(판정 드리프트 회귀락, 로컬 전용)
   gbc gate snapshot replay [--samples N]
                                       골든 케이스 재판정(temp 0)·드리프트 시 exit 1
+  gbc run "<프롬프트>" [--yes] [--model <m>]
+                                      (A-mode 스파이크) agent-sdk in-process 게이트 실행 — PreToolUse=gbc
+                                      게이트, canUseTool=사람-pause(--yes=자동허용). agent-sdk 별도 설치 필요
   gbc metrics [--all] [--json]        계측 리포트(M1~M3, B-모드 관측 프록시; --all=등록 repo 병합)
   gbc repos add [경로]                크로스-repo 레지스트리에 추가(생략 시 현재 폴더)
   gbc repos list                      등록된 repo + 미해결 defer 수
@@ -969,6 +1024,8 @@ async function main(): Promise<void> {
       return cmdDone();
     case "verify":
       return cmdVerify(rest);
+    case "run":
+      return cmdRun(rest);
     case "metrics":
       return cmdMetrics(rest);
     case "repos":

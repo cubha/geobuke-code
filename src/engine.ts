@@ -102,18 +102,27 @@ export function mapSdkMessage(msg: SDKMessage): ExtractionRecord[] {
  * A-mode 엔진 실행 — query()를 격리 옵션으로 구동하고 스트림을 extraction sink로 흘리며 ⓑ(인증·과금)를
  * 수집한다. agent-sdk 미설치면 dynamic import가 throw → 호출부(gbc run, ST6)가 설치 안내로 감싼다.
  */
-export async function runEngine(opts: EngineOptions): Promise<EngineResult> {
-  const { query } = await import("@anthropic-ai/claude-agent-sdk");
-  const options: Options = {
+/**
+ * query() 옵션 빌드(순수 — 회귀락 대상). 두 불변식을 코드로 고정한다:
+ *  · settingSources: [] — anti-recursion. 프로젝트 .claude/settings.json(gbc 자신의 PreToolUse stdin
+ *    hook)을 로드하면 도구 호출마다 게이트가 이중발화/재귀한다. 이 빈 배열이 그걸 막는 *불변식*이다.
+ *  · apiKey 미주입 — SDK 자체 인증 우선순위(구독 vs 키)를 관측해야 ⓑ가 측정된다(하드코딩 금지).
+ * ST6 회귀 테스트가 이 함수를 쳐서 두 불변식이 깨지지 않았음을 매 빌드 확인한다.
+ */
+export function buildEngineOptions(opts: EngineOptions): Options {
+  return {
     cwd: opts.cwd,
-    // anti-recursion: 프로젝트/로컬/유저 설정을 로드하지 않는다(gbc 자신의 stdin hook 이중발화 차단).
     settingSources: [],
     ...(opts.model ? { model: opts.model } : {}),
     ...(opts.maxTurns ? { maxTurns: opts.maxTurns } : {}),
     ...(opts.preToolUse ? { hooks: { PreToolUse: [{ hooks: [opts.preToolUse] }] } } : {}),
     ...(opts.canUseTool ? { canUseTool: opts.canUseTool } : {}),
-    // apiKey 미주입(ⓑ) — SDK 자체 인증 우선순위 관측.
   };
+}
+
+export async function runEngine(opts: EngineOptions): Promise<EngineResult> {
+  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const options = buildEngineOptions(opts);
 
   const result: EngineResult = {
     sessionId: "",

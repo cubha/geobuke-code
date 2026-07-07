@@ -2,7 +2,7 @@
 // runEngine(SDK I/O)은 ST7 E2E 수동 실측 — 여기선 매퍼만(순수 분리).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mapSdkMessage } from "../dist/engine.js";
+import { mapSdkMessage, buildEngineOptions } from "../dist/engine.js";
 
 test("assistant tool_use 블록 → tool_use 레코드(tool·file·session)", () => {
   const recs = mapSdkMessage({
@@ -77,4 +77,29 @@ test("session_id 없는 메시지 → 빈 배열(조인 불가 skip)", () => {
     [],
     "session 없으면 관측 불가로 skip",
   );
+});
+
+// ===== buildEngineOptions 불변식 회귀락 (ST6) — anti-recursion + ⓑ 자격증명 미주입 =====
+
+test("buildEngineOptions: settingSources는 항상 [](anti-recursion 불변식 — gbc hook 이중발화·재귀 차단)", () => {
+  assert.deepEqual(buildEngineOptions({ prompt: "x", cwd: "/tmp/a" }).settingSources, []);
+  // 콜백·모델이 있어도 불변
+  assert.deepEqual(
+    buildEngineOptions({ prompt: "x", cwd: "/tmp/a", model: "haiku", preToolUse: async () => ({}), canUseTool: async () => ({ behavior: "allow" }) }).settingSources,
+    [],
+  );
+});
+
+test("buildEngineOptions: apiKey를 절대 주입하지 않는다(ⓑ 인증·과금 실측 보존)", () => {
+  const o = buildEngineOptions({ prompt: "x", cwd: "/tmp/a" });
+  assert.ok(!("apiKey" in o), "apiKey 키 부재 — SDK 자체 인증 우선순위 관측");
+});
+
+test("buildEngineOptions: preToolUse/canUseTool/model이 있으면 배선, 없으면 미포함", () => {
+  const bare = buildEngineOptions({ prompt: "x", cwd: "/tmp/a" });
+  assert.ok(!("hooks" in bare) && !("canUseTool" in bare) && !("model" in bare), "미지정은 옵션에 미포함");
+  const wired = buildEngineOptions({ prompt: "x", cwd: "/tmp/a", model: "haiku", preToolUse: async () => ({}), canUseTool: async () => ({ behavior: "allow" }) });
+  assert.equal(wired.model, "haiku");
+  assert.ok(Array.isArray(wired.hooks.PreToolUse), "PreToolUse 콜백 배선");
+  assert.equal(typeof wired.canUseTool, "function");
 });
