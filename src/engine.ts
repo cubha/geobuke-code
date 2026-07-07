@@ -11,6 +11,7 @@
 import type { Options, SDKMessage, HookCallback, CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import type { ExtractionRecord } from "./extraction.js";
 import { appendExtraction } from "./extraction.js";
+import { nowIso } from "./time.js";
 
 /** runEngine 입력. preToolUse(ST4)·canUseTool(ST5)는 seam으로 주입 — 미지정 시 미배선(순수 관측 실행). */
 export interface EngineOptions {
@@ -51,8 +52,50 @@ interface ContentBlockLike {
  * 고신호만 추출(진짜 M1 축): assistant의 tool_use(모델이 무슨 도구를)·text, result(사이클 종료·과금),
  * user의 tool_result. system/status/partial 등 노이즈는 []. session이 없으면(관측 불가) 그 메시지는 skip.
  */
-export function mapSdkMessage(_msg: SDKMessage): ExtractionRecord[] {
-  throw new Error("mapSdkMessage: not implemented (ST3 RED)");
+export function mapSdkMessage(msg: SDKMessage): ExtractionRecord[] {
+  const m = msg as {
+    type?: string;
+    subtype?: string;
+    session_id?: string;
+    total_cost_usd?: number;
+    num_turns?: number;
+    message?: { content?: unknown };
+  };
+  const session = m.session_id;
+  if (!session) return []; // 조인키 없음 → 관측 불가로 skip(session_id 단독 조인 정책)
+  const at = nowIso();
+
+  if (m.type === "result") {
+    const text = `subtype=${m.subtype ?? "?"} cost=${m.total_cost_usd ?? 0} turns=${m.num_turns ?? 0}`;
+    return [{ at, session, kind: "result", text }];
+  }
+
+  const content = m.message?.content;
+  if ((m.type === "assistant" || m.type === "user") && Array.isArray(content)) {
+    const out: ExtractionRecord[] = [];
+    for (const raw of content as ContentBlockLike[]) {
+      if (!raw || typeof raw !== "object") continue;
+      if (raw.type === "tool_use") {
+        out.push({
+          at,
+          session,
+          kind: "tool_use",
+          tool: typeof raw.name === "string" ? raw.name : undefined,
+          file: typeof raw.input?.file_path === "string" ? raw.input.file_path : undefined,
+          // 인자 스니펫 — serializeRecord가 redact+캡(민감정보/폭주 차단).
+          text: raw.input ? JSON.stringify(raw.input) : undefined,
+        });
+      } else if (raw.type === "text" && typeof raw.text === "string") {
+        out.push({ at, session, kind: "assistant", text: raw.text });
+      } else if (raw.type === "tool_result") {
+        const t = typeof raw.text === "string" ? raw.text : JSON.stringify(raw);
+        out.push({ at, session, kind: "tool_result", text: t });
+      }
+    }
+    return out;
+  }
+
+  return []; // system/status/partial 등 노이즈
 }
 
 /**
