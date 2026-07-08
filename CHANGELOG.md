@@ -4,6 +4,23 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-08
+
+A1 SDK Wrapper 스파이크 — 게이트 루프가 **in-process agent-sdk**로 구동되는 A-모드의 실행 가능한 첫 절개. B-모드(stdin hook)와 완전 호환(hook 계약 무변경 = 재init 불요). 실험적 `gbc run` 커맨드 추가. 계획·실측: `memory/project_0_7_0_plan.md`. **minor 근거**: 신규 커맨드·신규 판정 트랜스포트(SDK 콜백) 추가이나 기존 B-모드 API·hook 계약은 불변.
+
+### Added
+- **`gbc run "<프롬프트>" [--yes] [--model <m>] [--max-turns <N>]`** (실험적 A-모드) — `@anthropic-ai/claude-agent-sdk`를 in-process로 구동해 게이트를 SDK **PreToolUse 콜백**으로 발화한다(stdin hook과 동일한 `evaluateGate` 코어 공유). `canUseTool` **사람-pause**(`--yes`=자동 허용)로 고무도장을 막고, SDK 스트림을 `.gbc/extraction.jsonl`로 관측(진짜 M1 사후대조 축, 0.8.0에서 events⨝extraction 조인). agent-sdk는 **optionalDependencies**라 별도 설치 필요(`npm i @anthropic-ai/claude-agent-sdk`) — 미설치 시 설치 안내.
+- **판정 코어 추출(`src/gate-core.ts`)** — `evaluateGate`가 부수효과를 커밋하지 않고 `GateDecision` 디스크립터(판정·응답채널·효과·계측)로 반환. stdin hook과 SDK 콜백이 이 코어와 `commitGateEffects`를 **공유**한다. 추출은 원본 `preToolUseBody`와 git 독립대조로 동작 1:1 확인, 분기별 단정 테스트가 회귀락.
+- **A-모드 extraction sink(`src/extraction.ts`)** — session_id 단독 조인키, 자유텍스트만 시크릿 redaction(sk-ant/Bearer/KEY·TOKEN 대입)+길이 캡, 파일 상한 초과 시 1세대 로테이션. `GBC_NO_EXTRACTION=1` opt-out.
+
+### Changed
+- **`@anthropic-ai/sdk` `^0.40` → `^0.110`** — agent-sdk peer(`>=0.93`) 충족 위한 판정 SDK 통일. 유일 소비자 judge의 `messages.create`/content-block 표면은 불변이며, A1 E2E에서 haiku 게이트 판정(block→pass)이 0.110로 라이브 정상 동작함을 실측 확인.
+
+### Security
+- **자격증명 미주입 + 설정 격리** — `gbc run`은 agent-sdk에 API 키를 주입하지 않는다(SDK 자체 인증 우선순위 관측 — 스파이크 실측: 구독 인증 경로). `settingSources: []`로 프로젝트 `.claude/settings.json`을 로드하지 않아 gbc 자신의 stdin PreToolUse hook이 겹쳐 발화·재귀하는 것을 막는다(gbc-init된 repo에서 도구당 게이트 1발화 실측 확인). A-mode 엔진은 런타임 격리(B-모드 hook 핫패스는 agent-sdk를 절대 로드 안 함).
+- **extraction redaction 커버리지 확장** — `.gbc/extraction.jsonl` 자유텍스트 마스킹에 AWS access key id·GitHub 토큰·Bearer/Basic·URL 임베디드 크리덴셜·PEM 프라이빗 키 블록 패턴 추가(발행 전 보안검토 반영). ⚠️ **패턴 기반 best-effort이지 완전한 시크릿 스캐닝이 아니다** — 최종 방어선은 `.gbc/` gitignore + `GBC_NO_EXTRACTION=1` opt-out.
+- **`--yes` 위험 범위 명시** — 게이트(`evaluateGate`)는 코드 편집(Edit/Write/MultiEdit)만 판정하고 Bash 등 그 외 도구의 승인은 `canUseTool` 사람-pause에 달렸다. `gbc run --yes`는 **모든 도구를 무관문 자동승인**(Bash 임의 명령 포함)하므로 비대화형·신뢰 프롬프트 전용임을 usage·README에 명시(보안검토 권고).
+
 ## [0.6.1] - 2026-07-06
 
 pre-A(1.0.0) 잔여 전량 소화 — A-모드 착수 전 기술부채·하드닝·정리 14건 일괄 처분(전수감사 `docs/analysis/ANALYSIS-061-pre-a-audit-2026-07-06.md`). **hook 계약 무변경 = 기존 설치처 재init 불요.** 0.7.5(#29)·상단 소개 정합화(#31) 문서 커밋 동반 발행.
