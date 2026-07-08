@@ -170,6 +170,86 @@ test("적용 판정 없는 세션(block만)·scorable=false 세션·편집 0건 
   assert.deepEqual(selectScoringCandidates([blockOnly, notScorable, noEdits]), []);
 });
 
+// ===== classifyBlockOutcome (ST3 오탐율 행동신호) =====
+import { classifyBlockOutcome } from "../dist/scoring.js";
+
+test("resolved-spec: block→spec-add→(재block→spec-add)→같은 세션 pass = 게이트 정상작동, 오탐 아님 (s1 코퍼스 형상)", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "s", at: "2026-07-08T10:00:00Z", decision: "block" }),
+    cliEv("spec-add", { at: "2026-07-08T10:00:30Z" }),
+    gateEv({ session: "s", at: "2026-07-08T10:01:00Z", decision: "block" }),
+    cliEv("spec-clear", { at: "2026-07-08T10:01:20Z" }),
+    cliEv("spec-add", { at: "2026-07-08T10:01:30Z" }),
+    gateEv({ session: "s", at: "2026-07-08T10:02:00Z", decision: "pass" }),
+  ]);
+  assert.equal(cls.length, 2, "block마다 1건");
+  assert.equal(cls[0].outcome, "resolved-spec");
+  assert.equal(cls[1].outcome, "resolved-spec");
+  assert.ok(cls.every((c) => c.fpCandidate === false));
+});
+
+test("self-corrected: spec 변화 없이 같은 세션 pass = 모호(정상도 오탐도 아님)", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "s", at: "2026-07-08T10:00:00Z", decision: "block" }),
+    gateEv({ session: "s", at: "2026-07-08T10:01:00Z", decision: "pass" }),
+  ]);
+  assert.equal(cls[0].outcome, "self-corrected");
+  assert.equal(cls[0].fpCandidate, false, "모호는 오탐 후보로 세지 않음(과대집계 방지)");
+});
+
+test("overridden: 이후 적용 판정 없이 gate-reset = 오탐 후보", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "s", at: "2026-07-08T10:00:00Z", decision: "block" }),
+    cliEv("gate-reset", { at: "2026-07-08T10:00:30Z" }),
+  ]);
+  assert.equal(cls[0].outcome, "overridden");
+  assert.equal(cls[0].fpCandidate, true);
+});
+
+test("overridden: 같은 세션 bypass도 게이트 무시 = 오탐 후보", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "s", at: "2026-07-08T10:00:00Z", decision: "block" }),
+    { at: "2026-07-08T10:00:30Z", session: "s", specHash: "h1", kind: "bypass", tool: "Edit" },
+  ]);
+  assert.equal(cls[0].outcome, "overridden");
+});
+
+test("abandoned: block 후 아무 후속 없음(재시도 포기) = 오탐 후보 (s2 코퍼스 형상)", () => {
+  const cls = classifyBlockOutcome([gateEv({ session: "s", at: "2026-07-08T10:00:00Z", decision: "block" })]);
+  assert.equal(cls[0].outcome, "abandoned");
+  assert.equal(cls[0].fpCandidate, true);
+});
+
+test("세션 경계: 타 세션 pass는 이 세션 block을 해소하지 않는다", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "a", at: "2026-07-08T10:00:00Z", decision: "block" }),
+    gateEv({ session: "b", at: "2026-07-08T10:01:00Z", decision: "pass" }),
+  ]);
+  const a = cls.find((c) => c.session === "a");
+  assert.equal(a.outcome, "abandoned", "타 세션 pass로 resolved 처리 금지");
+});
+
+test("ambiguous: 시간창에 타 세션 gate 혼입 시 정직 표기(CLI 이벤트 귀속 불확실 — scope-critic 방어 권고)", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "a", at: "2026-07-08T10:00:00Z", decision: "block" }),
+    gateEv({ session: "b", at: "2026-07-08T10:00:20Z", decision: "pass" }), // 타 세션 활동 혼입
+    cliEv("spec-add", { at: "2026-07-08T10:00:30Z" }), // 어느 세션의 spec-add인지 불확실
+    gateEv({ session: "a", at: "2026-07-08T10:01:00Z", decision: "pass" }),
+  ]);
+  const a = cls.find((c) => c.session === "a");
+  assert.equal(a.ambiguous, true, "타 세션 gate 혼입 = CLI 귀속 불확실");
+  const solo = classifyBlockOutcome([
+    gateEv({ session: "a", at: "2026-07-08T10:00:00Z", decision: "block" }),
+    cliEv("spec-add", { at: "2026-07-08T10:00:30Z" }),
+    gateEv({ session: "a", at: "2026-07-08T10:01:00Z", decision: "pass" }),
+  ]);
+  assert.equal(solo[0].ambiguous, false, "단독 세션은 명확");
+});
+
+test("block 없는 이벤트만 → 빈 배열", () => {
+  assert.deepEqual(classifyBlockOutcome([gateEv({ decision: "pass" }), cliEv("spec-add")]), []);
+});
+
 // ===== score 판정 순수부 (ST2 — buildScoreMessage/parseScoreVerdict) =====
 import { buildScoreMessage, parseScoreVerdict, judgeM1Violation } from "../dist/judge.js";
 
