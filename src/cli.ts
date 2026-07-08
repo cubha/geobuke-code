@@ -21,7 +21,19 @@ import {
   readSpecCases,
   clearSpec,
   archiveSpec,
+  resolveSpecText,
 } from "./spec.js";
+import {
+  joinBySession,
+  selectScoringCandidates,
+  classifyBlockOutcome,
+  computeRealM1,
+  loadScores,
+  saveScores,
+  formatEditsForScore,
+} from "./scoring.js";
+import type { SessionScore, RealM1 } from "./scoring.js";
+import { parseExtraction, extractionPath } from "./extraction.js";
 import { loadState, resetGate } from "./state.js";
 import { addDefer, loadDefers, resolveDefer, startDefer, withdrawDefer, reopenDefer, isClosedStatus } from "./defer.js";
 import { loadRepos, addRepo, removeRepo, getVerifyRunPin, setVerifyRunPin } from "./repos.js";
@@ -32,7 +44,7 @@ import { isStopHintMuted, setStopHintMuted, isGoldenCapture, setGoldenCapture } 
 import { loadGolden, clearGolden, diffVerdict, summarizeReplay } from "./golden.js";
 import type { ReplayOutcome } from "./golden.js";
 import type { VerdictKind } from "./types.js";
-import { selectedTransport } from "./judge.js";
+import { selectedTransport, judgeM1Violation } from "./judge.js";
 import { runVerify } from "./verify.js";
 import { scaffoldVerify } from "./scaffold.js";
 import type { CaseVerdict } from "./types.js";
@@ -754,8 +766,17 @@ function cmdMetrics(args: string[]): void {
 
   const m = computeMetrics(events);
 
+  // 진짜 M1(A2 사후대조) — 단일 repo 전용(extraction·scores는 repo-로컬 자산이라 --all 병합 부적합).
+  // 오탐율(행동신호)은 events만으로 항상 산출, 위반율은 scores.json(gbc score 산출물) 있을 때만.
+  let real: RealM1 | null = null;
+  if (!all) {
+    const exPath = extractionPath(cwd);
+    const records = parseExtraction(existsSync(exPath) ? readFileSync(exPath, "utf8") : "");
+    real = computeRealM1(joinBySession(events, records), classifyBlockOutcome(events), loadScores(cwd));
+  }
+
   if (args.includes("--json")) {
-    console.log(JSON.stringify(m, null, 2));
+    console.log(JSON.stringify(real ? { ...m, realM1: real } : m, null, 2));
     return;
   }
 
@@ -775,6 +796,76 @@ function cmdMetrics(args: string[]): void {
 
   [scope] 축A 파급반경 · 축B 최소구현 사다리 (사후 판정)
     판정 ${m.scope.total}건 · 파급반경 broken ${m.scope.rippleBroken} · 사다리 걸림 ${m.scope.rungHits} · 탐색불가 미평가 ${m.scope.degraded}`);
+
+  if (real) {
+    const fp = real.falsePositive;
+    const v = real.violation;
+    const pct = (r: number | null) => (r === null ? "—(표본 0)" : `${(r * 100).toFixed(1)}%`);
+    console.log(`
+  [진짜 M1 — A2 사후대조 (extraction⨝events)]
+    세션: 전체 ${real.sessions.total} · 채점가능(A-mode) ${real.sessions.scorable}
+    오탐율(행동신호): ${pct(fp.rate)} — block ${fp.totalBlocks}건 중 오탐후보 ${fp.fpCandidates}${fp.failedOpen ? ` (판정불능 ${fp.failedOpen} 분모제외)` : ""}
+      해소(spec보강) ${fp.resolvedSpec} · 자가수정 ${fp.selfCorrected} · 무시 ${fp.overridden} · 포기 ${fp.abandoned}${fp.ambiguous ? ` · 귀속불확실 ${fp.ambiguous}` : ""}
+    위반율(LLM 사후대조): ${pct(v.rate)} — 채점 ${v.scored}건 중 위반 ${v.violated}${v.unscored ? ` (미채점 ${v.unscored})` : ""}${
+      v.scored === 0 && real.sessions.scorable > 0 ? "\n      → 'gbc score'로 A-mode 세션 채점 실행" : ""
+    }${real.sessions.scorable === 0 ? "\n      → 채점 대상 없음('gbc run' A-mode 세션이 extraction을 남김)" : ""}`);
+  }
+}
+
+// ---------- gbc score (A2 사후대조 채점, 0.8.0) ----------
+/**
+ * gbc score [--json] — A-mode 세션의 extraction⨝events 조인 후보를 LLM(haiku)으로 사후대조
+ * 채점한다. 비용이 드는 명시 명령(게이트 핫패스·metrics 순수 집계와 분리 — gbc run 계보).
+ * 결과는 .gbc/scores.json 스냅샷으로 저장돼 gbc metrics의 위반율에 반영된다.
+ */
+async function cmdScore(args: string[]): Promise<void> {
+  const cwd = process.cwd();
+  const exPath = extractionPath(cwd);
+  const records = parseExtraction(existsSync(exPath) ? readFileSync(exPath, "utf8") : "");
+  if (records.length === 0) {
+    console.log("🐢 채점할 extraction이 없습니다 — A-mode 세션('gbc run')이 .gbc/extraction.jsonl을 남깁니다.");
+    return;
+  }
+  const eventsPath = join(cwd, ".gbc", "events.jsonl");
+  const events = parseEvents(existsSync(eventsPath) ? readFileSync(eventsPath, "utf8") : "");
+  const cands = selectScoringCandidates(joinBySession(events, records));
+  if (cands.length === 0) {
+    console.log("🐢 채점 후보가 없습니다 — 적용 판정(pass/cached)과 편집이 있는 A-mode 세션이 필요합니다.");
+    return;
+  }
+  console.log(`🐢 사후대조 채점 — 후보 ${cands.length}건 (모델 판정, 후보당 1호출)`);
+  const scores: SessionScore[] = [];
+  for (const c of cands) {
+    const specText = resolveSpecText(cwd, c.specHash);
+    let verdictLabel: string;
+    if (specText === null) {
+      // 판정 당시 명세를 못 찾으면 채점하지 않는다 — 다른 명세로 채점하는 오염 금지, 정직한 unscored.
+      scores.push({
+        session: c.session,
+        verdict: "unscored",
+        uncovered: [],
+        reason: `명세 resolve 불가(specHash=${c.specHash} — 현행/archive 불일치)`,
+        at: nowIso(),
+      });
+      verdictLabel = "unscored(명세 없음)";
+    } else {
+      const v = await judgeM1Violation(specText, formatEditsForScore(c.edits));
+      scores.push({ session: c.session, verdict: v.verdict, uncovered: v.uncovered, reason: v.reason, at: nowIso() });
+      verdictLabel = v.verdict + (v.uncovered.length ? ` (미커버 ${v.uncovered.length})` : "");
+    }
+    console.log(`  · ${c.session.slice(0, 8)}… [${c.specHash || "무명세"}] 편집 ${c.edits.length}건 → ${verdictLabel}`);
+  }
+  saveScores(cwd, scores, nowIso());
+  if (args.includes("--json")) {
+    console.log(JSON.stringify({ scores }, null, 2));
+    return;
+  }
+  const violated = scores.filter((s) => s.verdict === "violated");
+  for (const s of violated) {
+    console.log(`  ⚠️ ${s.session.slice(0, 8)}… 위반: ${s.reason ?? ""}`);
+    for (const u of s.uncovered) console.log(`     - ${u}`);
+  }
+  console.log(`✅ 채점 저장(.gbc/scores.json) — 'gbc metrics'의 [진짜 M1] 위반율에 반영됩니다.`);
 }
 
 // ---------- gbc update ----------
@@ -993,7 +1084,9 @@ function usage(): void {
                                       (A-mode 스파이크) agent-sdk in-process 게이트 실행 — PreToolUse=gbc
                                       게이트(Edit/Write만 판정), canUseTool=사람-pause. agent-sdk 별도 설치 필요.
                                       ⚠️--yes=모든 도구 자동승인(Bash 포함 무관문) — 비대화형 전용, 신뢰 프롬프트만
-  gbc metrics [--all] [--json]        계측 리포트(M1~M3, B-모드 관측 프록시; --all=등록 repo 병합)
+  gbc metrics [--all] [--json]        계측 리포트(M1~M3 + 진짜 M1 사후대조; --all=등록 repo 병합)
+  gbc score [--json]                  (A-mode) extraction⨝events 사후대조 채점 — 세션 편집이 통과 당시
+                                      명세를 커버했는지 모델 판정(후보당 1호출, 결과는 metrics에 반영)
   gbc repos add [경로]                크로스-repo 레지스트리에 추가(생략 시 현재 폴더)
   gbc repos list                      등록된 repo + 미해결 defer 수
   gbc repos remove [경로]             레지스트리에서 제거
@@ -1034,6 +1127,8 @@ async function main(): Promise<void> {
       return cmdRun(rest);
     case "metrics":
       return cmdMetrics(rest);
+    case "score":
+      return cmdScore(rest);
     case "repos":
       return cmdRepos(rest);
     case undefined:
