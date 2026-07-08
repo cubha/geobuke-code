@@ -41,6 +41,18 @@ test("redactSecrets: 일반 산문·파일 경로는 훼손 안 함(과다-redac
   assert.equal(redactSecrets(s), s, "시크릿 패턴 없으면 원문 그대로");
 });
 
+test("redactSecrets: AWS 키·GitHub 토큰·Basic·URL 크리덴셜·PEM 마스킹(보안검토 S2 확장)", () => {
+  assert.match(redactSecrets("AKIA1234567890ABCDEF 노출"), /\[REDACTED\]/);
+  assert.doesNotMatch(redactSecrets("AKIA1234567890ABCDEF"), /ABCDEF$/);
+  assert.match(redactSecrets("ghp_0123456789abcdefghijklmnopqrstuvwxyz"), /\[REDACTED\]/);
+  assert.match(redactSecrets("Authorization: Basic dXNlcjpwYXNzd29yZA=="), /Basic \[REDACTED\]/);
+  const url = redactSecrets("postgres://admin:supersecret@db.host:5432/app");
+  assert.match(url, /postgres:\/\/admin:\[REDACTED\]@/, "URL 비밀번호만 마스킹·user·host 보존");
+  assert.doesNotMatch(url, /supersecret/);
+  const pem = redactSecrets("key=-----BEGIN RSA PRIVATE KEY-----\nMIIabc123\n-----END RSA PRIVATE KEY-----");
+  assert.doesNotMatch(pem, /MIIabc123/, "PEM 블록 본문 제거");
+});
+
 test("serializeRecord: text는 redact 후 직렬화, 한 줄·MAX_LINE 미만", () => {
   const line = serializeRecord({ at: "2026-07-07T00:00:00Z", session: "s1", kind: "gate", decision: "pass", text: "키 sk-ant-api03-SECRETSECRET12 노출" });
   assert.ok(!line.includes("\n"), "한 줄");

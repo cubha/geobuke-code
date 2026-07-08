@@ -41,17 +41,29 @@ export interface ExtractionRecord {
 const REDACTED = "[REDACTED]";
 
 /**
- * 민감정보 redaction(순수) — 자유텍스트에서 고신뢰 시크릿 패턴만 좁게 마스킹한다.
- * 과다-redaction(일반 산문·경로 훼손)을 피하려 확정 패턴만: Anthropic/OpenAI 키, Bearer,
- * KEY/TOKEN/SECRET/PASSWORD 대입(키 이름은 남기고 값만). 조인·분석에 쓰는 구조 필드엔 적용 안 함.
+ * 민감정보 redaction(순수) — 자유텍스트에서 *알려진 고신뢰 패턴만* 좁게 마스킹한다.
+ * ⚠️ 이것은 **패턴 기반 best-effort defense-in-depth이지 완전한 시크릿 스캐닝이 아니다.** 신규/사설
+ * 토큰 형식은 놓칠 수 있다 — 최종 방어선은 .gbc/가 gitignore이고(커밋 유출 경로 없음) 로컬 파일 한정이며
+ * GBC_NO_EXTRACTION=1로 전체를 끌 수 있다는 점이다. 과다-redaction(일반 산문·경로 훼손)을 피하려
+ * 확정 패턴만 넣는다. 조인·분석에 쓰는 구조 필드(file 등)엔 적용하지 않는다(설계상 — 헤더 주석 참조).
+ * 커버: Anthropic/OpenAI 키·AWS access key id·GitHub 토큰·Bearer/Basic·URL 임베디드 크리덴셜·
+ * PEM 프라이빗 키 블록·KEY/TOKEN/SECRET/PASSWORD 대입.
  */
 export function redactSecrets(text: string): string {
   return text
     // Anthropic 키(sk-ant-…) / 일반 sk-… 롱토큰
     .replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, REDACTED)
     .replace(/\bsk-[A-Za-z0-9]{20,}\b/g, REDACTED)
-    // Bearer 토큰
-    .replace(/\bBearer\s+[A-Za-z0-9._-]{8,}/g, `Bearer ${REDACTED}`)
+    // AWS access key id
+    .replace(/\bAKIA[0-9A-Z]{16}\b/g, REDACTED)
+    // GitHub 토큰(ghp_/gho_/ghu_/ghs_/ghr_)
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{36,}\b/g, REDACTED)
+    // PEM 프라이빗 키 블록(줄바꿈 포함 전체)
+    .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, REDACTED)
+    // Authorization 스킴(Bearer/Basic) 토큰 — 스킴 키워드는 보존, 값만 마스킹
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._=+/-]{8,}/g, `$1 ${REDACTED}`)
+    // URL 임베디드 크리덴셜(scheme://user:pass@host) — user는 남기고 비밀번호만 마스킹
+    .replace(/([a-z][a-z0-9+.-]*:\/\/[^/\s:@]+):[^/\s@]+@/gi, `$1:${REDACTED}@`)
     // KEY/TOKEN/SECRET/PASSWORD 대입(env·json·kv) — 키 이름 보존, 값만 마스킹.
     // 값: 따옴표 안(공백 허용) 또는 비따옴표 비공백 토큰. 키 이름과 구분자(=/:)는 원문 보존.
     .replace(

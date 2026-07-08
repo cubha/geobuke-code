@@ -989,9 +989,10 @@ function usage(): void {
                                       골든셋 캡처 토글·상태(판정 드리프트 회귀락, 로컬 전용)
   gbc gate snapshot replay [--samples N]
                                       골든 케이스 재판정(temp 0)·드리프트 시 exit 1
-  gbc run "<프롬프트>" [--yes] [--model <m>]
+  gbc run "<프롬프트>" [--yes] [--model <m>] [--max-turns <N>]
                                       (A-mode 스파이크) agent-sdk in-process 게이트 실행 — PreToolUse=gbc
-                                      게이트, canUseTool=사람-pause(--yes=자동허용). agent-sdk 별도 설치 필요
+                                      게이트(Edit/Write만 판정), canUseTool=사람-pause. agent-sdk 별도 설치 필요.
+                                      ⚠️--yes=모든 도구 자동승인(Bash 포함 무관문) — 비대화형 전용, 신뢰 프롬프트만
   gbc metrics [--all] [--json]        계측 리포트(M1~M3, B-모드 관측 프록시; --all=등록 repo 병합)
   gbc repos add [경로]                크로스-repo 레지스트리에 추가(생략 시 현재 폴더)
   gbc repos list                      등록된 repo + 미해결 defer 수
