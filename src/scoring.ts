@@ -98,7 +98,14 @@ export type BlockOutcome =
   /** block → 이후 적용 판정 없이 gate-reset(CLI) 또는 같은 세션 bypass: 게이트 무시 = 오탐 후보 */
   | "overridden"
   /** block → 후속 이벤트 없음(재시도 포기): 오탐 후보 */
-  | "abandoned";
+  | "abandoned"
+  /**
+   * block → 같은 세션 failopen: 재시도가 판정불능(judge 실패)으로 통과됨. 오탐도 정상도 아닌
+   * 별도 분류 — lastAppliedEditAt이 failopen을 "적용된 편집"으로 묶는 것과 동일 기준으로 창을
+   * 닫되, "fail-open≠pass" 원칙(gate-core)대로 resolved로도 오탐으로도 세지 않는다(scope-critic
+   * 2026-07-08: 미분기 시 실존 failopen 이력이 abandoned로 오분류돼 오탐율이 조용히 부푼다).
+   */
+  | "failed-open";
 
 export interface BlockClassification {
   session: string;
@@ -140,9 +147,11 @@ export interface RealM1 {
     selfCorrected: number;
     overridden: number;
     abandoned: number;
+    /** 재시도가 판정불능(failopen)으로 통과된 block 수 — 분모 제외 대상 */
+    failedOpen: number;
     /** 귀속 불확실(동시 세션 혼입) 분류 수 — 신뢰도 참고 */
     ambiguous: number;
-    /** fpCandidates/totalBlocks. block 0건이면 null */
+    /** fpCandidates/(totalBlocks-failedOpen) — 판정불능은 분모 제외(희석 방지, unscored 규율 미러). 분모 0이면 null */
     rate: number | null;
   };
   /** 분모 투명성 — 전체 세션 중 채점 가능(A-mode) 세션 수. */
@@ -207,6 +216,8 @@ export function computeRealM1(
   const count = (o: BlockOutcome) => classifications.filter((c) => c.outcome === o).length;
   const fpCandidates = classifications.filter((c) => c.fpCandidate).length;
   const totalBlocks = classifications.length;
+  const failedOpen = count("failed-open");
+  const classifiable = totalBlocks - failedOpen; // 판정불능 제외 분모(희석 방지)
 
   return {
     violation: {
@@ -223,8 +234,9 @@ export function computeRealM1(
       selfCorrected: count("self-corrected"),
       overridden: count("overridden"),
       abandoned: count("abandoned"),
+      failedOpen,
       ambiguous: classifications.filter((c) => c.ambiguous).length,
-      rate: totalBlocks ? round3(fpCandidates / totalBlocks) : null,
+      rate: classifiable ? round3(fpCandidates / classifiable) : null,
     },
     sessions: {
       total: joins.length,
@@ -249,18 +261,20 @@ export function classifyBlockOutcome(events: GateEvent[]): BlockClassification[]
   for (let i = 0; i < sorted.length; i++) {
     const b = sorted[i];
     if (b.kind !== "gate" || b.decision !== "block" || !b.session) continue;
-    // 같은 세션의 다음 적용 판정(pass/cached)까지가 이 block의 관측 창.
+    // 같은 세션의 다음 적용 판정(pass/cached/failopen — 편집이 실제 반영된 판정)까지가 관측 창.
     let endIdx = sorted.length;
     let applied = false;
+    let failedOpen = false;
     for (let k = i + 1; k < sorted.length; k++) {
       const e = sorted[k];
       if (
         e.kind === "gate" &&
         e.session === b.session &&
-        (e.decision === "pass" || e.decision === "cached")
+        (e.decision === "pass" || e.decision === "cached" || e.decision === "failopen")
       ) {
         endIdx = k;
         applied = true;
+        failedOpen = e.decision === "failopen";
         break;
       }
     }
@@ -276,10 +290,13 @@ export function classifyBlockOutcome(events: GateEvent[]): BlockClassification[]
       // 타 세션 gate 혼입 = CLI 이벤트 귀속 불확실(동시 세션) — 정직 표기.
       if (e.kind === "gate" && e.session && e.session !== b.session) ambiguous = true;
     }
+    // failed-open이 spec 보강 여부보다 우선 — 재판정 자체가 실패했으면 resolved라 볼 수 없다.
     const outcome: BlockOutcome = applied
-      ? specChanged
-        ? "resolved-spec"
-        : "self-corrected"
+      ? failedOpen
+        ? "failed-open"
+        : specChanged
+          ? "resolved-spec"
+          : "self-corrected"
       : overridden
         ? "overridden"
         : "abandoned";
