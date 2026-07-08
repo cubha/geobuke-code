@@ -637,4 +637,53 @@ export async function judgeScope(
   }
 }
 
+// ===== A2 사후대조 채점(진짜 M1) 경로 — 0.8.0 =====
+// 게이트(구현 전 차단)·reviewed(케이스별 코드독해)와 별개의 세 번째 판정: 세션이 *끝난 뒤* 그 세션의
+// 실제 편집 묶음(extraction)이 통과 당시 명세를 커버했는지 사후 대조한다. 호출은 gbc score(명시
+// 명령)만 — 게이트 핫패스에 절대 실리지 않는다(비용·지연 분리).
+
+/** score 판정 전용 모델(GBC_SCORE_MODEL, opt-in) — scopeModel/verifyModel과 동형 분리, 기본 haiku. */
+export function scoreModel(env: Record<string, string | undefined> = process.env): string {
+  return safeModel(env.GBC_SCORE_MODEL ?? DEFAULT_MODEL);
+}
+
+/**
+ * 사후대조 판정 결과. verdict는 3값 — violated(위반 확인)/compliant(커버 확인)/unscored(판단 불가).
+ * ⚠️ 어떤 실패 경로도 compliant로 떨어지지 않는다(reviewed의 unverifiable 규율 미러).
+ */
+export interface ScoreVerdict {
+  verdict: "violated" | "compliant" | "unscored";
+  /** violated: 커버 안 된 명세 케이스들 */
+  uncovered: string[];
+  reason: string;
+}
+
+/** STUB(ST2 RED) — score 시스템 프롬프트 + 사용자 메시지(명세 + 세션 편집 묶음). */
+export function buildScoreMessage(specText: string, editsText: string): string {
+  void specText;
+  void editsText;
+  throw new Error("STUB: buildScoreMessage 미구현(ST2 RED)");
+}
+
+/** STUB(ST2 RED) — score 응답 파싱(순수). 파싱불가·형상불량은 unscored(정직 바닥). */
+export function parseScoreVerdict(raw: string): ScoreVerdict {
+  void raw;
+  throw new Error("STUB: parseScoreVerdict 미구현(ST2 RED)");
+}
+
+/** transport 무관 호출자 시그니처(테스트 주입용) — ReviewInvoke 동형. */
+export type ScoreInvoke = (system: string, user: string) => Promise<string>;
+
+/** STUB(ST2 RED) — 사후대조 판정. 호출 실패는 unscored로 매핑(compliant 복사 금지). */
+export async function judgeM1Violation(
+  specText: string,
+  editsText: string,
+  opts: { invoke?: ScoreInvoke } = {},
+): Promise<ScoreVerdict> {
+  void specText;
+  void editsText;
+  void opts;
+  throw new Error("STUB: judgeM1Violation 미구현(ST2 RED)");
+}
+
 export { GATE_SYSTEM, buildUserMessage, parseVerdict, REVIEW_SYSTEM, SCOPE_SYSTEM };
