@@ -2,8 +2,11 @@
 // session_id로 조인해 진짜 M1(pass 후 시나리오 위반율)과 오탐율(block 정당성)을 산출한다.
 // 구조: 조인·후보선별·시퀀스분류는 순수함수(결정론, TDD 회귀락) / LLM 채점은 별도 명령(gbc score)이
 // 트리거 — A1의 mapSdkMessage(순수)/runEngine(E2E) 분리 미러.
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import type { GateEvent } from "./metrics.js";
 import type { ExtractionRecord } from "./extraction.js";
+import { gbcDir } from "./store.js";
 
 /**
  * 한 세션의 게이트 판정 + 엔진 추출 묶음. scorable=false는 extraction 없는 B-모드 세션(stdin hook만) —
@@ -41,27 +44,43 @@ function isFileEdit(r: ExtractionRecord): boolean {
 }
 
 /**
- * 조인 결과에서 채점 후보를 순수 선별한다. 후보 = scorable 세션 중 적용 판정(pass/cached) 앵커가
- * 있고 편집이 1건 이상인 세션. block만 있는 세션(적용된 편집 없음)·extraction 없는 B-모드 세션·
- * 편집 0건 세션은 제외 — 채점할 "실제 반영된 작업"이 없다.
+ * 조인 결과에서 채점 후보를 순수 선별한다. 후보 = scorable 세션의 *작업단위 세그먼트*별 1건.
+ * 세그먼트 = 적용 판정(pass/cached)의 specHash 전환점 분리 — 한 gbc run 세션이 done→spec-add를
+ * 거쳐 여러 작업단위를 낼 수 있어(scope-critic 2026-07-08 범위확대), 세션당 단일 앵커면 2번째
+ * 단위의 편집이 1번째 명세로 오채점된다. 같은 해시 연속 판정은 한 단위로 병합.
+ *
+ * 세그먼트 시간창 = [이 앵커의 게이트된 편집 시각, 다음 세그먼트의 게이트된 편집 시각). 게이트된
+ * 편집 = 앵커 직전 최근접 선행 편집 — 실측: tool_use 레코드가 gate 이벤트보다 0.001~3s 선행하므로
+ * "앵커 이후"만으로는 그 편집이 빠진다. 창 시작은 직전 앵커 시각으로 클램프(선행 편집 유실 시
+ * 이전 세그먼트 편집을 훔치는 것 방지). block만 있는 세션·편집 0건 세그먼트는 제외.
  */
 export function selectScoringCandidates(joins: SessionJoin[]): ScoringCandidate[] {
   const out: ScoringCandidate[] = [];
   for (const j of joins) {
     if (!j.scorable) continue;
-    const anchor = j.events.find(
+    const applied = j.events.filter(
       (e) => e.kind === "gate" && (e.decision === "pass" || e.decision === "cached"),
     );
-    if (!anchor) continue;
-    const fileEdits = j.records.filter(isFileEdit);
-    // 앵커 이후 편집 전부 + 앵커 직전(가장 가까운 선행) 편집 1건 = 게이트된 편집 자체.
-    // 실측: tool_use 레코드가 gate 이벤트보다 0.001~3s 선행하므로 "이후"만으로는 그 편집이 빠진다.
-    const after = fileEdits.filter((r) => r.at >= anchor.at);
-    const before = fileEdits.filter((r) => r.at < anchor.at);
-    const gated = before.length ? [before[before.length - 1]] : []; // records는 at 정렬 전제(joinBySession)
-    const edits = [...gated, ...after];
-    if (edits.length === 0) continue;
-    out.push({ session: j.session, anchorAt: anchor.at, specHash: anchor.specHash, edits });
+    if (applied.length === 0) continue;
+    // specHash 전환점으로 앵커 분리(연속 동일 해시는 첫 판정으로 병합).
+    const anchors: GateEvent[] = [];
+    for (const e of applied) {
+      if (anchors.length === 0 || anchors[anchors.length - 1].specHash !== e.specHash) anchors.push(e);
+    }
+    const fileEdits = j.records.filter(isFileEdit); // at 정렬 전제(joinBySession)
+    // 세그먼트 시작 = 게이트된 편집(앵커 직전 최근접) 시각, 없으면 앵커 시각. 직전 앵커로 클램프.
+    const startAts = anchors.map((a, i) => {
+      const before = fileEdits.filter((r) => r.at < a.at);
+      const gatedAt = before.length ? before[before.length - 1].at : a.at;
+      const prevAnchorAt = i > 0 ? anchors[i - 1].at : "";
+      return gatedAt > prevAnchorAt ? gatedAt : a.at;
+    });
+    for (let i = 0; i < anchors.length; i++) {
+      const endAt = i + 1 < anchors.length ? startAts[i + 1] : undefined;
+      const edits = fileEdits.filter((r) => r.at >= startAts[i] && (endAt === undefined || r.at < endAt));
+      if (edits.length === 0) continue;
+      out.push({ session: j.session, anchorAt: anchors[i].at, specHash: anchors[i].specHash, edits });
+    }
   }
   return out;
 }
@@ -130,16 +149,88 @@ export interface RealM1 {
   sessions: { total: number; scorable: number };
 }
 
-/** STUB(ST4 RED) — 조인·분류·채점 결과를 진짜 M1로 순수 집계한다. */
+/** 후보의 편집 묶음을 judge 입력 텍스트로 포맷(순수) — 파일·도구 + text 스니펫(이미 2000자 캡). */
+export function formatEditsForScore(edits: ExtractionRecord[]): string {
+  return edits
+    .map((e) => `- [${e.tool ?? "?"}] ${e.file ?? "(파일 미상)"}${e.text ? `\n  ${e.text}` : ""}`)
+    .join("\n");
+}
+
+/** .gbc/scores.json 경로 — gbc score의 스냅샷 산출물(채점은 재실행 시 덮어씀). */
+export function scoresPath(cwd: string): string {
+  return join(gbcDir(cwd), "scores.json");
+}
+
+/** scores.json 로드. 부재·깨짐은 [](채점 없음으로 정직 처리 — metrics가 rate:null 표시). */
+export function loadScores(cwd: string): SessionScore[] {
+  try {
+    if (!existsSync(scoresPath(cwd))) return [];
+    const j = JSON.parse(readFileSync(scoresPath(cwd), "utf8"));
+    if (!Array.isArray(j.scores)) return [];
+    return j.scores.filter(
+      (s: unknown): s is SessionScore =>
+        !!s && typeof s === "object" && typeof (s as SessionScore).session === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** scores.json 저장(스냅샷 덮어쓰기). 실패는 삼킨다(채점 출력 자체는 이미 화면에 있음). */
+export function saveScores(cwd: string, scores: SessionScore[], at: string): void {
+  try {
+    writeFileSync(scoresPath(cwd), JSON.stringify({ at, scores }, null, 2) + "\n", "utf8");
+  } catch {
+    /* fail-silent */
+  }
+}
+
+function round3(n: number): number {
+  return Math.round(n * 1000) / 1000;
+}
+
+/**
+ * 조인·분류·채점 결과를 진짜 M1로 순수 집계한다. 정직 규율 두 가지:
+ * ① 위반율 분모 = 채점 완료(violated+compliant)만 — unscored를 분모에 넣으면 위반율 과소평가.
+ * ② 표본 0이면 rate=null — "0%"로 뻥튀기하지 않는다(computeMetrics의 specHash="" 센티넬 정신).
+ */
 export function computeRealM1(
   joins: SessionJoin[],
   classifications: BlockClassification[],
   scores: SessionScore[],
 ): RealM1 {
-  void joins;
-  void classifications;
-  void scores;
-  throw new Error("STUB: computeRealM1 미구현(ST4 RED)");
+  const violated = scores.filter((s) => s.verdict === "violated").length;
+  const compliant = scores.filter((s) => s.verdict === "compliant").length;
+  const unscored = scores.filter((s) => s.verdict === "unscored").length;
+  const scored = violated + compliant;
+
+  const count = (o: BlockOutcome) => classifications.filter((c) => c.outcome === o).length;
+  const fpCandidates = classifications.filter((c) => c.fpCandidate).length;
+  const totalBlocks = classifications.length;
+
+  return {
+    violation: {
+      scored,
+      violated,
+      compliant,
+      unscored,
+      rate: scored ? round3(violated / scored) : null,
+    },
+    falsePositive: {
+      totalBlocks,
+      fpCandidates,
+      resolvedSpec: count("resolved-spec"),
+      selfCorrected: count("self-corrected"),
+      overridden: count("overridden"),
+      abandoned: count("abandoned"),
+      ambiguous: classifications.filter((c) => c.ambiguous).length,
+      rate: totalBlocks ? round3(fpCandidates / totalBlocks) : null,
+    },
+    sessions: {
+      total: joins.length,
+      scorable: joins.filter((j) => j.scorable).length,
+    },
+  };
 }
 
 /** spec 보강으로 볼 CLI 이벤트(차단 사유 해소 행동). */

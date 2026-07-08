@@ -53,6 +53,34 @@ export function computeSpecHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
+/**
+ * specHash → 명세 본문 resolve(A2 사후대조용). gate 이벤트의 specHash는 판정 *당시* 명세인데,
+ * 채점 시점엔 spec.md가 바뀌었거나 gbc done으로 아카이브됐을 수 있다. 순서: ①현행 spec.md 해시
+ * 일치 ②spec.archive/<specHash>-*.md 파일명 매칭(archiveSpec이 같은 computeSpecHash로 명명).
+ * 못 찾으면 null — 호출부는 unscored로 정직 처리(다른 명세로 채점하는 오염 금지).
+ */
+export function resolveSpecText(cwd: string, specHash: string): string | null {
+  if (!specHash) return null; // 빈 명세 센티넬 — 대조할 명세 자체가 없음
+  try {
+    const cur = loadPlanSpec(cwd).text;
+    if (cur.trim() && computeSpecHash(cur) === specHash) return cur;
+  } catch {
+    /* 현행 로드 실패 → archive 시도 */
+  }
+  try {
+    const dir = join(gbcDir(cwd), "spec.archive");
+    if (!existsSync(dir)) return null;
+    const hit = readdirSync(dir)
+      .filter((f) => f.startsWith(`${specHash}-`) && f.endsWith(".md"))
+      .sort()
+      .pop(); // 동일 해시 다건이면 최신 스탬프(내용 동일 — 해시가 곧 내용)
+    if (!hit) return null;
+    return readFileSync(join(dir, hit), "utf8");
+  } catch {
+    return null;
+  }
+}
+
 // --- spec.md 쓰기 (gbc spec 서브커맨드 백엔드) ---
 // 도출→검증→등록 루프에서, 사용자 승인된 시나리오를 durable 명세로 기록한다.
 // 주 경로는 에이전트가 .gbc/spec.md를 직접 작성하는 것이고, 이 CLI는 한 줄 케이스 추가용 보조.
