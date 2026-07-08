@@ -250,6 +250,65 @@ test("block 없는 이벤트만 → 빈 배열", () => {
   assert.deepEqual(classifyBlockOutcome([gateEv({ decision: "pass" }), cliEv("spec-add")]), []);
 });
 
+// ===== computeRealM1 (ST4 집계) =====
+import { computeRealM1 } from "../dist/scoring.js";
+
+function cls(outcome, over = {}) {
+  return {
+    session: over.session ?? "s",
+    at: over.at ?? "2026-07-08T10:00:00Z",
+    outcome,
+    fpCandidate: outcome === "overridden" || outcome === "abandoned",
+    ambiguous: over.ambiguous ?? false,
+  };
+}
+function score(verdict, over = {}) {
+  return { session: over.session ?? "s", verdict, uncovered: over.uncovered ?? [], reason: over.reason };
+}
+
+test("오탐율 집계: 분모=총 block, 분자=오탐후보(overridden+abandoned), outcome별 breakdown", () => {
+  const m = computeRealM1(
+    [],
+    [cls("resolved-spec"), cls("resolved-spec"), cls("abandoned"), cls("overridden", { ambiguous: true })],
+    [],
+  );
+  assert.equal(m.falsePositive.totalBlocks, 4);
+  assert.equal(m.falsePositive.fpCandidates, 2);
+  assert.equal(m.falsePositive.rate, 0.5);
+  assert.equal(m.falsePositive.resolvedSpec, 2);
+  assert.equal(m.falsePositive.overridden, 1);
+  assert.equal(m.falsePositive.abandoned, 1);
+  assert.equal(m.falsePositive.selfCorrected, 0);
+  assert.equal(m.falsePositive.ambiguous, 1);
+});
+
+test("위반율 집계: 분모=채점완료(violated+compliant)만 — unscored는 분모 제외(과소평가 방지)", () => {
+  const m = computeRealM1([], [], [score("violated"), score("compliant"), score("unscored")]);
+  assert.equal(m.violation.scored, 2);
+  assert.equal(m.violation.violated, 1);
+  assert.equal(m.violation.unscored, 1);
+  assert.equal(m.violation.rate, 0.5, "1/2 — unscored 미포함");
+});
+
+test("0건 정직 바닥: 채점 0건·block 0건이면 rate=null(0% 뻥튀기 금지)", () => {
+  const m = computeRealM1([], [], []);
+  assert.equal(m.violation.rate, null);
+  assert.equal(m.falsePositive.rate, null);
+});
+
+test("sessions 분모 투명성: 전체 세션 수와 scorable(A-mode) 수 병기", () => {
+  const m = computeRealM1(
+    [
+      { session: "a", events: [], records: [{ at: "t", session: "a", kind: "tool_use" }], scorable: true },
+      { session: "b", events: [], records: [], scorable: false },
+    ],
+    [],
+    [],
+  );
+  assert.equal(m.sessions.total, 2);
+  assert.equal(m.sessions.scorable, 1);
+});
+
 // ===== score 판정 순수부 (ST2 — buildScoreMessage/parseScoreVerdict) =====
 import { buildScoreMessage, parseScoreVerdict, judgeM1Violation } from "../dist/judge.js";
 

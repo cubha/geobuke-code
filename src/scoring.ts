@@ -92,10 +92,115 @@ export interface BlockClassification {
   ambiguous: boolean;
 }
 
-/** STUB(ST3 RED) — block 이벤트별 후속 시퀀스를 행동신호로 분류한다. */
+/** 세션 1건의 LLM 사후대조 채점 결과(gbc score가 산출·저장, computeRealM1이 집계). */
+export interface SessionScore {
+  session: string;
+  verdict: "violated" | "compliant" | "unscored";
+  uncovered: string[];
+  reason?: string;
+  /** 채점 시각 */
+  at?: string;
+}
+
+/** 진짜 M1 집계 결과 — 위반율(LLM 사후대조)과 오탐율(행동신호)을 정직한 분모와 함께 노출. */
+export interface RealM1 {
+  /** 위반율 — 분모는 *채점 완료*(violated+compliant)만. unscored를 분모에 넣으면 위반율이 과소평가된다. */
+  violation: {
+    scored: number;
+    violated: number;
+    compliant: number;
+    unscored: number;
+    /** violated/scored. 채점 0건이면 null(0으로 뻥튀기 금지) */
+    rate: number | null;
+  };
+  /** 오탐율 — 행동신호(classifyBlockOutcome) 기반. */
+  falsePositive: {
+    totalBlocks: number;
+    fpCandidates: number;
+    resolvedSpec: number;
+    selfCorrected: number;
+    overridden: number;
+    abandoned: number;
+    /** 귀속 불확실(동시 세션 혼입) 분류 수 — 신뢰도 참고 */
+    ambiguous: number;
+    /** fpCandidates/totalBlocks. block 0건이면 null */
+    rate: number | null;
+  };
+  /** 분모 투명성 — 전체 세션 중 채점 가능(A-mode) 세션 수. */
+  sessions: { total: number; scorable: number };
+}
+
+/** STUB(ST4 RED) — 조인·분류·채점 결과를 진짜 M1로 순수 집계한다. */
+export function computeRealM1(
+  joins: SessionJoin[],
+  classifications: BlockClassification[],
+  scores: SessionScore[],
+): RealM1 {
+  void joins;
+  void classifications;
+  void scores;
+  throw new Error("STUB: computeRealM1 미구현(ST4 RED)");
+}
+
+/** spec 보강으로 볼 CLI 이벤트(차단 사유 해소 행동). */
+const SPEC_CHANGE_KINDS: ReadonlySet<string> = new Set(["spec-add", "spec-clear"]);
+
+/**
+ * block 이벤트별 후속 시퀀스를 행동신호로 분류한다(순수). 원본 events 배열을 그대로 받는 이유:
+ * CLI 이벤트(session="")는 조인 불가라 SessionJoin 밖에 있고, 여기서 시간창으로 읽는다(joinBySession
+ * 주석의 분업). 시간창 = (block.at, 같은 세션 다음 적용판정.at] — 적용판정 없으면 스트림 끝까지.
+ * ⚠️ 한계(정직 표기): CLI 이벤트는 세션 귀속이 불가해 시간창에 *타 세션* gate가 혼입되면 어느 세션의
+ * spec-add인지 확정 불가 → ambiguous=true로 표기만 하고 분류는 유지(소비자가 신뢰도 판단).
+ */
 export function classifyBlockOutcome(events: GateEvent[]): BlockClassification[] {
-  void events;
-  throw new Error("STUB: classifyBlockOutcome 미구현(ST3 RED)");
+  const sorted = [...events].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  const out: BlockClassification[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const b = sorted[i];
+    if (b.kind !== "gate" || b.decision !== "block" || !b.session) continue;
+    // 같은 세션의 다음 적용 판정(pass/cached)까지가 이 block의 관측 창.
+    let endIdx = sorted.length;
+    let applied = false;
+    for (let k = i + 1; k < sorted.length; k++) {
+      const e = sorted[k];
+      if (
+        e.kind === "gate" &&
+        e.session === b.session &&
+        (e.decision === "pass" || e.decision === "cached")
+      ) {
+        endIdx = k;
+        applied = true;
+        break;
+      }
+    }
+    let specChanged = false;
+    let overridden = false;
+    let ambiguous = false;
+    for (let k = i + 1; k <= Math.min(endIdx, sorted.length - 1); k++) {
+      const e = sorted[k];
+      if (k === endIdx && applied) break; // 창 끝(적용판정 자체)은 위에서 소비
+      if (!e.session && SPEC_CHANGE_KINDS.has(e.kind)) specChanged = true;
+      if (!e.session && e.kind === "gate-reset") overridden = true;
+      if (e.session === b.session && e.kind === "bypass") overridden = true;
+      // 타 세션 gate 혼입 = CLI 이벤트 귀속 불확실(동시 세션) — 정직 표기.
+      if (e.kind === "gate" && e.session && e.session !== b.session) ambiguous = true;
+    }
+    const outcome: BlockOutcome = applied
+      ? specChanged
+        ? "resolved-spec"
+        : "self-corrected"
+      : overridden
+        ? "overridden"
+        : "abandoned";
+    out.push({
+      session: b.session,
+      at: b.at,
+      outcome,
+      fpCandidate: outcome === "overridden" || outcome === "abandoned",
+      ambiguous,
+    });
+  }
+  return out;
 }
 
 /**
