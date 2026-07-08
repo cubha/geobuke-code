@@ -90,6 +90,18 @@ test("빈 입력 → 빈 배열(순수·무예외)", () => {
   assert.deepEqual(joinBySession([], []), []);
 });
 
+test("세션 간 순서 = 첫 관측 시각 오름차순(리포트 안정성 — scope-critic 권고 회귀락)", () => {
+  const joins = joinBySession(
+    [gateEv({ session: "late", at: "2026-07-08T12:00:00Z" }), gateEv({ session: "early", at: "2026-07-08T09:00:00Z" })],
+    [rec({ session: "mid", at: "2026-07-08T10:30:00Z" })],
+  );
+  assert.deepEqual(
+    joins.map((j) => j.session),
+    ["early", "mid", "late"],
+    "이벤트든 레코드든 첫 관측이 이른 세션이 앞",
+  );
+});
+
 // ===== selectScoringCandidates (ST2 순수 후보선별) =====
 import { selectScoringCandidates } from "../dist/scoring.js";
 

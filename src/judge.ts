@@ -658,32 +658,74 @@ export interface ScoreVerdict {
   reason: string;
 }
 
-/** STUB(ST2 RED) — score 시스템 프롬프트 + 사용자 메시지(명세 + 세션 편집 묶음). */
+const MAX_SCORE_EDITS = 6000; // 세션 편집 묶음 절단(extraction text는 이미 2000자 캡 — 다중 편집 합산 상한)
+
+/**
+ * score 시스템 프롬프트 — 사후대조 규율. 게이트(구현 전)와 달리 "이미 반영된 작업 전체 vs 명세"의
+ * 커버리지 판정. 정직 규율: 편집 스니펫이 절단·불충분하면 violated로 확신하지 말고 unscored.
+ */
+const SCORE_SYSTEM = `너는 코딩 세션이 끝난 뒤 동작하는 사후 감사자다. [통과 당시 명세]와 [세션의 실제 편집 묶음]을
+받아, 편집들이 명세의 케이스를 실제로 커버했는지 대조한다. 이것은 차단이 아니라 사후 계측이다.
+- "violated": 명세 케이스 중 편집이 다루지 않은 것이 *구체적으로 확인*됨 → uncovered에 그 케이스를 그대로 나열
+- "compliant": 모든 케이스가 편집에서 커버됨이 확인됨
+- "unscored": 편집 스니펫 절단·정보 부족으로 판단 불가 — 추측 금지, 모르면 unscored. 불확실한 violated가 가장 위험.
+오직 아래 JSON만 출력(설명·펜스 금지):
+{"verdict":"violated|compliant|unscored","uncovered":["미커버 케이스"],"reason":"한 줄 근거"}`;
+
+/** score 사용자 메시지(순수) — 명세 + 세션 편집 묶음(상한 절단). */
 export function buildScoreMessage(specText: string, editsText: string): string {
-  void specText;
-  void editsText;
-  throw new Error("STUB: buildScoreMessage 미구현(ST2 RED)");
+  const edits =
+    editsText.length > MAX_SCORE_EDITS ? editsText.slice(0, MAX_SCORE_EDITS) + "\n…(절단됨)" : editsText;
+  return `[통과 당시 명세]
+${specText.trim() || "(명세 없음)"}
+
+[세션의 실제 편집 묶음]
+${edits}`;
 }
 
-/** STUB(ST2 RED) — score 응답 파싱(순수). 파싱불가·형상불량은 unscored(정직 바닥). */
+/**
+ * score 응답 파싱(순수). verdict가 3값 중 하나면 그대로, 그 외/파싱불가는 **unscored**.
+ * ⚠️ 어떤 실패 경로도 compliant로 떨어지지 않는다(parseReviewVerdict의 unverifiable 규율 미러).
+ */
 export function parseScoreVerdict(raw: string): ScoreVerdict {
-  void raw;
-  throw new Error("STUB: parseScoreVerdict 미구현(ST2 RED)");
+  try {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return { verdict: "unscored", uncovered: [], reason: "score 응답에서 JSON 미발견" };
+    const j = JSON.parse(m[0]);
+    const reason = typeof j.reason === "string" ? j.reason : "";
+    const uncovered = Array.isArray(j.uncovered) ? j.uncovered.filter((u: unknown) => typeof u === "string") : [];
+    if (j.verdict === "violated") return { verdict: "violated", uncovered, reason };
+    if (j.verdict === "compliant") return { verdict: "compliant", uncovered: [], reason };
+    return { verdict: "unscored", uncovered: [], reason: reason || "알 수 없는 verdict" };
+  } catch {
+    return { verdict: "unscored", uncovered: [], reason: "score 응답 JSON 파싱 실패" };
+  }
 }
 
 /** transport 무관 호출자 시그니처(테스트 주입용) — ReviewInvoke 동형. */
 export type ScoreInvoke = (system: string, user: string) => Promise<string>;
 
-/** STUB(ST2 RED) — 사후대조 판정. 호출 실패는 unscored로 매핑(compliant 복사 금지). */
+/**
+ * 사후대조 판정. 명세 + 세션 편집 묶음을 모델에 대조시켜 violated/compliant. 호출 실패·타임아웃은
+ * **unscored**로 매핑한다(compliant 복사 금지 — judgeReviewed의 unverifiable 가드 미러).
+ */
 export async function judgeM1Violation(
   specText: string,
   editsText: string,
   opts: { invoke?: ScoreInvoke } = {},
 ): Promise<ScoreVerdict> {
-  void specText;
-  void editsText;
-  void opts;
-  throw new Error("STUB: judgeM1Violation 미구현(ST2 RED)");
+  const user = buildScoreMessage(specText, editsText);
+  const invoke: ScoreInvoke =
+    opts.invoke ??
+    ((s, u) =>
+      selectedTransport() === "api"
+        ? judgeViaApi(s, u, undefined, scoreModel())
+        : judgeViaCli(s, u, scoreModel()));
+  try {
+    return parseScoreVerdict(await invoke(SCORE_SYSTEM, user));
+  } catch (e) {
+    return { verdict: "unscored", uncovered: [], reason: `score 호출 실패(미채점): ${String(e).slice(0, 120)}` };
+  }
 }
 
 export { GATE_SYSTEM, buildUserMessage, parseVerdict, REVIEW_SYSTEM, SCOPE_SYSTEM };

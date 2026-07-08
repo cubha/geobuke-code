@@ -35,10 +35,67 @@ export interface ScoringCandidate {
   edits: ExtractionRecord[];
 }
 
-/** STUB(ST2 RED) — 조인 결과에서 채점 후보를 순수 선별한다. */
+/** 파일 편집 레코드인가(채점 대상 필터) — tool_use이면서 file이 있는 것만. */
+function isFileEdit(r: ExtractionRecord): boolean {
+  return r.kind === "tool_use" && typeof r.file === "string" && r.file.length > 0;
+}
+
+/**
+ * 조인 결과에서 채점 후보를 순수 선별한다. 후보 = scorable 세션 중 적용 판정(pass/cached) 앵커가
+ * 있고 편집이 1건 이상인 세션. block만 있는 세션(적용된 편집 없음)·extraction 없는 B-모드 세션·
+ * 편집 0건 세션은 제외 — 채점할 "실제 반영된 작업"이 없다.
+ */
 export function selectScoringCandidates(joins: SessionJoin[]): ScoringCandidate[] {
-  void joins;
-  throw new Error("STUB: selectScoringCandidates 미구현(ST2 RED)");
+  const out: ScoringCandidate[] = [];
+  for (const j of joins) {
+    if (!j.scorable) continue;
+    const anchor = j.events.find(
+      (e) => e.kind === "gate" && (e.decision === "pass" || e.decision === "cached"),
+    );
+    if (!anchor) continue;
+    const fileEdits = j.records.filter(isFileEdit);
+    // 앵커 이후 편집 전부 + 앵커 직전(가장 가까운 선행) 편집 1건 = 게이트된 편집 자체.
+    // 실측: tool_use 레코드가 gate 이벤트보다 0.001~3s 선행하므로 "이후"만으로는 그 편집이 빠진다.
+    const after = fileEdits.filter((r) => r.at >= anchor.at);
+    const before = fileEdits.filter((r) => r.at < anchor.at);
+    const gated = before.length ? [before[before.length - 1]] : []; // records는 at 정렬 전제(joinBySession)
+    const edits = [...gated, ...after];
+    if (edits.length === 0) continue;
+    out.push({ session: j.session, anchorAt: anchor.at, specHash: anchor.specHash, edits });
+  }
+  return out;
+}
+
+/**
+ * block 판정의 사후 행동 분류(오탐율의 grounding). LLM 재판정이 아니라 *행동신호*로 판정하는 이유:
+ * 게이트 자체가 LLM(haiku)이라 재판정은 일치도 측정이지 truth가 아니다(0.5.5 문서 오판정 전례).
+ * 차단 이후 실제로 일어난 일이 차단의 정당성을 말해준다.
+ */
+export type BlockOutcome =
+  /** block → spec 보강(spec-add/clear) → 같은 세션 pass/cached: 차단이 명세 보강을 유도 = 정상작동 */
+  | "resolved-spec"
+  /** block → spec 변화 없이 같은 세션 pass/cached: 편집 수정으로 통과 — 정상도 오탐도 아닌 모호 */
+  | "self-corrected"
+  /** block → 이후 적용 판정 없이 gate-reset(CLI) 또는 같은 세션 bypass: 게이트 무시 = 오탐 후보 */
+  | "overridden"
+  /** block → 후속 이벤트 없음(재시도 포기): 오탐 후보 */
+  | "abandoned";
+
+export interface BlockClassification {
+  session: string;
+  /** block 시각 */
+  at: string;
+  outcome: BlockOutcome;
+  /** 오탐 후보 여부(overridden|abandoned) */
+  fpCandidate: boolean;
+  /** 시간창에 타 세션 gate 이벤트 혼입 — CLI 이벤트(session="") 귀속이 불확실함을 정직 표기 */
+  ambiguous: boolean;
+}
+
+/** STUB(ST3 RED) — block 이벤트별 후속 시퀀스를 행동신호로 분류한다. */
+export function classifyBlockOutcome(events: GateEvent[]): BlockClassification[] {
+  void events;
+  throw new Error("STUB: classifyBlockOutcome 미구현(ST3 RED)");
 }
 
 /**
