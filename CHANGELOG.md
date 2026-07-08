@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-08
+
+A2 진짜 M1 사후대조 — 0.7.0이 깐 `.gbc/extraction.jsonl`(A-모드 엔진 출력)을 `events.jsonl`(게이트 판정)과 **session_id로 조인**해, B-모드가 구조적으로 못 재던 두 숫자를 착지: **통과 후 시나리오 위반율(진짜 M1)** + **차단 오탐율**. hook/gate-core 계약 무변경 = **재init 불요**(단 `/gbc-monitor` 스킬 문서 갱신 반영은 재init 필요). 계획·실측: `memory/project_0_8_0_plan.md`. **minor 근거**: 신규 커맨드(`gbc score`)·metrics 표면 확장이나 기존 판정·hook·CLI 계약 불변.
+
+### Added
+- **`gbc score [--json]`** — A-모드 세션의 extraction⨝events 조인 후보를 사후대조 채점한다(후보당 haiku 1호출, `GBC_SCORE_MODEL` opt-in). 통과 당시 명세는 `specHash`로 resolve(현행 spec.md 해시 일치 → `spec.archive/<hash>-*.md` 파일명 매칭) — **resolve 실패 시 다른 명세로 채점하지 않고 unscored**(오염 금지). 결과는 `.gbc/scores.json` 스냅샷(파생 아티팩트 — 재채점 시 덮어씀). 채점은 비용이 드는 **명시 명령** — 게이트 핫패스·metrics 순수 집계에 절대 실리지 않는다.
+- **`gbc metrics` `[진짜 M1]` 섹션**(단일 repo 조회 시) — **위반율**: 채점 완료분(violated+compliant)만 분모(unscored 포함 시 과소평가). **오탐율**: LLM 재판정이 아니라 **행동신호**로 grounding(게이트 자체가 LLM이라 재판정은 일치도지 truth가 아님) — `block→spec 보강→통과`=정상 / `무시(gate-reset·bypass)`·`포기(무대응)`=오탐 후보 / `자가수정`=모호(오탐으로 세지 않음) / `fail-open 통과`=판정불능(분자·분모 제외). 표본 0은 0%가 아니라 `—(표본 0)` 정직 표기. `--json`은 `realM1` 필드 병합.
+- **조인·채점 코어(`src/scoring.ts`)** — `joinBySession`(extraction 없는 B-모드 세션 `scorable:false` 정직 태그)·`selectScoringCandidates`(**specHash 전환점 다중 앵커** — 한 세션이 done→spec-add로 여러 작업단위를 낼 때 2번째 단위 편집이 1번째 명세로 오채점되는 것 차단)·`classifyBlockOutcome`(행동신호 분류, 동시 세션 혼입 시 `ambiguous` 정직 표기)·`computeRealM1`(집계). 전부 순수함수 — 32단정 TDD 회귀락.
+- **score 판정 경로(`src/judge.ts`)** — `judgeM1Violation`: 기존 reviewed/scope 경로와 동형(build/parse 순수 분리·invoke seam). **어떤 실패 경로도 compliant로 떨어지지 않는다**(호출 실패·파싱 불가·미지 verdict → unscored — reviewed의 unverifiable 규율 미러).
+
+### Fixed
+- **block→failopen 오분류(잠복)** — 차단 후 재시도가 판정불능(fail-open)으로 통과된 경우를 "포기(오탐 후보)"로 오분류해 오탐율이 조용히 부풀 수 있던 것을 `failed-open` 별도 분류로 차단(scope-critic 적발 — 실존 failopen 이력 33건이 재료였다). `fail-open≠pass` 원칙대로 정상 해소로도 오탐으로도 세지 않는다.
+
+### Security
+- **scores.json 전이적 정화** — 채점 입력(extraction text)은 기록 시점에 이미 redaction+캡 적용된 값이라, 파생 아티팩트(`scores.json`의 reason/uncovered)도 원시 시크릿을 담지 않는다. `.gbc/` gitignore 최종 방어선 동일.
+
 ## [0.7.0] - 2026-07-08
 
 A1 SDK Wrapper 스파이크 — 게이트 루프가 **in-process agent-sdk**로 구동되는 A-모드의 실행 가능한 첫 절개. B-모드(stdin hook)와 완전 호환(hook 계약 무변경 = 재init 불요). 실험적 `gbc run` 커맨드 추가. 계획·실측: `memory/project_0_7_0_plan.md`. **minor 근거**: 신규 커맨드·신규 판정 트랜스포트(SDK 콜백) 추가이나 기존 B-모드 API·hook 계약은 불변.
