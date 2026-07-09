@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { gbcDir } from "./store.js";
@@ -51,6 +51,37 @@ export function loadPlanSpec(cwd: string): { text: string; source: string; warni
 /** 명세 해시 — 작업단위 식별용. 명세가 바뀌면 새 작업단위로 간주해 재게이트. */
 export function computeSpecHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+/**
+ * specHash → 명세 본문 resolve(A2 사후대조용). gate 이벤트의 specHash는 판정 *당시* 명세인데,
+ * 채점 시점엔 spec.md가 바뀌었거나 gbc done으로 아카이브됐을 수 있다. 순서: ①현행 spec.md 해시
+ * 일치 ②spec.archive/<specHash>-*.md 파일명 매칭(archiveSpec이 같은 computeSpecHash로 명명).
+ * 못 찾으면 null — 호출부는 unscored로 정직 처리(다른 명세로 채점하는 오염 금지).
+ */
+export function resolveSpecText(cwd: string, specHash: string): string | null {
+  if (!specHash) return null; // 빈 명세 센티넬 — 대조할 명세 자체가 없음
+  try {
+    const cur = loadPlanSpec(cwd).text;
+    if (cur.trim() && computeSpecHash(cur) === specHash) return cur;
+  } catch {
+    /* 현행 로드 실패 → archive 시도 */
+  }
+  try {
+    const dir = join(gbcDir(cwd), "spec.archive");
+    if (!existsSync(dir)) return null;
+    const hit = readdirSync(dir)
+      .filter((f) => f.startsWith(`${specHash}-`) && f.endsWith(".md"))
+      .sort()
+      .pop(); // 동일 해시 다건이면 최신 스탬프(내용 동일 — 해시가 곧 내용)
+    if (!hit) return null;
+    const path = join(dir, hit);
+    // 심링크 거부 — archive 밖 임의 파일 읽기 차단(cross-repo 집계·GBC_SPEC_FILE와 동일 관례, 보안검토 Info1).
+    if (lstatSync(path).isSymbolicLink()) return null;
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
 }
 
 // --- spec.md 쓰기 (gbc spec 서브커맨드 백엔드) ---
