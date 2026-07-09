@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { gbcDir } from "./store.js";
@@ -75,7 +75,10 @@ export function resolveSpecText(cwd: string, specHash: string): string | null {
       .sort()
       .pop(); // 동일 해시 다건이면 최신 스탬프(내용 동일 — 해시가 곧 내용)
     if (!hit) return null;
-    return readFileSync(join(dir, hit), "utf8");
+    const path = join(dir, hit);
+    // 심링크 거부 — archive 밖 임의 파일 읽기 차단(cross-repo 집계·GBC_SPEC_FILE와 동일 관례, 보안검토 Info1).
+    if (lstatSync(path).isSymbolicLink()) return null;
+    return readFileSync(path, "utf8");
   } catch {
     return null;
   }
