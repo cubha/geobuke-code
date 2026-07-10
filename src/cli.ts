@@ -1051,8 +1051,11 @@ async function cmdRun(args: string[]): Promise<void> {
 /**
  * gbc tui [--model <m>] — 풀스크린 TUI 진입점. ink/react/App은 이 함수 안에서만 동적 import되어
  * (`await import("./tui/app.js")` 등) B-모드 핫패스(hook/gate)와 다른 gbc 커맨드는 무영향으로
- * 격리된다(test/tui-isolation.test.mjs가 이 경계를 기계적으로 잠근다). optionalDependency 미설치
- * 시 cmdRun과 동일한 안내 패턴(ERR_MODULE_NOT_FOUND 매칭)으로 설치를 안내한다.
+ * 격리된다(test/tui-isolation.test.mjs가 이 경계를 기계적으로 잠근다). 이 catch는 **ink/react**
+ * 미설치만 잡는다(cmdRun과 동일한 ERR_MODULE_NOT_FOUND 매칭) — agent-sdk는 engine.ts가 첫 프롬프트
+ * 제출 시점에 lazy dynamic import하므로 여기서 못 잡는다. 그 경로의 미설치 안내는
+ * src/tui/app.tsx의 submit() catch가 별도로 담당한다(ST6 scope-critic 발견 — 이 함수만으론
+ * agent-sdk 미설치를 감지할 수 없다는 근거 확인).
  */
 async function cmdTui(args: string[]): Promise<void> {
   const cwd = process.cwd();

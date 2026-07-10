@@ -55,7 +55,7 @@ cd <your-project>
 gbc init                          # .claude/settings.json에 hook(PreToolUse+Stop+SessionStart) + /gate · /gbc-mute · /gbc-monitor skill 머지 (동의·백업)
 ```
 
-기본 게이트(B-모드)는 `@anthropic-ai/claude-agent-sdk`·`ink`·`react`를 **쓰지 않는다** — 셋 다 `optionalDependencies`라 `gbc run`(A-모드)·`gbc tui`([풀스크린 TUI](#풀스크린-tui-gbc-tui))를 안 쓸 거면 가볍게 건너뛸 수 있다:
+기본 게이트(B-모드)는 `@anthropic-ai/claude-agent-sdk`·`ink`·`react`를 **쓰지 않는다** — 셋 다 `optionalDependencies`라 `gbc run`(A-모드)·`gbc tui`([풀스크린 TUI](#풀스크린-tui-gbc-tui--090-a3a))를 안 쓸 거면 가볍게 건너뛸 수 있다:
 
 ```bash
 npm install -g geobuke-code --omit=optional

@@ -164,7 +164,18 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
           },
         });
       } catch (e) {
-        pushLine(`🐢 오류: ${String(e).slice(0, 200)}`, "danger");
+        // agent-sdk는 engine.ts가 lazy dynamic import한다(첫 프롬프트 제출 시점) — ink/react와 달리
+        // cli.ts의 cmdTui try/catch는 이 실패를 못 잡는다(ST6 scope-critic 발견). 여기서 별도로
+        // 친절 안내하지 않으면 사용자는 잘린 스택트레이스만 본다.
+        const msg = String(e);
+        if (/Cannot find (module|package)|ERR_MODULE_NOT_FOUND/.test(msg)) {
+          pushLine(
+            "🐢 A-mode 엔진(@anthropic-ai/claude-agent-sdk)이 설치되지 않았습니다. 설치: npm i @anthropic-ai/claude-agent-sdk",
+            "danger",
+          );
+        } else {
+          pushLine(`🐢 오류: ${msg.slice(0, 200)}`, "danger");
+        }
       } finally {
         dispatch({ type: "TURN_END" });
         const g = detectGit(cwd);
