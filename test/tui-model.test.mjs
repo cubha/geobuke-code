@@ -56,6 +56,12 @@ test("APPROVAL_REQUESTED: gateStatus=block·approval 생성(reason만, derivedCa
   assert.equal(s.approval.derivedCase, null);
   assert.equal(s.approval.selection, "y", "A-② 목업 기본 선택 = 승인(y)");
   assert.equal(s.panel, "none", "승인 프롬프트와 패널은 동시에 뜨지 않음(목업에 동시노출 없음)");
+  assert.equal(s.approval.kind, "generic", "kind 미지정 시 기본값 generic(ST5 자체검토로 추가)");
+});
+
+test("APPROVAL_REQUESTED: kind:'spec-add' 명시 시 approval.kind에 그대로 반영(bridge.ts ApprovalRequestContext.kind와 대칭)", () => {
+  const s = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", kind: "spec-add" });
+  assert.equal(s.approval.kind, "spec-add");
 });
 
 test("APPROVAL_CASE_DERIVED: approval.derivedCase 채움(엔진 도출 완료)", () => {

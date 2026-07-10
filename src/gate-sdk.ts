@@ -90,6 +90,10 @@ export function makeSdkPreToolUseHook(
       }
       return gateDecisionToHookOutput(decision);
     } catch (e) {
+      // 이 catch는 evaluateGate 자체가 throw한 경우(디스크 실패 등 infra 오류) — 유효한 GateDecision이
+      // 없어 onDecision을 부를 대상 자체가 없다(합성 decision을 지어내지 않음, 결정 확정: 2026-07-10
+      // ST5 자체검토). TUI 게이트 줄은 이 희귀 케이스에서 갱신되지 않지만 fail-open이라 도구는 정상
+      // 진행되고, 아래 systemMessage는 SDK가 시스템 메시지로 노출한다(스크롤백 가시성은 별개 채널).
       return {
         systemMessage: `🐢 거북이 게이트 — 내부 오류로 검사 없이 안전 통과(fail-open): ${String(e).slice(0, 120)}`,
         hookSpecificOutput: {

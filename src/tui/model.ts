@@ -9,6 +9,9 @@ export const APPROVAL_CHOICES: readonly ApprovalChoice[] = ["y", "n", "e", "d"];
 
 export interface ApprovalState {
   reason: string;
+  /** spec-add = 에이전트의 Bash("gbc spec add ...") 자기발화 승인(e/d 유효) · generic = 그 외 도구
+   *  승인(derivedCase 없음, e/d는 n과 동일 — bridge.ts resolveApproval과 대칭). 미지정 시 generic. */
+  kind: "spec-add" | "generic";
   derivedCase: string | null;
   selection: ApprovalChoice;
 }
@@ -60,7 +63,7 @@ export type TuiEvent =
   | { type: "TURN_START" }
   | { type: "TURN_END" }
   | { type: "GATE_RESULT"; status: "pass" | "block"; specCount: number; deferCount: number }
-  | { type: "APPROVAL_REQUESTED"; reason: string }
+  | { type: "APPROVAL_REQUESTED"; reason: string; kind?: "spec-add" | "generic" }
   | { type: "APPROVAL_CASE_DERIVED"; caseText: string }
   | { type: "APPROVAL_SELECTION_MOVE"; direction: 1 | -1 }
   | { type: "APPROVAL_ANSWERED"; choice: ApprovalChoice }
@@ -98,7 +101,7 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
         ...state,
         gateStatus: "block",
         panel: "none",
-        approval: { reason: event.reason, derivedCase: null, selection: "y" },
+        approval: { reason: event.reason, kind: event.kind ?? "generic", derivedCase: null, selection: "y" },
       };
 
     case "APPROVAL_CASE_DERIVED":
