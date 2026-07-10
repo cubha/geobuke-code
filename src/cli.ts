@@ -1047,6 +1047,16 @@ async function cmdRun(args: string[]): Promise<void> {
   }
 }
 
+// ---------- gbc tui (0.9.0 A3a — 스텁, ST6에서 실배선) ----------
+/**
+ * gbc tui — 풀스크린 TUI 진입점(예정). ST0~ST5 완료 전까지는 플레이스홀더만 출력한다.
+ * 실배선 시에도 ink/react는 이 함수 내부에서만 동적 import되어(`await import("./tui/app.js")`)
+ * B-모드 핫패스(hook/gate)와 다른 gbc 커맨드는 무영향으로 격리된다.
+ */
+async function cmdTui(_args: string[]): Promise<void> {
+  console.log("🐢 gbc tui — 준비 중 (0.9.0 A3a 구현 진행 중, 아직 사용 불가)");
+}
+
 function usage(): void {
   console.log(`🐢 gbc — 거북이코드 구현-전 게이트
 
@@ -1084,6 +1094,7 @@ function usage(): void {
                                       (A-mode 스파이크) agent-sdk in-process 게이트 실행 — PreToolUse=gbc
                                       게이트(Edit/Write만 판정), canUseTool=사람-pause. agent-sdk 별도 설치 필요.
                                       ⚠️--yes=모든 도구 자동승인(Bash 포함 무관문) — 비대화형 전용, 신뢰 프롬프트만
+  gbc tui                             (A3a, 구현 중) 풀스크린 TUI — ink/react optionalDependency
   gbc metrics [--all] [--json]        계측 리포트(M1~M3 + 진짜 M1 사후대조; --all=등록 repo 병합)
   gbc score [--json]                  (A-mode) extraction⨝events 사후대조 채점 — 세션 편집이 통과 당시
                                       명세를 커버했는지 모델 판정(후보당 1호출, 결과는 metrics에 반영)
@@ -1125,6 +1136,8 @@ async function main(): Promise<void> {
       return cmdVerify(rest);
     case "run":
       return cmdRun(rest);
+    case "tui":
+      return cmdTui(rest);
     case "metrics":
       return cmdMetrics(rest);
     case "score":
