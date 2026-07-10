@@ -4,7 +4,9 @@
 
 ## [Unreleased]
 
-A3a 단일-repo full TUI — `gbc run`(A-모드 in-process 엔진) 위에 승인 프롬프트·게이트 줄·계측/repo 토글 패널을 갖춘 풀스크린 화면(`gbc tui`)을 얹는다. 시안 A(토글 패널)·statusline 2줄·마스코트(half-block)·그린 톤. 계획·스택 결정: `memory/project_0_9_0_tui_stack_decision.md`.
+## [0.9.0] - 2026-07-11
+
+A3a 단일-repo full TUI — `gbc run`(A-모드 in-process 엔진) 위에 승인 프롬프트·게이트 줄·계측/repo 토글 패널을 갖춘 풀스크린 화면(`gbc tui`)을 얹는다. 시안 A(토글 패널)·statusline 2줄·마스코트(half-block)·그린 톤. 계획·스택 결정: `memory/project_0_9_0_tui_stack_decision.md`. **실터미널 수동 도그푸딩(한글 IME·bracketed paste·리사이즈 등)은 이 릴리스 전에 완료하지 못해 0.9.x 후속 패치로 대응 예정** — 알려진 후속 항목은 아래 참조.
 
 ### Added
 - **`gbc tui [--model <m>]`** — 풀스크린 TUI. `y/n/e/d` 승인 프롬프트(에이전트 자신의 `Bash("gbc spec add ...")` 호출을 `canUseTool`이 pause — 게이트 자체의 4지선다가 아니다), `⌃M`/`⌃R`로 계측(진짜 M1/M2/M3)·repo 상태 패널 토글(Esc로 닫힘), Static 스크롤백 + 마스코트 스플래시. 단일-repo 전용(multi-repo 스위처는 A3b 이후).
@@ -14,6 +16,10 @@ A3a 단일-repo full TUI — `gbc run`(A-모드 in-process 엔진) 위에 승인
 ### Changed
 - **`engines` `>=22`로 상향(Breaking)** — `gbc tui`가 요구하는 ink 7/React 19 최소 버전. B-모드(hook 게이트)만 쓰는 설치는 `npm i -g geobuke-code --omit=optional`로 ink/react/agent-sdk를 건너뛸 수 있다.
 - `ink`·`react`가 `@anthropic-ai/claude-agent-sdk`와 함께 `optionalDependencies`에 추가됨(TUI 쓸 때만 설치). `gbc tui`는 이 셋을 함수 내부에서만 동적 import해 B-모드 hook 핫패스·다른 gbc 커맨드는 무영향으로 격리한다(`test/tui-isolation.test.mjs` 회귀락).
+
+### Known follow-ups (0.9.x 예정, security-auditor QUICK 스캔 Warning)
+- 승인 프롬프트 기본 selection이 `y`(승인)라 Enter 한 번으로 즉시 허용됨 — stdin 경로(`makeStdinPauseCanUseTool`)의 "고무도장 방지" 기본 거부 원칙과 반대. generic 도구 승인 화면도 실행될 도구명·명령/경로를 표시하지 않음. 기본값을 거부로, generic 승인에 도구명·인자 표시 추가 예정.
+- agent-sdk 동적 import 격리는 코드 리뷰로 확인됐으나 `test/tui-isolation.test.mjs`가 ink/react만 로더로 차단해 기계적 회귀락은 아직 없음.
 
 ## [0.8.0] - 2026-07-08
 
