@@ -23,6 +23,11 @@ export interface EngineOptions {
   preToolUse?: HookCallback;
   /** ST5 canUseTool 사람-pause primitive. */
   canUseTool?: CanUseTool;
+  /**
+   * ST4(0.9.0 A3a) TUI 관측 seam — SDK 메시지마다 호출(부작용 허용, 반환값 무시). extraction
+   * sink와 별개 경로: 이 콜백이 던지거나 없어도 기존 추출·과금 집계 흐름은 무변경이다.
+   */
+  onMessage?: (msg: SDKMessage) => void;
 }
 
 /** runEngine 결과 — 사이클 요약 + ⓑ 인증·과금 실측 필드. */
@@ -151,6 +156,13 @@ export async function runEngine(opts: EngineOptions): Promise<EngineResult> {
         subtype?: string;
       };
       if (m.session_id) result.sessionId = m.session_id;
+      if (opts.onMessage) {
+        try {
+          opts.onMessage(msg);
+        } catch {
+          // TUI 관측 콜백의 오류가 엔진 루프(추출·과금 집계)를 절대 끊지 않는다.
+        }
+      }
       for (const rec of mapSdkMessage(msg)) {
         appendExtraction(opts.cwd, rec);
         result.records++;

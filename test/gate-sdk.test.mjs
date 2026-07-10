@@ -99,6 +99,47 @@ test("콜백: 비-PreToolUse 이벤트 → {} (무관)", async () => {
   assert.deepEqual(out, {});
 });
 
+// ===== onDecision seam (0.9.0 A3a TUI — engine.ts onMessage와 대칭) =====
+
+test("onDecision: 판정 성공마다 GateDecision을 관측 콜백에 넘긴다(반환값은 무시)", async () => {
+  const cwd = tmp();
+  try {
+    const seen = [];
+    const cb = makeSdkPreToolUseHook(
+      cwd,
+      makeDeps({ judge: async () => ({ verdict: "pass", missing: [], reason: "ok" }) }),
+      (decision) => seen.push(decision),
+    );
+    await cb(preInput(), "tu1", { signal: undefined });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].kind, "pass");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("onDecision: 콜백이 throw해도 훅 응답(hookSpecificOutput)은 정상 반환(engine.ts onMessage와 동일 흡수 규율)", async () => {
+  const cwd = tmp();
+  try {
+    const cb = makeSdkPreToolUseHook(
+      cwd,
+      makeDeps({ judge: async () => ({ verdict: "block", missing: ["케이스 B"], reason: "형제 누락" }) }),
+      () => { throw new Error("TUI 콜백 버그"); },
+    );
+    const out = await cb(preInput(), "tu1", { signal: undefined });
+    assert.ok(out.hookSpecificOutput, "onDecision throw가 훅 판정 흐름을 끊지 않음");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("onDecision: 비-PreToolUse 이벤트에선 호출 안 됨(early return이 evaluateGate보다 앞)", async () => {
+  const seen = [];
+  const cb = makeSdkPreToolUseHook(tmp(), undefined, (d) => seen.push(d));
+  await cb({ hook_event_name: "Stop", session_id: "s1" }, undefined, { signal: undefined });
+  assert.equal(seen.length, 0);
+});
+
 test("콜백: evaluateGate infra throw → 정형 fail-open(allow + systemMessage)", async () => {
   const cwd = tmp();
   try {

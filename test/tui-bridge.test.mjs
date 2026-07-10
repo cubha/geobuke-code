@@ -6,7 +6,33 @@
 // 기술자를 반환(실제 addDefer I/O는 이 파일 밖 — 순수함수는 "무엇을 할지"만 기술).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mapEngineMessageToTuiEvents, classifyApprovalRequest, resolveApproval } from "../dist/tui/bridge.js";
+import { mapEngineMessageToTuiEvents, classifyApprovalRequest, resolveApproval, buildGateResultEvent } from "../dist/tui/bridge.js";
+
+// ── buildGateResultEvent (gate-sdk.ts onDecision seam이 넘겨주는 GateDecision) ──
+// specCount·deferCount는 항상 호출부가 넘긴다 — decision.event.deferCount는 pass/block에만 있고
+// cached/doc-skip/bypass(최다빈도 경로)엔 없어 신뢰하면 "실제 defer가 있어도 0" 결함이 남는다
+// (자체검토로 발견·수정). 그래서 아래 테스트는 decision.event에 deferCount를 아예 안 담아도
+// 함수가 인자로 받은 값을 그대로 쓰는지를 확인한다.
+
+test("buildGateResultEvent: kind=block → APPROVAL_REQUESTED(reason), specCount/deferCount 인자 무관", () => {
+  const decision = { kind: "block", output: { mode: "exit-gate", permission: { decision: "ask", reason: "명세에 없는 파일 편집" } }, effects: {} };
+  assert.deepEqual(buildGateResultEvent(decision, 4, 1), { type: "APPROVAL_REQUESTED", reason: "명세에 없는 파일 편집" });
+});
+
+test("buildGateResultEvent: kind=pass → GATE_RESULT(status:pass, specCount/deferCount는 인자값 그대로)", () => {
+  const decision = { kind: "pass", output: { mode: "exit-gate" }, effects: {} };
+  assert.deepEqual(buildGateResultEvent(decision, 4, 2), { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
+});
+
+test("buildGateResultEvent: doc-skip/cached/bypass/fail-open/passthrough는 전부 pass로 뭉뚱그리고, deferCount는 인자값 그대로(event 미신뢰)", () => {
+  for (const kind of ["doc-skip", "cached", "bypass", "fail-open", "passthrough"]) {
+    const decision = { kind, output: { mode: "exit-silent" }, effects: {} }; // event 자체가 없음 — cached 등의 실제 형태
+    const ev = buildGateResultEvent(decision, 0, 3);
+    assert.equal(ev.type, "GATE_RESULT");
+    assert.equal(ev.status, "pass");
+    assert.equal(ev.deferCount, 3, `kind=${kind}에서도 인자로 받은 deferCount를 그대로 써야 함(event 결손 무관)`);
+  }
+});
 
 // ── mapEngineMessageToTuiEvents ──
 
