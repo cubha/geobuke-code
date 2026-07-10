@@ -1,0 +1,189 @@
+// 0.9.0 A3a ST3 — src/tui/format.ts 순수 포맷터(마스코트 half-block·statusline·게이트줄·경량 md/diff) 단정.
+// Ground Truth: gbc-tui-design.html(statusline 표·키맵 표·A-①~A-④ 게이트줄 문구) +
+// project_0_9_0_tui_stack_decision.md(C1 확정·<60열 C4 폴백·트루컬러+ANSI16 폴백).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  PALETTE,
+  MASCOT_C1,
+  MASCOT_C4,
+  renderMascot,
+  selectMascot,
+  abbreviateDir,
+  formatUsageBar,
+  formatStatusline,
+  formatGateLine,
+  formatMarkdownLite,
+  joinTextSegments,
+} from "../dist/tui/format.js";
+import { createInitialState, reduce } from "../dist/tui/model.js";
+
+// ── 마스코트 ──
+
+test("MASCOT_C1/C4: 모든 행 길이가 동일하고, '.' 아니면 PALETTE에 정의된 키만 사용", () => {
+  for (const matrix of [MASCOT_C1, MASCOT_C4]) {
+    const width = matrix[0].length;
+    for (const row of matrix) {
+      assert.equal(row.length, width, "행 길이 불일치");
+      for (const ch of row) {
+        if (ch !== ".") assert.ok(ch in PALETTE, `미정의 팔레트 키 '${ch}'`);
+      }
+    }
+  }
+});
+
+test("renderMascot(truecolor): 행 수 = ceil(matrix.length/2), 각 줄 리셋으로 종료, 트루컬러 이스케이프 포함", () => {
+  const lines = renderMascot(MASCOT_C1, "truecolor");
+  assert.equal(lines.length, Math.ceil(MASCOT_C1.length / 2));
+  for (const line of lines) assert.ok(line.endsWith("\x1b[0m"), "각 줄은 리셋으로 종료");
+  assert.ok(lines.some((l) => l.includes("38;2;")), "트루컬러 fg 이스케이프 포함");
+});
+
+test("renderMascot(ansi16): ANSI 16색 코드 사용, 38;2 트루컬러 코드는 없음", () => {
+  const lines = renderMascot(MASCOT_C1, "ansi16");
+  assert.equal(lines.length, Math.ceil(MASCOT_C1.length / 2));
+  assert.ok(!lines.some((l) => l.includes("38;2;")), "ansi16 모드엔 트루컬러 코드 없어야 함");
+  assert.ok(lines.some((l) => /\x1b\[9?\d+m/.test(l)), "ANSI 16색 코드 포함");
+});
+
+test("renderMascot: 완전 투명 셀('.','.')은 공백 1칸(색 없음)", () => {
+  const lines = renderMascot(["..", ".."], "truecolor");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0], "\x1b[0m \x1b[0m \x1b[0m");
+});
+
+test("selectMascot: 60열 미만은 C4, 60열 이상은 C1", () => {
+  assert.equal(selectMascot(40), MASCOT_C4);
+  assert.equal(selectMascot(59), MASCOT_C4);
+  assert.equal(selectMascot(60), MASCOT_C1);
+  assert.equal(selectMascot(120), MASCOT_C1);
+});
+
+// ── statusline ──
+
+test("abbreviateDir: 폭 안이면 그대로, 초과하면 '…/마지막세그먼트'로 축약", () => {
+  assert.equal(abbreviateDir("~/workspace/geobuke-code", 40), "~/workspace/geobuke-code");
+  assert.equal(abbreviateDir("~/workspace/geobuke-code", 15), "…/geobuke-code");
+});
+
+test("formatUsageBar: 채움 블록 수가 퍼센트에 비례, 0%/100%/범위밖 클램프", () => {
+  assert.equal(formatUsageBar(0), "▱▱▱▱▱▱▱▱▱▱ 0%");
+  assert.equal(formatUsageBar(100), "▰▰▰▰▰▰▰▰▰▰ 100%");
+  assert.equal(formatUsageBar(47), "▰▰▰▰▰▱▱▱▱▱ 47%", "목업 예시값(A-① 47%)과 동일");
+  assert.equal(formatUsageBar(-5), "▱▱▱▱▱▱▱▱▱▱ 0%", "음수 클램프");
+  assert.equal(formatUsageBar(150), "▰▰▰▰▰▰▰▰▰▰ 100%", "100 초과 클램프");
+});
+
+test("formatStatusline: dirty면 branch에 '*', usagePct<80은 accent·>=80은 warn, costUsd 있으면 세그먼트 추가", () => {
+  const base = { dir: "~/workspace/geobuke-code", branch: "main", dirty: false, model: "sonnet", usagePct: 47, costUsd: 0.42 };
+  const segs = formatStatusline(base);
+  assert.ok(segs.some((s) => s.text === "main"));
+  const usage = segs.find((s) => s.text.startsWith("▰") || s.text.startsWith("▱"));
+  assert.ok(usage);
+  assert.equal(usage.tone, "accent");
+  assert.ok(segs.some((s) => s.text === "$0.42"));
+
+  const dirty = formatStatusline({ ...base, dirty: true });
+  assert.ok(dirty.some((s) => s.text === "main*"));
+
+  const warn = formatStatusline({ ...base, usagePct: 85 });
+  const warnUsage = warn.find((s) => s.text.includes("%"));
+  assert.equal(warnUsage.tone, "warn", "80%+ 경고색(A-② 목업 55%는 accent, 여기선 85%로 임계 초과 확인)");
+
+  const subscribed = formatStatusline({ ...base, costUsd: null });
+  assert.ok(!subscribed.some((s) => s.text.startsWith("$")), "구독 인증이면 비용 세그먼트 생략");
+});
+
+// ── 게이트 줄 ──
+
+test("formatGateLine: idle(초기) — 'gated ✓' + spec/defer 카운트", () => {
+  const s = createInitialState();
+  const segs = formatGateLine({ ...s, specCount: 4, deferCount: 2 });
+  const text = joinTextSegments(segs);
+  assert.match(text, /gated ✓/);
+  assert.match(text, /spec 4케이스/);
+  assert.match(text, /defer 2/);
+});
+
+test("formatGateLine: pass + streaming — 'esc 중단' 힌트 포함", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TURN_START" });
+  s = reduce(s, { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
+  const text = joinTextSegments(formatGateLine(s));
+  assert.match(text, /🐢 pass/);
+  assert.match(text, /esc 중단/);
+});
+
+test("formatGateLine: pass + 미스트리밍 — 'esc 중단' 없음", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
+  const text = joinTextSegments(formatGateLine(s));
+  assert.doesNotMatch(text, /esc 중단/);
+});
+
+test("formatGateLine: block(승인 대기) — BLOCK danger 세그먼트, canUseTool 일시정지 문구", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "명세에 없는 파일 편집" });
+  const segs = formatGateLine(s);
+  const blockSeg = segs.find((seg) => seg.text.includes("BLOCK"));
+  assert.ok(blockSeg);
+  assert.equal(blockSeg.tone, "danger");
+  assert.match(joinTextSegments(segs), /승인 대기 중.*canUseTool/);
+});
+
+test("formatGateLine: 패널 토글 힌트가 열림 상태에 따라 '메트릭'↔'닫기' 전환", () => {
+  let s = createInitialState();
+  const closedText = joinTextSegments(formatGateLine(s));
+  assert.match(closedText, /⌃M 메트릭/);
+  assert.match(closedText, /⌃R repos/);
+  s = reduce(s, { type: "TOGGLE_PANEL", panel: "metrics" });
+  const openText = joinTextSegments(formatGateLine(s));
+  assert.match(openText, /⌃M 닫기/);
+  assert.match(openText, /⌃R repos/, "다른 패널 힌트는 그대로");
+});
+
+// ── 경량 마크다운/diff ──
+
+test("formatMarkdownLite: 헤딩은 #제거+accent, 일반 텍스트는 plain", () => {
+  const segs = formatMarkdownLite("## 제목\n본문 텍스트");
+  assert.equal(segs[0].text, "제목");
+  assert.equal(segs[0].tone, "accent");
+  assert.equal(segs[1].text, "본문 텍스트");
+  assert.equal(segs[1].tone, "plain");
+});
+
+test("formatMarkdownLite: diff +/- 라인은 accent/danger, 파일헤더(+++/---)는 제외", () => {
+  const diff = ["+++ b/file.ts", "--- a/file.ts", "+added line", "-removed line", " context"].join("\n");
+  const segs = formatMarkdownLite(diff);
+  assert.equal(segs[0].tone, "plain", "+++ 파일헤더는 diff 강조 대상 아님");
+  assert.equal(segs[1].tone, "plain", "--- 파일헤더는 diff 강조 대상 아님");
+  assert.equal(segs[2].tone, "accent");
+  assert.equal(segs[3].tone, "danger");
+  assert.equal(segs[4].tone, "plain");
+});
+
+test("formatMarkdownLite: 코드펜스 내부는 code 톤으로 원문 그대로(마크다운 파싱 안 함)", () => {
+  const md = "```\n# 이건헤딩아님\n```";
+  const segs = formatMarkdownLite(md);
+  assert.equal(segs[0].tone, "dim", "펜스 라인 자체");
+  assert.equal(segs[1].text, "# 이건헤딩아님", "펜스 안은 원문 그대로");
+  assert.equal(segs[1].tone, "code");
+  assert.equal(segs[2].tone, "dim");
+});
+
+test("joinTextSegments: 기본 구분자 ' · ', 커스텀 구분자 지원", () => {
+  const segs = [{ text: "a", tone: "plain" }, { text: "b", tone: "plain" }];
+  assert.equal(joinTextSegments(segs), "a · b");
+  assert.equal(joinTextSegments(segs, " | "), "a | b");
+});
+
+test("포맷터는 입력을 변형하지 않는다(순수성)", () => {
+  const s = createInitialState();
+  const frozen = JSON.stringify(s);
+  formatGateLine(s);
+  assert.equal(JSON.stringify(s), frozen);
+  const statusData = { dir: "d", branch: "b", dirty: false, model: "m", usagePct: 1, costUsd: 1 };
+  const frozenStatus = JSON.stringify(statusData);
+  formatStatusline(statusData);
+  assert.equal(JSON.stringify(statusData), frozenStatus);
+});
