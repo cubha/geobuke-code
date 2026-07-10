@@ -58,8 +58,15 @@ export function gateDecisionToHookOutput(decision: GateDecision): SyncHookJSONOu
  * A-mode PreToolUse HookCallback 팩토리. 매 도구 호출마다 evaluateGate로 판정 → 효과 커밋 →
  * SDK 출력으로 매핑. deps 미지정 시 프로덕션 배선(defaultGateDeps). infra throw는 정형 fail-open
  * (allow+고지)으로 흡수 — 장수 프로세스라 stdin의 runHookSafely(exit 0)를 return으로 치환한 것.
+ * onDecision(0.9.0 A3a TUI seam, engine.ts의 onMessage와 대칭): 판정 성공마다 GateDecision을 관측
+ * 콜백에 넘긴다(부작용 허용, 반환값 무시·throw해도 훅 응답엔 영향 없음) — TUI가 GATE_RESULT
+ * TuiEvent(specCount·deferCount)를 조립하는 지점. B-모드 핫패스(stdin hook.ts)는 이 콜백을 쓰지 않음.
  */
-export function makeSdkPreToolUseHook(cwd: string, deps?: GateDeps): HookCallback {
+export function makeSdkPreToolUseHook(
+  cwd: string,
+  deps?: GateDeps,
+  onDecision?: (decision: GateDecision) => void,
+): HookCallback {
   return async (input: HookInput): Promise<SyncHookJSONOutput> => {
     if (input.hook_event_name !== "PreToolUse") return {};
     const pre = input as PreToolUseHookInput & { session_id?: string };
@@ -74,8 +81,19 @@ export function makeSdkPreToolUseHook(cwd: string, deps?: GateDeps): HookCallbac
         deps ?? defaultGateDeps(),
       );
       commitGateEffects(cwd, decision);
+      if (onDecision) {
+        try {
+          onDecision(decision);
+        } catch {
+          // TUI 관측 콜백의 오류가 게이트 판정·도구 실행을 절대 끊지 않는다(engine.ts onMessage와 동일 규율).
+        }
+      }
       return gateDecisionToHookOutput(decision);
     } catch (e) {
+      // 이 catch는 evaluateGate 자체가 throw한 경우(디스크 실패 등 infra 오류) — 유효한 GateDecision이
+      // 없어 onDecision을 부를 대상 자체가 없다(합성 decision을 지어내지 않음, 결정 확정: 2026-07-10
+      // ST5 자체검토). TUI 게이트 줄은 이 희귀 케이스에서 갱신되지 않지만 fail-open이라 도구는 정상
+      // 진행되고, 아래 systemMessage는 SDK가 시스템 메시지로 노출한다(스크롤백 가시성은 별개 채널).
       return {
         systemMessage: `🐢 거북이 게이트 — 내부 오류로 검사 없이 안전 통과(fail-open): ${String(e).slice(0, 120)}`,
         hookSpecificOutput: {

@@ -1047,6 +1047,41 @@ async function cmdRun(args: string[]): Promise<void> {
   }
 }
 
+// ---------- gbc tui (0.9.0 A3a ST6 — 실배선) ----------
+/**
+ * gbc tui [--model <m>] — 풀스크린 TUI 진입점. ink/react/App은 이 함수 안에서만 동적 import되어
+ * (`await import("./tui/app.js")` 등) B-모드 핫패스(hook/gate)와 다른 gbc 커맨드는 무영향으로
+ * 격리된다(test/tui-isolation.test.mjs가 이 경계를 기계적으로 잠근다). 이 catch는 **ink/react**
+ * 미설치만 잡는다(cmdRun과 동일한 ERR_MODULE_NOT_FOUND 매칭) — agent-sdk는 engine.ts가 첫 프롬프트
+ * 제출 시점에 lazy dynamic import하므로 여기서 못 잡는다. 그 경로의 미설치 안내는
+ * src/tui/app.tsx의 submit() catch가 별도로 담당한다(ST6 scope-critic 발견 — 이 함수만으론
+ * agent-sdk 미설치를 감지할 수 없다는 근거 확인).
+ */
+async function cmdTui(args: string[]): Promise<void> {
+  const cwd = process.cwd();
+  const mi = args.indexOf("--model");
+  const model = mi >= 0 ? args[mi + 1] : undefined;
+  try {
+    const [{ default: React }, { render }, { App }] = await Promise.all([
+      import("react"),
+      import("ink"),
+      import("./tui/app.js"),
+    ]);
+    const { waitUntilExit } = render(React.createElement(App, { cwd, ...(model ? { model } : {}) }));
+    await waitUntilExit();
+  } catch (e) {
+    const msg = String(e);
+    if (/Cannot find (module|package)|ERR_MODULE_NOT_FOUND/.test(msg)) {
+      console.error(
+        "🐢 gbc tui 실행에 필요한 패키지가 설치되지 않았습니다.\n" +
+          "   설치: npm i ink react @anthropic-ai/claude-agent-sdk",
+      );
+      process.exit(1);
+    }
+    throw e;
+  }
+}
+
 function usage(): void {
   console.log(`🐢 gbc — 거북이코드 구현-전 게이트
 
@@ -1084,6 +1119,8 @@ function usage(): void {
                                       (A-mode 스파이크) agent-sdk in-process 게이트 실행 — PreToolUse=gbc
                                       게이트(Edit/Write만 판정), canUseTool=사람-pause. agent-sdk 별도 설치 필요.
                                       ⚠️--yes=모든 도구 자동승인(Bash 포함 무관문) — 비대화형 전용, 신뢰 프롬프트만
+  gbc tui [--model <m>]               풀스크린 TUI — ink/react/agent-sdk optionalDependency
+                                      (engines>=22, 미설치 시 npm i ink react @anthropic-ai/claude-agent-sdk)
   gbc metrics [--all] [--json]        계측 리포트(M1~M3 + 진짜 M1 사후대조; --all=등록 repo 병합)
   gbc score [--json]                  (A-mode) extraction⨝events 사후대조 채점 — 세션 편집이 통과 당시
                                       명세를 커버했는지 모델 판정(후보당 1호출, 결과는 metrics에 반영)
@@ -1125,6 +1162,8 @@ async function main(): Promise<void> {
       return cmdVerify(rest);
     case "run":
       return cmdRun(rest);
+    case "tui":
+      return cmdTui(rest);
     case "metrics":
       return cmdMetrics(rest);
     case "score":

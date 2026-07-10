@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+A3a 단일-repo full TUI — `gbc run`(A-모드 in-process 엔진) 위에 승인 프롬프트·게이트 줄·계측/repo 토글 패널을 갖춘 풀스크린 화면(`gbc tui`)을 얹는다. 시안 A(토글 패널)·statusline 2줄·마스코트(half-block)·그린 톤. 계획·스택 결정: `memory/project_0_9_0_tui_stack_decision.md`.
+
+### Added
+- **`gbc tui [--model <m>]`** — 풀스크린 TUI. `y/n/e/d` 승인 프롬프트(에이전트 자신의 `Bash("gbc spec add ...")` 호출을 `canUseTool`이 pause — 게이트 자체의 4지선다가 아니다), `⌃M`/`⌃R`로 계측(진짜 M1/M2/M3)·repo 상태 패널 토글(Esc로 닫힘), Static 스크롤백 + 마스코트 스플래시. 단일-repo 전용(multi-repo 스위처는 A3b 이후).
+- **`src/tui/*`** — 렌더-비의존 순수 상태모델(`model.ts` reducer)·멀티라인 에디터 텍스트버퍼(`editor.ts`)·마스코트/statusline/경량 md·diff 포맷터(`format.ts`)·SDK↔TuiEvent 순수 매핑(`bridge.ts`) + Ink 컴포넌트(`app.tsx`, `ui/*.tsx`). 순수부(model/editor/format/bridge)는 TDD 회귀락, UI 컴포넌트는 절대제외(수동 스모크 + scope-critic 3라운드).
+- **승인 큐 직렬화** — 한 턴 안에서 SDK가 서로 다른 tool_use 2개에 `canUseTool`을 겹쳐 호출할 가능성에 대비해 단일 ref 대신 큐로 승인 요청을 직렬화한다(화면엔 한 번에 하나만, 응답 즉시 다음 것을 이어서 연다).
+
+### Changed
+- **`engines` `>=22`로 상향(Breaking)** — `gbc tui`가 요구하는 ink 7/React 19 최소 버전. B-모드(hook 게이트)만 쓰는 설치는 `npm i -g geobuke-code --omit=optional`로 ink/react/agent-sdk를 건너뛸 수 있다.
+- `ink`·`react`가 `@anthropic-ai/claude-agent-sdk`와 함께 `optionalDependencies`에 추가됨(TUI 쓸 때만 설치). `gbc tui`는 이 셋을 함수 내부에서만 동적 import해 B-모드 hook 핫패스·다른 gbc 커맨드는 무영향으로 격리한다(`test/tui-isolation.test.mjs` 회귀락).
+
 ## [0.8.0] - 2026-07-08
 
 A2 진짜 M1 사후대조 — 0.7.0이 깐 `.gbc/extraction.jsonl`(A-모드 엔진 출력)을 `events.jsonl`(게이트 판정)과 **session_id로 조인**해, B-모드가 구조적으로 못 재던 두 숫자를 착지: **통과 후 시나리오 위반율(진짜 M1)** + **차단 오탐율**. hook/gate-core 계약 무변경 = **재init 불요**(단 `/gbc-monitor` 스킬 문서 갱신 반영은 재init 필요). 계획·실측: `memory/project_0_8_0_plan.md`. **minor 근거**: 신규 커맨드(`gbc score`)·metrics 표면 확장이나 기존 판정·hook·CLI 계약 불변.
