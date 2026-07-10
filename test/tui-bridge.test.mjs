@@ -1,0 +1,107 @@
+// 0.9.0 A3a ST4 — src/tui/bridge.ts 순수부(SDK 메시지→TuiEvent 매핑, 승인 프롬프트 분류·해석) 단정.
+// 아키텍처 확정 근거(advisor + cli.ts:201 실측): "에이전트가 요청에서 시나리오를 도출해 사용자 검증
+// 후 'gbc spec add'로 등록" — y/n/e/d 승인 UI는 gbc 게이트 BLOCK 자체가 아니라, 에이전트가 스스로
+// 발화하는 Bash("gbc spec add \"...\"") 호출에 대한 canUseTool pause다. SDK PermissionResult가
+// allow/deny 이진이라는 제약 위에서 e(수정 후 승인)=updatedInput 편집, d(defer)=deny+defer 부작용
+// 기술자를 반환(실제 addDefer I/O는 이 파일 밖 — 순수함수는 "무엇을 할지"만 기술).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mapEngineMessageToTuiEvents, classifyApprovalRequest, resolveApproval } from "../dist/tui/bridge.js";
+
+// ── mapEngineMessageToTuiEvents ──
+
+test("result 메시지 → TURN_END + STATUSLINE_UPDATE(costUsd)", () => {
+  const events = mapEngineMessageToTuiEvents({ type: "result", subtype: "success", total_cost_usd: 0.42, num_turns: 3 });
+  assert.deepEqual(events, [
+    { type: "TURN_END" },
+    { type: "STATUSLINE_UPDATE", patch: { costUsd: 0.42 } },
+  ]);
+});
+
+test("result 메시지에 total_cost_usd 없으면 0으로", () => {
+  const events = mapEngineMessageToTuiEvents({ type: "result", subtype: "success" });
+  assert.deepEqual(events[1], { type: "STATUSLINE_UPDATE", patch: { costUsd: 0 } });
+});
+
+test("assistant/system/auth_status 등 result가 아닌 메시지는 빈 배열(모델 세부 상태는 TuiState가 다루지 않음)", () => {
+  assert.deepEqual(mapEngineMessageToTuiEvents({ type: "assistant" }), []);
+  assert.deepEqual(mapEngineMessageToTuiEvents({ type: "system", subtype: "init" }), []);
+  assert.deepEqual(mapEngineMessageToTuiEvents({ type: "auth_status" }), []);
+  assert.deepEqual(mapEngineMessageToTuiEvents({ type: "stream_event" }), []);
+});
+
+// ── classifyApprovalRequest ──
+
+test("classifyApprovalRequest: Bash('gbc spec add \"...\"')는 spec-add로 분류, 케이스 텍스트 추출", () => {
+  const ctx = classifyApprovalRequest("Bash", { command: 'gbc spec add "bracketed paste 수신 시 멀티라인 원문 그대로 삽입"' });
+  assert.deepEqual(ctx, {
+    kind: "spec-add",
+    derivedCase: "bracketed paste 수신 시 멀티라인 원문 그대로 삽입",
+    rawCommand: 'gbc spec add "bracketed paste 수신 시 멀티라인 원문 그대로 삽입"',
+  });
+});
+
+test("classifyApprovalRequest: Bash지만 spec add가 아니면 generic", () => {
+  assert.deepEqual(classifyApprovalRequest("Bash", { command: "npm test" }), { kind: "generic" });
+});
+
+test("classifyApprovalRequest: Bash가 아닌 도구는 generic(y/n 이진 pause로 폴백)", () => {
+  assert.deepEqual(classifyApprovalRequest("Edit", { file_path: "a.ts" }), { kind: "generic" });
+});
+
+test("classifyApprovalRequest: command가 문자열이 아니거나 없으면 generic(방어)", () => {
+  assert.deepEqual(classifyApprovalRequest("Bash", {}), { kind: "generic" });
+  assert.deepEqual(classifyApprovalRequest("Bash", { command: 123 }), { kind: "generic" });
+});
+
+// ── resolveApproval ──
+
+const specCtx = { kind: "spec-add", derivedCase: "케이스 텍스트", rawCommand: 'gbc spec add "케이스 텍스트"' };
+const input = { command: 'gbc spec add "케이스 텍스트"' };
+
+test("resolveApproval(y, spec-add): allow + updatedInput 원본 그대로, defer 부작용 없음", () => {
+  const r = resolveApproval("y", specCtx, input);
+  assert.deepEqual(r.result, { behavior: "allow", updatedInput: input });
+  assert.equal(r.deferText, null);
+});
+
+test("resolveApproval(n, spec-add): deny, defer 부작용 없음", () => {
+  const r = resolveApproval("n", specCtx, input);
+  assert.equal(r.result.behavior, "deny");
+  assert.equal(r.deferText, null);
+});
+
+test("resolveApproval(e, spec-add): allow + 편집된 명령으로 updatedInput 치환", () => {
+  const edited = 'gbc spec add "수정된 케이스"';
+  const r = resolveApproval("e", specCtx, input, edited);
+  assert.deepEqual(r.result, { behavior: "allow", updatedInput: { ...input, command: edited } });
+  assert.equal(r.deferText, null);
+});
+
+test("resolveApproval(e, spec-add): 편집 텍스트 미제공 시 rawCommand 그대로(no-op 편집)", () => {
+  const r = resolveApproval("e", specCtx, input);
+  assert.deepEqual(r.result, { behavior: "allow", updatedInput: { ...input, command: specCtx.rawCommand } });
+});
+
+test("resolveApproval(d, spec-add): deny + derivedCase를 defer 부작용으로 반환(실제 addDefer 호출은 이 함수 밖)", () => {
+  const r = resolveApproval("d", specCtx, input);
+  assert.equal(r.result.behavior, "deny");
+  assert.equal(r.deferText, "케이스 텍스트");
+});
+
+test("resolveApproval: generic 컨텍스트에선 e/d를 n과 동일하게(고무도장 방지 기본값), y만 allow", () => {
+  const genericCtx = { kind: "generic" };
+  assert.equal(resolveApproval("y", genericCtx, input).result.behavior, "allow");
+  assert.equal(resolveApproval("n", genericCtx, input).result.behavior, "deny");
+  assert.equal(resolveApproval("e", genericCtx, input).result.behavior, "deny", "generic엔 편집 대상이 없음");
+  assert.equal(resolveApproval("d", genericCtx, input).result.behavior, "deny");
+  assert.equal(resolveApproval("d", genericCtx, input).deferText, null, "generic은 derivedCase가 없어 defer 부작용도 없음");
+});
+
+test("resolveApproval: 입력을 변형하지 않는다(순수성)", () => {
+  const frozenInput = JSON.stringify(input);
+  const frozenCtx = JSON.stringify(specCtx);
+  resolveApproval("e", specCtx, input, "x");
+  assert.equal(JSON.stringify(input), frozenInput);
+  assert.equal(JSON.stringify(specCtx), frozenCtx);
+});
