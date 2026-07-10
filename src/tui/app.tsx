@@ -78,7 +78,22 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
     setScrollback((s) => [...s, { id: nextId.current++, kind: "text", text, tone }]);
   }, []);
 
-  const pendingApproval = useRef<((a: { choice: ApprovalChoice; editedText?: string }) => void) | null>(null);
+  // 단일 ref가 아닌 큐 — SDK가 한 턴 안에서 서로 다른 tool_use 2개(예: gated Edit + Bash spec-add)에
+  // canUseTool을 겹쳐 호출할 가능성을 코드로 배제할 수 없다(2026-07-10 자체검토로 발견). 단일 ref였다면
+  // 두 번째 호출이 첫 번째의 resolver를 덮어써 첫 approval Promise가 영구 대기(leak)했다 — 큐로 직렬화해
+  // 화면엔 한 번에 하나만 뜨되 응답 즉시 다음 것을 이어서 연다.
+  type QueuedApproval = {
+    ctx: ReturnType<typeof classifyApprovalRequest>;
+    reason: string;
+    resolve: (a: { choice: ApprovalChoice; editedText?: string }) => void;
+  };
+  const approvalQueue = useRef<QueuedApproval[]>([]);
+  const activateApproval = useCallback((item: QueuedApproval) => {
+    dispatch({ type: "APPROVAL_REQUESTED", reason: item.reason, kind: item.ctx.kind });
+    if (item.ctx.kind === "spec-add") {
+      dispatch({ type: "APPROVAL_CASE_DERIVED", caseText: item.ctx.derivedCase });
+    }
+  }, []);
 
   // 스플래시 — 1회 커밋(Static, 마스코트+게이트 활성 고지).
   useEffect(() => {
@@ -100,21 +115,16 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
   const makeInkCanUseTool = useCallback((): CanUseTool => {
     return async (toolName, input, options) => {
       const ctx = classifyApprovalRequest(toolName, input as Record<string, unknown>);
-      if (!stateRef.current.approval) {
-        dispatch({ type: "APPROVAL_REQUESTED", reason: options.decisionReason ?? "", kind: ctx.kind });
-      }
-      // spec-add는 Bash 명령 문자열에서 이미 케이스 텍스트를 동기 추출해뒀다(classifyApprovalRequest) —
-      // "도출 중" 스피너는 실제로는 그 이전(에이전트 자신의 텍스트 응답, scrollback에 이미 출력됨)
-      // 단계였을 뿐이라, 여기선 즉시 확정해 ApprovalBox가 "gbc spec add \"...\"" 문구를 그릴 수 있게 한다.
-      // (자체검토로 발견: 이 dispatch가 빠져 derivedCase가 세션 내내 null로 고정되던 결함 수정.)
-      if (ctx.kind === "spec-add") {
-        dispatch({ type: "APPROVAL_CASE_DERIVED", caseText: ctx.derivedCase });
-      }
       const answer = await new Promise<{ choice: ApprovalChoice; editedText?: string }>((resolve) => {
-        pendingApproval.current = resolve;
+        const item: QueuedApproval = { ctx, reason: options.decisionReason ?? "", resolve };
+        const wasEmpty = approvalQueue.current.length === 0;
+        approvalQueue.current.push(item);
+        // 큐가 비어있었을 때만 즉시 화면에 띄운다 — 이미 뭔가 대기 중이면 그게 응답될 때 이어서 연다.
+        if (wasEmpty) activateApproval(item);
       });
       const resolution = resolveApproval(answer.choice, ctx, input as Record<string, unknown>, answer.editedText);
       dispatch({ type: "APPROVAL_ANSWERED", choice: answer.choice });
+      approvalQueue.current.shift();
       if (resolution.deferText) {
         try {
           addDefer(cwd, resolution.deferText);
@@ -122,9 +132,11 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
           // 로컬 TUI 편의기능 — 실패해도 canUseTool 응답(deny)은 이미 확정돼 있어 엔진 흐름은 계속됨.
         }
       }
+      const next = approvalQueue.current[0];
+      if (next) activateApproval(next);
       return resolution.result;
     };
-  }, [cwd]);
+  }, [cwd, activateApproval]);
 
   const submit = useCallback(
     async (prompt: string) => {
@@ -162,12 +174,23 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
 
   useInput((input, key) => {
     if (state.approval) {
+      const approval = state.approval;
+      // generic 승인엔 편집 대상(derivedCase)이 없어 resolveApproval이 e를 n과 동일(deny) 처리한다
+      // (bridge.ts) — ApprovalBox의 GENERIC_LABEL("거부 (e=n)")과 일치시키려면 여기서도 편집 서브플로우
+      // 대신 즉시 답변으로 보내야 한다. spec-add만 실제 편집이 유효하다(2차 자체검토로 발견해 수정).
+      const openEdit = () => {
+        setApprovalEditor(Editor.insertText(Editor.createInitialState(), approval.derivedCase ?? ""));
+        setApprovalEditing(true);
+      };
+      const answer = (choice: ApprovalChoice, editedText?: string) => {
+        dispatch({ type: "APPROVAL_ANSWERED", choice });
+        approvalQueue.current[0]?.resolve({ choice, editedText });
+      };
       if (approvalEditing) {
         if (key.return) {
           const text = Editor.getText(approvalEditor);
           setApprovalEditing(false);
-          pendingApproval.current?.({ choice: "e", editedText: text });
-          pendingApproval.current = null;
+          answer("e", text);
           return;
         }
         if (key.escape) {
@@ -178,29 +201,23 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
         return;
       }
       if (input === "y" || input === "n" || input === "d") {
-        const choice = input as ApprovalChoice;
-        dispatch({ type: "APPROVAL_ANSWERED", choice });
-        pendingApproval.current?.({ choice });
-        pendingApproval.current = null;
+        answer(input as ApprovalChoice);
         return;
       }
       if (input === "e") {
-        setApprovalEditor(Editor.insertText(Editor.createInitialState(), state.approval.derivedCase ?? ""));
-        setApprovalEditing(true);
+        if (approval.kind === "spec-add") openEdit();
+        else answer("e");
         return;
       }
       if (key.leftArrow) dispatch({ type: "APPROVAL_SELECTION_MOVE", direction: -1 });
       if (key.rightArrow) dispatch({ type: "APPROVAL_SELECTION_MOVE", direction: 1 });
       if (key.return) {
-        const choice = state.approval.selection;
-        if (choice === "e") {
-          setApprovalEditor(Editor.insertText(Editor.createInitialState(), state.approval.derivedCase ?? ""));
-          setApprovalEditing(true);
+        const choice = approval.selection;
+        if (choice === "e" && approval.kind === "spec-add") {
+          openEdit();
           return;
         }
-        dispatch({ type: "APPROVAL_ANSWERED", choice });
-        pendingApproval.current?.({ choice });
-        pendingApproval.current = null;
+        answer(choice);
       }
       return;
     }
