@@ -39,7 +39,14 @@ test("dist/cli.js help — ink/react 미로드로 정상 종료", () => {
   assert.match(out, /gbc — 거북이코드/);
 });
 
-test("dist/cli.js tui(스텁) — ink/react 미로드로 정상 종료(ST0은 플레이스홀더, 아직 동적 import 없음)", () => {
-  const out = runUnderLoader([cli, "tui"]);
-  assert.match(out, /gbc tui/);
+test("dist/cli.js tui — ST6 실배선 후엔 반대로 ink 로드를 '시도'하는 것이 진짜 락(로더가 즉시 차단)", () => {
+  // ST0 시점엔 tui가 플레이스홀더라 ink 미로드가 곧 "정상 종료"였다. ST6에서 `./tui/app.js`를
+  // 동적 import하도록 실배선한 지금은 반대가 참이어야 한다 — tui 실행이 ink/react를 실제로 로드
+  // *시도*하지 않으면 이 명령 자체가 무의미(no-op)해진다는 뜻이므로, 로더가 GBC_ISOLATION_VIOLATION로
+  // 차단하는 것 자체가 "실배선이 살아있다"는 증거다(tautology 재발 방지 — scratch.md 미해결 항목).
+  assert.throws(
+    () => runUnderLoader([cli, "tui"]),
+    /GBC_ISOLATION_VIOLATION/,
+    "gbc tui는 ink를 실제로 동적 import해야 한다 — 안 던지면 실배선이 안 된 것",
+  );
 });
