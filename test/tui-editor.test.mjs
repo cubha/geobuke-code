@@ -1,6 +1,7 @@
 // 0.9.0 A3a ST2 — src/tui/editor.ts 멀티라인 입력 에디터 순수 텍스트버퍼 단정.
 // Ink 미제공 영역(ink#676) 자체구현분. 키맵: Enter=제출, Shift+Enter=개행,
-// ↑↓=빈 입력창에서만 히스토리·내용 있으면 커서 이동.
+// ↑↓=빈 입력창에서 히스토리 진입, 진입 후엔 계속 탐색(좌우/편집으로 이탈)·
+// 애초에 내용 있으면 커서 이동.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
