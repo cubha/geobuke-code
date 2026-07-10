@@ -123,7 +123,9 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
         if (wasEmpty) activateApproval(item);
       });
       const resolution = resolveApproval(answer.choice, ctx, input as Record<string, unknown>, answer.editedText);
-      dispatch({ type: "APPROVAL_ANSWERED", choice: answer.choice });
+      // ANSWERED dispatch는 useInput의 answer() 헬퍼가 resolve() 직전에 이미 실행한다(3차 자체검토로
+      // 발견한 중복 제거 — 여기서 다시 부르면 동일 이벤트가 두 번 발화돼 향후 reducer가 비-멱등 로직을
+      // 갖게 될 때 이중 실행 버그의 씨앗이 된다).
       approvalQueue.current.shift();
       if (resolution.deferText) {
         try {
