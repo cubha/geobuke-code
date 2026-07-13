@@ -16,6 +16,7 @@ import {
   buildGateResultEvent,
   classifyApprovalRequest,
   resolveApproval,
+  formatEngineFailure,
 } from "./bridge.js";
 import { runEngine, mapSdkMessage } from "../engine.js";
 import { makeSdkPreToolUseHook } from "../gate-sdk.js";
@@ -150,7 +151,7 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
         dispatch(buildGateResultEvent(decision, specCount, deferCount));
       };
       try {
-        await runEngine({
+        const result = await runEngine({
           prompt,
           cwd,
           ...(model ? { model } : {}),
@@ -163,6 +164,10 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
             }
           },
         });
+        // runEngine()은 계약상 절대 rethrow하지 않는다(engine.ts) — 인증/네트워크 실패는 여기서
+        // 반환값으로만 알 수 있다. 버리면 화면에 아무 표시 없이 "무응답"이 된다(0.9.1 실사용자 보고).
+        const failureMsg = formatEngineFailure(result);
+        if (failureMsg) pushLine(failureMsg, "danger");
       } catch (e) {
         // agent-sdk는 engine.ts가 lazy dynamic import한다(첫 프롬프트 제출 시점) — ink/react와 달리
         // cli.ts의 cmdTui try/catch는 이 실패를 못 잡는다(ST6 scope-critic 발견). 여기서 별도로
