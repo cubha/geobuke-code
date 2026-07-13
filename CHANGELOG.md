@@ -2,7 +2,7 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
-## [Unreleased]
+## [0.9.1] - 2026-07-13
 
 `gbc tui`/`gbc run` 사내 프록시(Nexus/Artifactory류) 레지스트리 환경 설치 실패 근본수정(0.9.1 예정). 실사용자(0.9.0 배포 직후)가 회사망에서 3단계 연쇄 크래시를 겪은 것을 계기로 한 수정: ①`ink` caret range가 이미 전역에 있던 구버전과 dedup 충돌(`useWindowSize` export 없음) ②개별 패키지 재설치가 React peer dependency를 중복 설치(`useReducer` 등 훅 디스패처 null) ③두 경우 모두 원시 스택트레이스만 노출하던 에러 처리.
 
