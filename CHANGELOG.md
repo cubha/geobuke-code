@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+`gbc tui`/`gbc run` 사내 프록시(Nexus/Artifactory류) 레지스트리 환경 설치 실패 근본수정(0.9.1 예정). 실사용자(0.9.0 배포 직후)가 회사망에서 3단계 연쇄 크래시를 겪은 것을 계기로 한 수정: ①`ink` caret range가 이미 전역에 있던 구버전과 dedup 충돌(`useWindowSize` export 없음) ②개별 패키지 재설치가 React peer dependency를 중복 설치(`useReducer` 등 훅 디스패처 null) ③두 경우 모두 원시 스택트레이스만 노출하던 에러 처리.
+
+### Fixed
+- **`ink` optionalDependency를 exact pin으로 변경**(`^7.1.0` → `7.1.0`, `react`와 동일 패턴 통일) — 캐럿 range가 사내 프록시에 남아있던 다른 버전과 dedup 충돌하는 것을 원천 차단.
+- **`gbc tui`/`gbc run`의 크래시 진단 메시지 개선** — 기존 "미설치"(Cannot find module/package) 판별에 더해 "버전불일치"(SyntaxError: 요청한 export 없음)·"React 인스턴스 중복"(훅 디스패처 null) 패턴도 인식해 `npm ls -g` 진단 명령과 정확한 pin 버전 재설치 명령을 안내한다(`src/tui/startup-diagnostics.ts` 신규, 순수함수·단위테스트). 안내 문구의 버전은 `package.json`에서 매번 동적으로 읽어 다음 릴리스에서도 drift 없음.
+- **README 설치 안내 전체를 exact pin으로 통일**(설치 섹션·풀스크린 TUI 섹션·A-모드 미리보기 섹션 3곳) + "사내 프록시 레지스트리 환경" 트러블슈팅 섹션 신설(캐럿/미지정 설치 금지, 세 패키지 한 번에 설치, `npm ls -g` 진단).
+
 ## [0.9.0] - 2026-07-11
 
 A3a 단일-repo full TUI — `gbc run`(A-모드 in-process 엔진) 위에 승인 프롬프트·게이트 줄·계측/repo 토글 패널을 갖춘 풀스크린 화면(`gbc tui`)을 얹는다. 시안 A(토글 패널)·statusline 2줄·마스코트(half-block)·그린 톤. 계획·스택 결정: `memory/project_0_9_0_tui_stack_decision.md`. **실터미널 수동 도그푸딩(한글 IME·bracketed paste·리사이즈 등)은 이 릴리스 전에 완료하지 못해 0.9.x 후속 패치로 대응 예정** — 알려진 후속 항목은 아래 참조.
