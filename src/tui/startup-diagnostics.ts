@@ -28,6 +28,11 @@ const VERSION_MISMATCH_RE = /The requested module '(?:ink|react)' does not provi
 // useSyncExternalStore·useId는 React 19 내부에서 흔히 쓰이는 훅이라 방어적으로 함께 넣는다.
 const DUPLICATE_REACT_RE =
   /Cannot read propert(?:y|ies) of null[\s\S]*\buse(?:Reducer|State|Ref|Effect|Context|Callback|Memo|InsertionEffect|LayoutEffect|SyncExternalStore|Id)\b/;
+// spawn 앵커 필수 — EPERM/EACCES는 파일 열기 등 무관한 OS 에러에서도 흔히 나므로, 앵커 없이는
+// "claude.exe 차단"이라는 확정적이지만 틀린 처방을 낼 수 있다(0.9.1 VERSION_MISMATCH_RE와 동일 원칙).
+// 0.9.2 ST4 EPERM 실사용 재현(ANALYSIS-tui-win-spawn-eperm-2026-07-13.md §1①) — SDK가 번들
+// claude.exe를 자식 프로세스로 spawn하는데 회사 보안정책이 이를 거부하는 경우.
+const SPAWN_PERM_RE = /\bspawn\b[\s\S]*?\b(EPERM|EACCES)\b/;
 
 function reinstallCmd(v: TuiDepsVersions): string {
   return `npm uninstall -g ink react @anthropic-ai/claude-agent-sdk && npm install -g ink@${v.ink} react@${v.react} @anthropic-ai/claude-agent-sdk@${v.agentSdk}`;
@@ -60,5 +65,24 @@ export function classifyTuiStartupError(msg: string, versions: TuiDepsVersions):
       `   재설치: ${reinstallCmd(versions)}`
     );
   }
+  const spawnPerm = classifySpawnPermissionError(msg);
+  if (spawnPerm) return spawnPerm;
   return null;
+}
+
+/**
+ * spawn EPERM/EACCES 전용 분류 — classifyTuiStartupError와 달리 버전 pin을 문구에 넣지 않아
+ * versions 인자가 필요 없다. cli.ts(ink 시작 크래시)뿐 아니라 bridge.ts(엔진 스트림 도중 spawn
+ * 실패 — runEngine이 rethrow하지 않고 EngineResult.error 문자열로 반환하는 경로, ST5 GBC_CLAUDE_PATH
+ * 배선의 실사용 소비 지점)에서도 versions 없이 바로 쓸 수 있게 별도 export한다.
+ */
+export function classifySpawnPermissionError(msg: string): string | null {
+  if (!SPAWN_PERM_RE.test(msg)) return null;
+  return (
+    "🐢 claude 실행 파일 spawn이 거부됐습니다(EPERM/EACCES) — 회사 보안정책이 SDK가 사용하는\n" +
+    "   기본 claude.exe를 차단했을 가능성이 있습니다.\n" +
+    "   확인: claude --version (성공하면 그 경로가 이미 허용된 설치본입니다)\n" +
+    "   우회: GBC_CLAUDE_PATH=<허용된 claude 실행파일 경로> 환경변수로 지정하세요.\n" +
+    "   그래도 안 되면 보안팀에 claude 실행파일 허용 예외를 요청하세요."
+  );
 }

@@ -14,6 +14,7 @@ import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import type { TuiEvent, ApprovalChoice } from "./model.js";
 import type { GateDecision } from "../gate-core.js";
 import type { EngineResult } from "../engine.js";
+import { classifySpawnPermissionError } from "./startup-diagnostics.js";
 
 // ── SDK 메시지 → TuiEvent ──
 
@@ -143,10 +144,24 @@ export function formatEngineFailure(
   result: Pick<EngineResult, "isError" | "error" | "auth">,
 ): string | null {
   if (result.isError) {
+    // spawn EPERM/EACCES(회사 보안정책의 claude 실행파일 차단, ST6)는 runEngine이 rethrow하지 않고
+    // 이 error 문자열로만 반환한다 — classifyTuiStartupError(cli.ts cmdTui의 ink 로딩 크래시 경로)는
+    // 이 경로를 못 보므로 여기서 직접 재사용해 GBC_CLAUDE_PATH 안내가 실제로 화면에 뜨게 한다.
+    const diag = result.error ? classifySpawnPermissionError(result.error) : null;
+    if (diag) return diag;
     return `🐢 오류: ${result.error ?? "알 수 없는 오류로 응답을 완료하지 못했습니다"}`;
   }
   if (result.auth?.error) {
     return `🐢 인증 오류: ${result.auth.error}`;
   }
   return null;
+}
+
+/**
+ * ST1(0.9.2) Esc 중단은 사용자가 의도한 취소지 실패가 아니다 — formatEngineFailure(danger 톤
+ * "🐢 오류:")와 같은 채널로 섞으면 정상 동작이 실패처럼 보인다. engine.ts가 aborted를 isError/error와
+ * 배타로 채우므로(engine.ts catch 분기) 호출부는 이 함수를 formatEngineFailure보다 먼저 확인한다.
+ */
+export function formatEngineAbort(result: Pick<EngineResult, "aborted">): string | null {
+  return result.aborted ? "🐢 중단됨 — 응답 생성을 취소했습니다" : null;
 }

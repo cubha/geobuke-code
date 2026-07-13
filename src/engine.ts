@@ -28,6 +28,19 @@ export interface EngineOptions {
    * sink와 별개 경로: 이 콜백이 던지거나 없어도 기존 추출·과금 집계 흐름은 무변경이다.
    */
   onMessage?: (msg: SDKMessage) => void;
+  /**
+   * ST1(0.9.2) Esc 중단 seam — SDK Options.abortController(sdk.d.ts:1283)에 그대로 전달한다.
+   * 호출부(app.tsx)가 Esc 키에서 .abort()를 호출하면 query()가 던지고, runEngine이 이를
+   * 일반 오류와 구분해 EngineResult.aborted로 반환한다(사용자 의도한 취소 ≠ 실패).
+   */
+  abortController?: AbortController;
+  /**
+   * ST4(0.9.2) EPERM 우회 seam — SDK Options.pathToClaudeCodeExecutable(sdk.d.ts:1686)에 그대로
+   * 전달한다. SDK는 기본적으로 optionalDependency로 설치된 번들 claude.exe를 자식 프로세스로 spawn
+   * 하는데, 사내 보안정책이 이를 차단하면 EPERM이 난다(회사가 이미 허용한 별도 설치 경로를 여기로
+   * 지정해 우회). 호출부(cli.ts/app.tsx)가 GBC_CLAUDE_PATH 환경변수를 읽어 전달한다(ST5).
+   */
+  claudeExecutablePath?: string;
 }
 
 /** runEngine 결과 — 사이클 요약 + ⓑ 인증·과금 실측 필드. */
@@ -44,6 +57,8 @@ export interface EngineResult {
   isError: boolean;
   /** iteration이 throw했을 때의 사유(부분 결과와 함께 반환) — 정상 종료면 undefined. */
   error?: string;
+  /** ST1(0.9.2) — abortController.abort()로 인한 종료(사용자 의도한 취소, isError/error와 배타). */
+  aborted?: boolean;
 }
 
 /** 콘텐츠 블록 최소 형상(BetaMessage.content 원소 — 우리가 읽는 필드만). */
@@ -124,6 +139,8 @@ export function buildEngineOptions(opts: EngineOptions): Options {
     ...(opts.maxTurns ? { maxTurns: opts.maxTurns } : {}),
     ...(opts.preToolUse ? { hooks: { PreToolUse: [{ hooks: [opts.preToolUse] }] } } : {}),
     ...(opts.canUseTool ? { canUseTool: opts.canUseTool } : {}),
+    ...(opts.abortController ? { abortController: opts.abortController } : {}),
+    ...(opts.claudeExecutablePath ? { pathToClaudeCodeExecutable: opts.claudeExecutablePath } : {}),
   };
 }
 
@@ -177,8 +194,20 @@ export async function runEngine(opts: EngineOptions): Promise<EngineResult> {
       }
     }
   } catch (e) {
-    result.isError = true;
-    result.error = String(e).slice(0, 300);
+    // abortController.abort()로 인한 종료는 사용자가 의도한 취소지 실패가 아니다 — isError로
+    // 뭉뚱그리면 bridge.ts가 "🐢 오류: ..."를 표시해 정상 동작을 실패처럼 보이게 한다(ST2가 소비).
+    // aborted/isError 배타는 계약(EngineResult 주석)일 뿐 아니라 여기서 강제한다 — for-await 루프가
+    // 이미 result 메시지로 isError를 세팅한 뒤(예: error_max_turns) abort가 겹쳐 throw되는 경우
+    // 명시적으로 리셋하지 않으면 둘 다 true인 상태가 남아, 이 필드를 새로 소비하는 코드가 배타를
+    // 가정하면 재발한다(scope-critic 발견, 2026-07-13 ST1 판정 DECISION_CHANGED:yes).
+    if (opts.abortController?.signal.aborted) {
+      result.aborted = true;
+      result.isError = false;
+      result.error = undefined;
+    } else {
+      result.isError = true;
+      result.error = String(e).slice(0, 300);
+    }
   }
   return result;
 }

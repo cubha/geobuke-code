@@ -21,6 +21,14 @@ test("createInitialState(seed): statusline 시드값 병합", () => {
   assert.equal(s.statusline.dir, "~/workspace/geobuke-code");
   assert.equal(s.statusline.model, "sonnet");
   assert.equal(s.statusline.usagePct, 0, "미시드 필드는 기본값 유지");
+  assert.equal(s.statusline.lastTurnMs, 0, "ST15 — 아직 턴 없음 기본값");
+});
+
+test("STATUSLINE_UPDATE: lastTurnMs(0.9.2 ST15)도 다른 필드와 동일하게 부분 병합", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "STATUSLINE_UPDATE", patch: { lastTurnMs: 12345 } });
+  assert.equal(s.statusline.lastTurnMs, 12345);
+  assert.equal(s.statusline.costUsd, 0, "무관 필드 보존");
 });
 
 test("SESSION_START: splashShown을 true로(스플래시 1회 커밋 계약)", () => {
@@ -136,4 +144,32 @@ test("reduce는 입력 state를 변형하지 않는다(불변성 — 순수함�
   const frozen = JSON.stringify(s0);
   reduce(s0, { type: "TURN_START" });
   assert.equal(JSON.stringify(s0), frozen, "원본 state 불변");
+});
+
+// ── Ctrl+C 2단 확인종료 (0.9.2 ST9) — "몇 초 내 두 번째 눌러야 종료"의 타이머 판단은 app.tsx(ST10,
+// setTimeout)가 impure하게 담당하고, 이 reducer는 순수하게 "armed 여부"만 추적한다. ──
+
+test("createInitialState: exitConfirmArmed=false(기본)", () => {
+  assert.equal(createInitialState().exitConfirmArmed, false);
+});
+
+test("CTRL_C_PRESSED: exitConfirmArmed를 true로(다른 필드 무변경)", () => {
+  const s0 = createInitialState({ model: "sonnet" });
+  const s1 = reduce(s0, { type: "CTRL_C_PRESSED" });
+  assert.equal(s1.exitConfirmArmed, true);
+  assert.equal(s1.statusline.model, "sonnet", "무관 필드 보존");
+});
+
+test("CTRL_C_PRESSED: 이미 armed여도 멱등(다시 true)", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "CTRL_C_PRESSED" });
+  s = reduce(s, { type: "CTRL_C_PRESSED" });
+  assert.equal(s.exitConfirmArmed, true);
+});
+
+test("CTRL_C_RESET: exitConfirmArmed를 false로(타임아웃 경과 시 app.tsx가 발화)", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "CTRL_C_PRESSED" });
+  s = reduce(s, { type: "CTRL_C_RESET" });
+  assert.equal(s.exitConfirmArmed, false);
 });

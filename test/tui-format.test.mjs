@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   PALETTE,
-  MASCOT_C1,
+  MASCOT_S2,
   MASCOT_C4,
   renderMascot,
   selectMascot,
@@ -15,13 +15,23 @@ import {
   formatGateLine,
   formatMarkdownLite,
   joinTextSegments,
+  SPINNER_FRAMES,
+  formatSpinnerLine,
+  WORDMARK_GEOBUKE,
+  formatWelcomeCard,
 } from "../dist/tui/format.js";
 import { createInitialState, reduce } from "../dist/tui/model.js";
 
 // ── 마스코트 ──
 
-test("MASCOT_C1/C4: 모든 행 길이가 동일하고, '.' 아니면 PALETTE에 정의된 키만 사용", () => {
-  for (const matrix of [MASCOT_C1, MASCOT_C4]) {
+test("MASCOT_S2: 24×10(치수는 구 C1과 동일 — 드롭인 교체), 플레이트 패턴 행 포함", () => {
+  assert.equal(MASCOT_S2.length, 10);
+  assert.equal(MASCOT_S2[0].length, 24);
+  assert.ok(MASCOT_S2.some((row) => /DGGDD/.test(row)), "등딱지 플레이트 패턴(D 반복)이 있어야 S2");
+});
+
+test("MASCOT_S2/C4: 모든 행 길이가 동일하고, '.' 아니면 PALETTE에 정의된 키만 사용", () => {
+  for (const matrix of [MASCOT_S2, MASCOT_C4]) {
     const width = matrix[0].length;
     for (const row of matrix) {
       assert.equal(row.length, width, "행 길이 불일치");
@@ -33,15 +43,15 @@ test("MASCOT_C1/C4: 모든 행 길이가 동일하고, '.' 아니면 PALETTE에 
 });
 
 test("renderMascot(truecolor): 행 수 = ceil(matrix.length/2), 각 줄 리셋으로 종료, 트루컬러 이스케이프 포함", () => {
-  const lines = renderMascot(MASCOT_C1, "truecolor");
-  assert.equal(lines.length, Math.ceil(MASCOT_C1.length / 2));
+  const lines = renderMascot(MASCOT_S2, "truecolor");
+  assert.equal(lines.length, Math.ceil(MASCOT_S2.length / 2));
   for (const line of lines) assert.ok(line.endsWith("\x1b[0m"), "각 줄은 리셋으로 종료");
   assert.ok(lines.some((l) => l.includes("38;2;")), "트루컬러 fg 이스케이프 포함");
 });
 
 test("renderMascot(ansi16): ANSI 16색 코드 사용, 38;2 트루컬러 코드는 없음", () => {
-  const lines = renderMascot(MASCOT_C1, "ansi16");
-  assert.equal(lines.length, Math.ceil(MASCOT_C1.length / 2));
+  const lines = renderMascot(MASCOT_S2, "ansi16");
+  assert.equal(lines.length, Math.ceil(MASCOT_S2.length / 2));
   assert.ok(!lines.some((l) => l.includes("38;2;")), "ansi16 모드엔 트루컬러 코드 없어야 함");
   assert.ok(lines.some((l) => /\x1b\[9?\d+m/.test(l)), "ANSI 16색 코드 포함");
 });
@@ -52,11 +62,11 @@ test("renderMascot: 완전 투명 셀('.','.')은 공백 1칸(색 없음)", () =
   assert.equal(lines[0], "\x1b[0m \x1b[0m \x1b[0m");
 });
 
-test("selectMascot: 60열 미만은 C4, 60열 이상은 C1", () => {
+test("selectMascot: 60열 미만은 C4, 60열 이상은 S2", () => {
   assert.equal(selectMascot(40), MASCOT_C4);
   assert.equal(selectMascot(59), MASCOT_C4);
-  assert.equal(selectMascot(60), MASCOT_C1);
-  assert.equal(selectMascot(120), MASCOT_C1);
+  assert.equal(selectMascot(60), MASCOT_S2);
+  assert.equal(selectMascot(120), MASCOT_S2);
 });
 
 // ── statusline ──
@@ -92,6 +102,14 @@ test("formatStatusline: dirty면 branch에 '*', usagePct<80은 accent·>=80은 w
 
   const zero = formatStatusline({ ...base, costUsd: 0 });
   assert.ok(zero.some((s) => s.text === "$0.00"), "engine.ts는 항상 number(구독 인증도 0으로 강제) — null 분기는 실제 생산자가 없어 제거함");
+});
+
+test("formatStatusline: lastTurnMs(0.9.2 ST15) — 0/미지정이면 세그먼트 생략, >0이면 초 단위 표시", () => {
+  const base = { dir: "d", branch: "main", dirty: false, model: "m", usagePct: 0, costUsd: 0 };
+  const withoutTurn = formatStatusline({ ...base, lastTurnMs: 0 });
+  assert.ok(!withoutTurn.some((s) => /\ds$/.test(s.text)), "턴 없음 — 경과시간 세그먼트 없음");
+  const withTurn = formatStatusline({ ...base, lastTurnMs: 12345 });
+  assert.ok(withTurn.some((s) => s.text === "12.3s"), "소수 1자리 초 단위");
 });
 
 // ── 게이트 줄 ──
@@ -136,10 +154,41 @@ test("formatGateLine: 패널 토글 힌트가 열림 상태에 따라 '메트릭
   const closedText = joinTextSegments(formatGateLine(s));
   assert.match(closedText, /⌃M 메트릭/);
   assert.match(closedText, /⌃R repos/);
+  assert.match(closedText, /⌃S skills/);
   s = reduce(s, { type: "TOGGLE_PANEL", panel: "metrics" });
   const openText = joinTextSegments(formatGateLine(s));
   assert.match(openText, /⌃M 닫기/);
   assert.match(openText, /⌃R repos/, "다른 패널 힌트는 그대로");
+});
+
+test("formatGateLine: skills 패널 열림 — '⌃S 닫기'로 전환", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TOGGLE_PANEL", panel: "skills" });
+  assert.match(joinTextSegments(formatGateLine(s)), /⌃S 닫기/);
+});
+
+// exitConfirmArmed(0.9.2 ST10/scope-critic 발견) — pushLine 스크롤백은 후속 출력에 밀려나 사라지므로,
+// 상시 노출 채널인 게이트 줄에 warn 세그먼트로 반영한다. gateStatus/승인 상태와 무관하게 최우선 노출.
+test("formatGateLine: exitConfirmArmed=true — 최우선 warn 세그먼트로 상시 노출", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "CTRL_C_PRESSED" });
+  const segs = formatGateLine(s);
+  assert.equal(segs[0].text, "⌃C 한 번 더=종료");
+  assert.equal(segs[0].tone, "warn");
+});
+
+test("formatGateLine: exitConfirmArmed=false(기본) — armed 세그먼트 없음", () => {
+  const segs = formatGateLine(createInitialState());
+  assert.ok(!segs.some((s) => s.text.includes("종료")));
+});
+
+test("formatGateLine: exitConfirmArmed=true + BLOCK(승인 대기) 동시 상태에서도 armed 세그먼트가 앞에 옴", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "CTRL_C_PRESSED" });
+  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "명세에 없는 파일 편집" });
+  const segs = formatGateLine(s);
+  assert.equal(segs[0].text, "⌃C 한 번 더=종료");
+  assert.ok(segs.some((seg) => seg.text.includes("BLOCK")));
 });
 
 // ── 경량 마크다운/diff ──
@@ -194,4 +243,55 @@ test("포맷터는 입력을 변형하지 않는다(순수성)", () => {
   const frozenStatus = JSON.stringify(statusData);
   formatStatusline(statusData);
   assert.equal(JSON.stringify(statusData), frozenStatus);
+});
+
+// ── 스피너 (0.9.2 ST7 — 스트리밍 중 로딩 인디케이터. tick·elapsedMs는 호출부(app.tsx setInterval)가
+// 넘긴다(Date.now() 등 시간 API를 이 순수 포맷터가 직접 쓰지 않음 — 결정론 유지). ──
+
+test("SPINNER_FRAMES: braille 프레임 배열, 2개 이상", () => {
+  assert.ok(Array.isArray(SPINNER_FRAMES));
+  assert.ok(SPINNER_FRAMES.length >= 2);
+  for (const f of SPINNER_FRAMES) assert.equal(typeof f, "string");
+});
+
+test("formatSpinnerLine: tick이 프레임 개수를 넘기면 순환(모듈로)", () => {
+  const first = formatSpinnerLine(0, 0);
+  const wrapped = formatSpinnerLine(SPINNER_FRAMES.length, 0);
+  assert.equal(first, wrapped, "한 바퀴 돈 tick은 동일 프레임을 재사용");
+});
+
+test("formatSpinnerLine: 경과초를 정수 초 단위로 표시(올림/내림 아닌 내림)", () => {
+  assert.match(formatSpinnerLine(0, 0), /0s/);
+  assert.match(formatSpinnerLine(0, 3000), /3s/);
+  assert.match(formatSpinnerLine(0, 3999), /3s/, "1초 미만 반올림 없이 내림");
+});
+
+test("formatSpinnerLine: 순수성 — 같은 입력엔 항상 같은 출력", () => {
+  assert.equal(formatSpinnerLine(2, 5000), formatSpinnerLine(2, 5000));
+});
+
+// ── 워드마크 + 안내카드 (0.9.2 ST13 — figlet "ANSI Shadow" 폰트로 생성한 정적 문자열, zero-dep
+// 임베드. 런타임 figlet 의존성 없음 — 빌드타임에 한 번 생성한 상수를 그대로 배선. ──
+
+test("WORDMARK_GEOBUKE: 모든 행 폭이 동일, 박스drawing 문자 포함", () => {
+  const width = WORDMARK_GEOBUKE[0].length;
+  for (const row of WORDMARK_GEOBUKE) assert.equal(row.length, width, "행 폭 불일치");
+  assert.ok(WORDMARK_GEOBUKE.some((row) => /[█╗╝║═╔╚]/.test(row)), "box-drawing 문자 포함");
+});
+
+test("formatWelcomeCard: 3줄 — 게이트 안내/spec·defer 카운트/키맵 힌트", () => {
+  const rows = formatWelcomeCard(8, 2);
+  assert.equal(rows.length, 3);
+  assert.match(joinTextSegments(rows[0]), /게이트 활성/);
+  const line2 = joinTextSegments(rows[1]);
+  assert.match(line2, /spec 8케이스/);
+  assert.match(line2, /defer 2/);
+  const line3 = joinTextSegments(rows[2]);
+  assert.match(line3, /⌃M/);
+  assert.match(line3, /⌃R/);
+  assert.match(line3, /⌃S/);
+});
+
+test("formatWelcomeCard: 순수성 — 같은 입력엔 항상 같은 출력", () => {
+  assert.deepEqual(formatWelcomeCard(0, 0), formatWelcomeCard(0, 0));
 });

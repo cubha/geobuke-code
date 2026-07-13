@@ -10,13 +10,26 @@ import type { GateDecision } from "../gate-core.js";
 import { createInitialState, reduce, type TuiState, type ApprovalChoice } from "./model.js";
 import * as Editor from "./editor.js";
 import type { EditorState } from "./editor.js";
-import { selectMascot, renderMascot, formatGateLine, formatStatusline, type Tone } from "./format.js";
+import {
+  selectMascot,
+  renderMascot,
+  formatGateLine,
+  formatStatusline,
+  formatSpinnerLine,
+  formatMarkdownLite,
+  WORDMARK_GEOBUKE,
+  formatWelcomeCard,
+  SPLASH_WIDE_MIN_COLUMNS,
+  type TextSegment,
+  type Tone,
+} from "./format.js";
 import {
   mapEngineMessageToTuiEvents,
   buildGateResultEvent,
   classifyApprovalRequest,
   resolveApproval,
   formatEngineFailure,
+  formatEngineAbort,
 } from "./bridge.js";
 import { runEngine, mapSdkMessage } from "../engine.js";
 import { makeSdkPreToolUseHook } from "../gate-sdk.js";
@@ -27,11 +40,17 @@ import { Mascot } from "./ui/Mascot.js";
 import { ApprovalBox } from "./ui/ApprovalBox.js";
 import { MetricsPanel } from "./ui/MetricsPanel.js";
 import { ReposPanel } from "./ui/ReposPanel.js";
+import { SkillsPanel } from "./ui/SkillsPanel.js";
 import { toneColor } from "./ui/theme.js";
 
 type ScrollEntry =
   | { id: number; kind: "mascot"; lines: string[] }
-  | { id: number; kind: "text"; text: string; tone: Tone };
+  | { id: number; kind: "text"; text: string; tone: Tone }
+  // ST13-14(0.9.2) — formatWelcomeCard가 한 줄에 여러 톤을 섞을 수 있는 TextSegment[][]를 반환하는데,
+  // "text" variant(단일 tone)로 욱여넣으면 조용히 정보가 손실된다(scope-critic 발견, 2026-07-13
+  // ST13-14 판정 DECISION_CHANGED:yes). 기존 <Segments> 렌더 관례(formatGateLine/formatStatusline과
+  // 동일)를 그대로 재사용해 세그먼트별 톤을 보존한다.
+  | { id: number; kind: "segments"; segments: TextSegment[] };
 
 function detectGit(cwd: string): { branch: string; dirty: boolean } {
   try {
@@ -80,6 +99,27 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
 
   const [scrollback, setScrollback] = useState<ScrollEntry[]>([]);
   const nextId = useRef(0);
+  // ST3(0.9.2) — 현재 스트리밍 턴의 AbortController. submit()이 매 턴 새로 만들어 채우고 finally에서
+  // 비운다(턴 종료 후 남은 참조로 다음 턴을 오작동 중단시키지 않도록).
+  const abortControllerRef = useRef<AbortController | null>(null);
+  // ST10(0.9.2) — Ctrl+C 2단 확인종료 타이머(armed 상태를 일정 시간 뒤 자동 해제). model.ts는
+  // armed 여부만 순수 추적하고(ST9), "일정 시간"이라는 impure 타이밍 판단은 여기서 맡는다.
+  const exitConfirmTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // ST8(0.9.2) — 스트리밍 중 로딩 스피너. tick·elapsedMs는 여기서 setInterval로 계산해 순수
+  // 포맷터(formatSpinnerLine)에 넘긴다(format.ts는 Date.now()를 직접 쓰지 않는다).
+  const [spinnerTick, setSpinnerTick] = useState(0);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  useEffect(() => {
+    if (!state.streaming) return;
+    const start = Date.now();
+    setElapsedMs(0);
+    const id = setInterval(() => {
+      setSpinnerTick((t) => t + 1);
+      setElapsedMs(Date.now() - start);
+    }, 120);
+    return () => clearInterval(id);
+  }, [state.streaming]);
   const pushLine = useCallback((text: string, tone: Tone = "plain") => {
     setScrollback((s) => [...s, { id: nextId.current++, kind: "text", text, tone }]);
   }, []);
@@ -101,17 +141,26 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
     }
   }, []);
 
-  // 스플래시 — 1회 커밋(Static, 마스코트+게이트 활성 고지).
+  // 스플래시 — 1회 커밋(Static, 워드마크+마스코트+안내카드 병치). ST13(format.ts)이 순수 포맷터를
+  // 만들고 여기선 조립만 한다. 워드마크(59열 고정폭 figlet)는 좁은 터미널에서 줄바꿈되며 깨지므로
+  // format.ts의 SPLASH_WIDE_MIN_COLUMNS(마스코트 폴백과 동일한 단일 임계값)로 그 아래에서는
+  // 생략한다(마스코트 C4 미니만 남음) — 예전엔 워드마크 자신의 폭(59)을 따로 써서 마스코트
+  // 임계값(60)과 1칸 어긋났었다(scope-critic 발견, ST13-14 판정 DECISION_CHANGED:yes).
   useEffect(() => {
     const mascot = renderMascot(selectMascot(columns));
+    const wordmarkEntries: ScrollEntry[] =
+      columns >= SPLASH_WIDE_MIN_COLUMNS
+        ? WORDMARK_GEOBUKE.map((line) => ({ id: nextId.current++, kind: "text" as const, text: line, tone: "accent" as const }))
+        : [];
+    // formatWelcomeCard는 한 줄에 여러 톤을 섞을 수 있는 TextSegment[][] — 기존 <Segments> 렌더
+    // 관례를 그대로 써서 톤을 보존한다(단일 tone으로 뭉개던 이전 구현의 정보손실 수정).
+    const cardEntries: ScrollEntry[] = formatWelcomeCard(readSpecCases(cwd).length, activeDeferItems(cwd).length).map(
+      (segments) => ({ id: nextId.current++, kind: "segments" as const, segments }),
+    );
     setScrollback((s) => [
+      ...wordmarkEntries,
       { id: nextId.current++, kind: "mascot", lines: mascot },
-      {
-        id: nextId.current++,
-        kind: "text",
-        text: `🐢 게이트 활성 — 명세 없는 구현은 차단됩니다 · spec ${readSpecCases(cwd).length}케이스 · defer ${activeDeferItems(cwd).length}`,
-        tone: "accent",
-      },
+      ...cardEntries,
       ...s,
     ]);
     dispatch({ type: "SESSION_START" });
@@ -150,29 +199,49 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
     async (prompt: string) => {
       pushLine(`❯ ${prompt}`, "code");
       dispatch({ type: "TURN_START" });
+      const turnStartedAt = Date.now(); // ST15(0.9.2) — statusline lastTurnMs 계산용
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
       const onDecision = (decision: GateDecision) => {
         const specCount = readSpecCases(cwd).length;
         const deferCount = activeDeferItems(cwd).length;
         dispatch(buildGateResultEvent(decision, specCount, deferCount));
       };
+      // GBC_CLAUDE_PATH(0.9.2 ST5) — cli.ts cmdRun과 동일 우회 seam(engine.ts claudeExecutablePath).
+      const claudeExecutablePath = process.env.GBC_CLAUDE_PATH;
       try {
         const result = await runEngine({
           prompt,
           cwd,
           ...(model ? { model } : {}),
+          ...(claudeExecutablePath ? { claudeExecutablePath } : {}),
           preToolUse: makeSdkPreToolUseHook(cwd, undefined, onDecision),
           canUseTool: makeInkCanUseTool(),
+          abortController: controller,
           onMessage: (msg) => {
             for (const ev of mapEngineMessageToTuiEvents(msg)) dispatch(ev);
             for (const rec of mapSdkMessage(msg)) {
-              if (rec.text) pushLine(rec.text, rec.kind === "assistant" ? "plain" : "dim");
+              if (!rec.text) continue;
+              // ST15(0.9.2) — assistant 텍스트만 마크다운 경량 렌더(헤딩/코드펜스/diff 색상).
+              // tool_use/tool_result/result는 원문 그대로(JSON·명령 출력이라 마크다운 파싱 대상 아님).
+              if (rec.kind === "assistant") {
+                for (const seg of formatMarkdownLite(rec.text)) pushLine(seg.text, seg.tone);
+              } else {
+                pushLine(rec.text, "dim");
+              }
             }
           },
         });
-        // runEngine()은 계약상 절대 rethrow하지 않는다(engine.ts) — 인증/네트워크 실패는 여기서
-        // 반환값으로만 알 수 있다. 버리면 화면에 아무 표시 없이 "무응답"이 된다(0.9.1 실사용자 보고).
-        const failureMsg = formatEngineFailure(result);
-        if (failureMsg) pushLine(failureMsg, "danger");
+        // runEngine()은 계약상 절대 rethrow하지 않는다(engine.ts) — 인증/네트워크 실패·중단 어느
+        // 쪽도 반환값으로만 알 수 있다. 버리면 화면에 아무 표시 없이 "무응답"이 된다(0.9.1 실사용자
+        // 보고). 중단(aborted)은 사용자가 의도한 취소라 실패(danger)와 다른 톤(warn)으로 먼저 본다.
+        const abortMsg = formatEngineAbort(result);
+        if (abortMsg) {
+          pushLine(abortMsg, "warn");
+        } else {
+          const failureMsg = formatEngineFailure(result);
+          if (failureMsg) pushLine(failureMsg, "danger");
+        }
       } catch (e) {
         // agent-sdk는 engine.ts가 lazy dynamic import한다(첫 프롬프트 제출 시점) — ink/react와 달리
         // cli.ts의 cmdTui try/catch는 이 실패를 못 잡는다(ST6 scope-critic 발견). 여기서 별도로
@@ -187,15 +256,34 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
           pushLine(`🐢 오류: ${msg.slice(0, 200)}`, "danger");
         }
       } finally {
+        abortControllerRef.current = null;
         dispatch({ type: "TURN_END" });
         const g = detectGit(cwd);
-        dispatch({ type: "STATUSLINE_UPDATE", patch: { branch: g.branch, dirty: g.dirty } });
+        dispatch({
+          type: "STATUSLINE_UPDATE",
+          patch: { branch: g.branch, dirty: g.dirty, lastTurnMs: Date.now() - turnStartedAt },
+        });
       }
     },
     [cwd, model, makeInkCanUseTool, pushLine],
   );
 
   useInput((input, key) => {
+    if (key.ctrl && input === "c") {
+      // ink render()가 exitOnCtrlC:false로 뜨므로(cli.ts) 즉시종료가 아니라 여기서 2단 확인을 직접
+      // 구현한다. 승인 프롬프트·패널이 열려있어도 Ctrl+C는 전역으로 먼저 처리(고무도장 방지 흐름을
+      // 방해하지 않으면서도 항상 탈출구가 있어야 함).
+      if (state.exitConfirmArmed) {
+        process.exit(0);
+      }
+      dispatch({ type: "CTRL_C_PRESSED" });
+      pushLine("🐢 종료하려면 Ctrl+C를 한 번 더 누르세요(2초 내)", "warn");
+      if (exitConfirmTimerRef.current) clearTimeout(exitConfirmTimerRef.current);
+      exitConfirmTimerRef.current = setTimeout(() => {
+        dispatch({ type: "CTRL_C_RESET" });
+      }, 2000);
+      return;
+    }
     if (state.approval) {
       const approval = state.approval;
       // generic 승인엔 편집 대상(derivedCase)이 없어 resolveApproval이 e를 n과 동일(deny) 처리한다
@@ -253,11 +341,20 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
       dispatch({ type: "TOGGLE_PANEL", panel: "repos" });
       return;
     }
+    if (key.ctrl && input === "s") {
+      dispatch({ type: "TOGGLE_PANEL", panel: "skills" });
+      return;
+    }
     if (state.panel !== "none") {
       if (key.escape) dispatch({ type: "CLOSE_PANEL" });
       return;
     }
-    if (key.escape) return; // 스트리밍 중단(abort) seam은 이후 iteration — 엔진에 아직 배선 없음.
+    if (key.escape) {
+      // ST3(0.9.2) — 스트리밍 중일 때만 중단. 유휴 상태에서 Esc는 여전히 no-op(전역 종료 단축키
+      // 아님 — Ctrl+C 2단 확인종료가 그 역할, ST9/ST10 별도 SubTask).
+      if (state.streaming) abortControllerRef.current?.abort();
+      return;
+    }
     if (key.return && key.shift) {
       setEditorState(Editor.newline(editorState));
       return;
@@ -277,6 +374,8 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
         {(entry) =>
           entry.kind === "mascot" ? (
             <Mascot key={entry.id} lines={entry.lines} />
+          ) : entry.kind === "segments" ? (
+            <Segments key={entry.id} segments={entry.segments} />
           ) : (
             <Text key={entry.id} color={toneColor(entry.tone)}>
               {entry.text}
@@ -286,6 +385,10 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
       </Static>
       {state.panel === "metrics" && <MetricsPanel cwd={cwd} />}
       {state.panel === "repos" && <ReposPanel cwd={cwd} />}
+      {state.panel === "skills" && <SkillsPanel cwd={cwd} />}
+      {state.streaming && !state.approval && (
+        <Text color="green">{formatSpinnerLine(spinnerTick, elapsedMs)}</Text>
+      )}
       {state.approval ? (
         <ApprovalBox approval={state.approval} editing={approvalEditing} editText={Editor.getText(approvalEditor)} />
       ) : (
