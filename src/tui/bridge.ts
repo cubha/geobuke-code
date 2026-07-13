@@ -13,6 +13,7 @@
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import type { TuiEvent, ApprovalChoice } from "./model.js";
 import type { GateDecision } from "../gate-core.js";
+import type { EngineResult } from "../engine.js";
 
 // ── SDK 메시지 → TuiEvent ──
 
@@ -124,4 +125,28 @@ export function resolveApproval(
     default:
       return deny("사용자가 도구 실행을 거부함 (pause)");
   }
+}
+
+// ── runEngine 반환값 → TUI 표시 문구 ──
+
+/**
+ * runEngine()은 계약상 절대 rethrow하지 않고(engine.ts 주석 참조) isError/error를 담아 정상 반환한다.
+ * app.tsx submit()이 이 반환값을 그대로 버리면 인증·네트워크 실패가 화면에 전혀 안 뜨는 "무응답"
+ * 결함이 된다(0.9.1 실사용자 보고). 이 함수가 그 반환값을 표시 문구로 변환한다 — null이면 호출부가
+ * 아무것도 pushLine하지 않는다.
+ *
+ * auth는 isError와 독립 채널이다 — SDKAuthStatusMessage(engine.ts:175)는 result 메시지·throw 어느
+ * 쪽도 거치지 않고 error를 담아 종료될 수 있다(scope-critic 지적, cli.ts:1052가 이미 이 필드를 별도
+ * 노출하는 선례). isError가 우선이고(더 구체적인 실패 사유), 그게 아닐 때만 auth.error를 본다.
+ */
+export function formatEngineFailure(
+  result: Pick<EngineResult, "isError" | "error" | "auth">,
+): string | null {
+  if (result.isError) {
+    return `🐢 오류: ${result.error ?? "알 수 없는 오류로 응답을 완료하지 못했습니다"}`;
+  }
+  if (result.auth?.error) {
+    return `🐢 인증 오류: ${result.auth.error}`;
+  }
+  return null;
 }

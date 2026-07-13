@@ -6,7 +6,13 @@
 // 기술자를 반환(실제 addDefer I/O는 이 파일 밖 — 순수함수는 "무엇을 할지"만 기술).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mapEngineMessageToTuiEvents, classifyApprovalRequest, resolveApproval, buildGateResultEvent } from "../dist/tui/bridge.js";
+import {
+  mapEngineMessageToTuiEvents,
+  classifyApprovalRequest,
+  resolveApproval,
+  buildGateResultEvent,
+  formatEngineFailure,
+} from "../dist/tui/bridge.js";
 
 // ── buildGateResultEvent (gate-sdk.ts onDecision seam이 넘겨주는 GateDecision) ──
 // specCount·deferCount는 항상 호출부가 넘긴다 — decision.event.deferCount는 pass/block에만 있고
@@ -130,4 +136,49 @@ test("resolveApproval: 입력을 변형하지 않는다(순수성)", () => {
   resolveApproval("e", specCtx, input, "x");
   assert.equal(JSON.stringify(input), frozenInput);
   assert.equal(JSON.stringify(specCtx), frozenCtx);
+});
+
+// ── formatEngineFailure (0.9.1 — runEngine 반환값을 TUI 표시 문구로. app.tsx submit()이 이 반환값을
+// 버려서 인증/네트워크 실패가 화면에 안 뜨던 "무응답" 결함의 근본수정) ──
+
+test("formatEngineFailure: isError:false → null(정상 종료, 표시할 실패 없음)", () => {
+  assert.equal(formatEngineFailure({ isError: false }), null);
+});
+
+test("formatEngineFailure: isError:true + error 있음 → 오류 문구에 error 포함", () => {
+  const msg = formatEngineFailure({ isError: true, error: "network timeout" });
+  assert.equal(msg, "🐢 오류: network timeout");
+});
+
+test("formatEngineFailure: isError:true인데 error 없음(예: subtype≠success) → 폴백 문구", () => {
+  const msg = formatEngineFailure({ isError: true });
+  assert.equal(msg, "🐢 오류: 알 수 없는 오류로 응답을 완료하지 못했습니다");
+});
+
+// auth_status(SDKAuthStatusMessage)는 isError와 독립된 채널이다(engine.ts:175 — result 메시지·throw
+// 어느 쪽도 거치지 않고 auth_status만 error를 담아 종료될 수 있음, cli.ts:1052가 이미 이 필드를
+// 별도로 노출하는 선례). scope-critic이 지적(2026-07-13 SubTask2 판정, DECISION_CHANGED:yes): isError만
+// 보면 이 경로의 인증 실패가 여전히 무응답으로 남는다.
+
+test("formatEngineFailure: isError:false지만 auth.error 있음 → 인증 오류 문구(독립 채널)", () => {
+  const msg = formatEngineFailure({ isError: false, auth: { authenticating: false, output: [], error: "invalid api key" } });
+  assert.equal(msg, "🐢 인증 오류: invalid api key");
+});
+
+test("formatEngineFailure: isError:false + auth 있지만 error 없음 → null(인증 진행중일 뿐 실패 아님)", () => {
+  const msg = formatEngineFailure({ isError: false, auth: { authenticating: true, output: ["로그인 중..."] } });
+  assert.equal(msg, null);
+});
+
+test("formatEngineFailure: isError:false + auth:null → null", () => {
+  assert.equal(formatEngineFailure({ isError: false, auth: null }), null);
+});
+
+test("formatEngineFailure: isError:true가 auth.error보다 우선(둘 다 있으면 isError 문구)", () => {
+  const msg = formatEngineFailure({
+    isError: true,
+    error: "network timeout",
+    auth: { authenticating: false, output: [], error: "invalid api key" },
+  });
+  assert.equal(msg, "🐢 오류: network timeout");
 });

@@ -2,7 +2,16 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
-## [Unreleased]
+## [0.9.1] - 2026-07-13
+
+`gbc tui`/`gbc run` 사내 프록시(Nexus/Artifactory류) 레지스트리 환경 설치 실패 근본수정(0.9.1 예정). 실사용자(0.9.0 배포 직후)가 회사망에서 3단계 연쇄 크래시를 겪은 것을 계기로 한 수정: ①`ink` caret range가 이미 전역에 있던 구버전과 dedup 충돌(`useWindowSize` export 없음) ②개별 패키지 재설치가 React peer dependency를 중복 설치(`useReducer` 등 훅 디스패처 null) ③두 경우 모두 원시 스택트레이스만 노출하던 에러 처리.
+
+### Fixed
+- **`ink` optionalDependency를 exact pin으로 변경**(`^7.1.0` → `7.1.0`, `react`와 동일 패턴 통일) — 캐럿 range가 사내 프록시에 남아있던 다른 버전과 dedup 충돌하는 것을 원천 차단.
+- **`gbc tui`/`gbc run`의 크래시 진단 메시지 개선** — 기존 "미설치"(Cannot find module/package) 판별에 더해 "버전불일치"(SyntaxError: 요청한 export 없음)·"React 인스턴스 중복"(훅 디스패처 null) 패턴도 인식해 `npm ls -g` 진단 명령과 정확한 pin 버전 재설치 명령을 안내한다(`src/tui/startup-diagnostics.ts` 신규, 순수함수·단위테스트). 안내 문구의 버전은 `package.json`에서 매번 동적으로 읽어 다음 릴리스에서도 drift 없음.
+- **README 설치 안내 전체를 exact pin으로 통일**(설치 섹션·풀스크린 TUI 섹션·A-모드 미리보기 섹션 3곳) + "사내 프록시 레지스트리 환경" 트러블슈팅 섹션 신설(캐럿/미지정 설치 금지, 세 패키지 한 번에 설치, `npm ls -g` 진단).
+- **`gbc tui` 엔진 실패 무응답 수정** — `runEngine()`은 계약상 rethrow하지 않고 `isError`/`error`(및 독립 채널인 `auth.error`)를 담아 정상 반환하는데, 화면이 이 반환값을 버려 인증·네트워크 실패 시 아무 표시 없이 멈춘 것처럼 보였다. 반환값을 확인해 실패 문구를 표시하도록 수정(`src/tui/bridge.ts` `formatEngineFailure`, 순수함수·단위테스트).
+- **`gbc tui` 타이핑 지연 수정** — 컴포넌트 최상단의 git 상태 조회(`execSync` 2회)가 매 키 입력(리렌더)마다 재실행되던 것을 마운트 시점 1회로 제한.
 
 ## [0.9.0] - 2026-07-11
 

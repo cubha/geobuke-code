@@ -59,6 +59,8 @@ import { logEvent, parseEvents, computeMetrics, tagEventsWithRepo } from "./metr
 import type { EventKind } from "./metrics.js";
 import { nowIso, nowStamp } from "./time.js";
 import type { DeferStatus, Settings } from "./types.js";
+import { classifyTuiStartupError } from "./tui/startup-diagnostics.js";
+import type { TuiDepsVersions } from "./tui/startup-diagnostics.js";
 
 const CLI_PATH = fileURLToPath(import.meta.url);
 const PKG_ROOT = join(dirname(CLI_PATH), ".."); // dist/cli.js → 패키지 루트
@@ -72,6 +74,25 @@ function readPkgVersion(): string {
   }
 }
 const PKG_VERSION = readPkgVersion();
+
+/** optionalDependencies의 실제 pin 버전(안내 문구가 항상 package.json과 일치하도록 매번 읽음).
+ *  읽기 실패 시 발행 시점 pin 값으로 fallback(fail-open 안내 — 진단 메시지가 죽지 않게). */
+function readTuiDepsVersions(): TuiDepsVersions {
+  const FALLBACK: TuiDepsVersions = { ink: "7.1.0", react: "19.2.7", agentSdk: "0.3.202" };
+  try {
+    const deps = JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8")).optionalDependencies as
+      | Record<string, string>
+      | undefined;
+    if (!deps) return FALLBACK;
+    return {
+      ink: deps.ink ?? FALLBACK.ink,
+      react: deps.react ?? FALLBACK.react,
+      agentSdk: deps["@anthropic-ai/claude-agent-sdk"] ?? FALLBACK.agentSdk,
+    };
+  } catch {
+    return FALLBACK;
+  }
+}
 
 /** ~/.gbc/api-key 존재 여부 — 있으면 hook에 키 주입(빠른 haiku 경로). */
 function hasApiKey(): boolean {
@@ -1038,7 +1059,7 @@ async function cmdRun(args: string[]): Promise<void> {
     if (/Cannot find (module|package)|ERR_MODULE_NOT_FOUND|claude-agent-sdk/.test(msg)) {
       console.error(
         "🐢 A-mode 엔진(@anthropic-ai/claude-agent-sdk)이 설치되지 않았습니다.\n" +
-          "   설치: npm i @anthropic-ai/claude-agent-sdk",
+          `   설치: npm i @anthropic-ai/claude-agent-sdk@${readTuiDepsVersions().agentSdk}`,
       );
     } else {
       console.error(`🐢 gbc run 실패: ${msg.slice(0, 300)}`);
@@ -1052,10 +1073,12 @@ async function cmdRun(args: string[]): Promise<void> {
  * gbc tui [--model <m>] — 풀스크린 TUI 진입점. ink/react/App은 이 함수 안에서만 동적 import되어
  * (`await import("./tui/app.js")` 등) B-모드 핫패스(hook/gate)와 다른 gbc 커맨드는 무영향으로
  * 격리된다(test/tui-isolation.test.mjs가 이 경계를 기계적으로 잠근다). 이 catch는 **ink/react**
- * 미설치만 잡는다(cmdRun과 동일한 ERR_MODULE_NOT_FOUND 매칭) — agent-sdk는 engine.ts가 첫 프롬프트
- * 제출 시점에 lazy dynamic import하므로 여기서 못 잡는다. 그 경로의 미설치 안내는
- * src/tui/app.tsx의 submit() catch가 별도로 담당한다(ST6 scope-critic 발견 — 이 함수만으론
- * agent-sdk 미설치를 감지할 수 없다는 근거 확인).
+ * 로딩·초기렌더 단계 실패만 잡는다 — agent-sdk는 engine.ts가 첫 프롬프트 제출 시점에 lazy
+ * dynamic import하므로 여기서 못 잡는다(그 경로는 src/tui/app.tsx의 submit() catch가 담당,
+ * ST6 scope-critic 발견). classifyTuiStartupError(0.9.1 ST2, 회사 사내 프록시 레지스트리
+ * 실사용 재현)가 "미설치"뿐 아니라 "버전불일치"·"React 인스턴스 중복" 크래시 패턴까지 진단해
+ * 원시 스택트레이스 대신 실행 가능한 안내를 낸다. 분류 안 되면(classify가 null) 원본 에러를
+ * 그대로 던져 main()의 범용 핸들러가 노출한다 — 진단 실패를 거짓 안내로 덮지 않는다.
  */
 async function cmdTui(args: string[]): Promise<void> {
   const cwd = process.cwd();
@@ -1070,12 +1093,9 @@ async function cmdTui(args: string[]): Promise<void> {
     const { waitUntilExit } = render(React.createElement(App, { cwd, ...(model ? { model } : {}) }));
     await waitUntilExit();
   } catch (e) {
-    const msg = String(e);
-    if (/Cannot find (module|package)|ERR_MODULE_NOT_FOUND/.test(msg)) {
-      console.error(
-        "🐢 gbc tui 실행에 필요한 패키지가 설치되지 않았습니다.\n" +
-          "   설치: npm i ink react @anthropic-ai/claude-agent-sdk",
-      );
+    const diagnosis = classifyTuiStartupError(String(e), readTuiDepsVersions());
+    if (diagnosis) {
+      console.error(diagnosis);
       process.exit(1);
     }
     throw e;
