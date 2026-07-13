@@ -1059,7 +1059,7 @@ async function cmdRun(args: string[]): Promise<void> {
     if (/Cannot find (module|package)|ERR_MODULE_NOT_FOUND|claude-agent-sdk/.test(msg)) {
       console.error(
         "🐢 A-mode 엔진(@anthropic-ai/claude-agent-sdk)이 설치되지 않았습니다.\n" +
-          "   설치: npm i @anthropic-ai/claude-agent-sdk",
+          `   설치: npm i @anthropic-ai/claude-agent-sdk@${readTuiDepsVersions().agentSdk}`,
       );
     } else {
       console.error(`🐢 gbc run 실패: ${msg.slice(0, 300)}`);
