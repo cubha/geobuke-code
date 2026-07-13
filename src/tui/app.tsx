@@ -57,15 +57,20 @@ function applyEditorKey(input: string, key: Key, s: EditorState): EditorState {
 
 export function App({ cwd, model }: { cwd: string; model?: string }) {
   const { columns } = useWindowSize();
-  const git = detectGit(cwd);
-  const [state, dispatch] = useReducer(reduce, undefined, () => ({
-    ...createInitialState({ dir: cwd, branch: git.branch, dirty: git.dirty, model: model ?? "" }),
-    // createInitialState는 spec/defer 카운트를 모르는 순수함수라 0으로 시작한다 — 마운트 시점에
-    // 실제 값으로 시드해야 스플래시 문구("spec 8케이스")와 게이트 줄("spec 0케이스")이 어긋나지
-    // 않는다(스모크 테스트로 발견·수정).
-    specCount: readSpecCases(cwd).length,
-    deferCount: activeDeferItems(cwd).length,
-  }));
+  const [state, dispatch] = useReducer(reduce, undefined, () => {
+    // detectGit은 execSync 2회(git rev-parse·git status)라 lazy initializer 안에서만 불러 마운트
+    // 시점 1회로 제한한다 — 컴포넌트 본문 최상단에 두면 매 리렌더(=매 키입력)마다 재실행돼 타이핑이
+    // 밀린다(0.9.1 실사용자 보고). 유일한 소비 지점이 이 시드값이라 이동만으로 완결된다.
+    const git = detectGit(cwd);
+    return {
+      ...createInitialState({ dir: cwd, branch: git.branch, dirty: git.dirty, model: model ?? "" }),
+      // createInitialState는 spec/defer 카운트를 모르는 순수함수라 0으로 시작한다 — 마운트 시점에
+      // 실제 값으로 시드해야 스플래시 문구("spec 8케이스")와 게이트 줄("spec 0케이스")이 어긋나지
+      // 않는다(스모크 테스트로 발견·수정).
+      specCount: readSpecCases(cwd).length,
+      deferCount: activeDeferItems(cwd).length,
+    };
+  });
   const stateRef = useRef<TuiState>(state);
   stateRef.current = state;
 
