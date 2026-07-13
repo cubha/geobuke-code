@@ -6,7 +6,13 @@
 // 기술자를 반환(실제 addDefer I/O는 이 파일 밖 — 순수함수는 "무엇을 할지"만 기술).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mapEngineMessageToTuiEvents, classifyApprovalRequest, resolveApproval, buildGateResultEvent } from "../dist/tui/bridge.js";
+import {
+  mapEngineMessageToTuiEvents,
+  classifyApprovalRequest,
+  resolveApproval,
+  buildGateResultEvent,
+  formatEngineFailure,
+} from "../dist/tui/bridge.js";
 
 // ── buildGateResultEvent (gate-sdk.ts onDecision seam이 넘겨주는 GateDecision) ──
 // specCount·deferCount는 항상 호출부가 넘긴다 — decision.event.deferCount는 pass/block에만 있고
@@ -130,4 +136,21 @@ test("resolveApproval: 입력을 변형하지 않는다(순수성)", () => {
   resolveApproval("e", specCtx, input, "x");
   assert.equal(JSON.stringify(input), frozenInput);
   assert.equal(JSON.stringify(specCtx), frozenCtx);
+});
+
+// ── formatEngineFailure (0.9.1 — runEngine 반환값을 TUI 표시 문구로. app.tsx submit()이 이 반환값을
+// 버려서 인증/네트워크 실패가 화면에 안 뜨던 "무응답" 결함의 근본수정) ──
+
+test("formatEngineFailure: isError:false → null(정상 종료, 표시할 실패 없음)", () => {
+  assert.equal(formatEngineFailure({ isError: false }), null);
+});
+
+test("formatEngineFailure: isError:true + error 있음 → 오류 문구에 error 포함", () => {
+  const msg = formatEngineFailure({ isError: true, error: "network timeout" });
+  assert.equal(msg, "🐢 오류: network timeout");
+});
+
+test("formatEngineFailure: isError:true인데 error 없음(예: subtype≠success) → 폴백 문구", () => {
+  const msg = formatEngineFailure({ isError: true });
+  assert.equal(msg, "🐢 오류: 알 수 없는 오류로 응답을 완료하지 못했습니다");
 });
