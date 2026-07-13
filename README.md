@@ -346,6 +346,26 @@ gbc tui [--model <모델>]
    ```
    `invalid`나 버전 불일치가 보이면 위 1번 명령으로 다시 잡는다. 그래도 설치 자체가 안 되면(`npm install -g ink@7.1.0 ...`이 에러) 사내 레지스트리가 해당 패키지를 프록시하지 않는 것 — 레지스트리 관리자에게 `@anthropic-ai/*` 스코프·`ink`·`react` 미러링을 요청한다.
 
+### 회사 보안정책이 claude 실행파일을 차단하는 환경 (`spawn EPERM`/`EACCES`)
+
+`gbc run`/`gbc tui`는 `@anthropic-ai/claude-agent-sdk`가 내려받은 **번들 claude.exe를 자식 프로세스로 spawn**해 구동한다. 회사 EDR/보안정책이 이 실행파일 경로를 차단하면 프롬프트 제출 시 `spawn EPERM`(또는 `EACCES`)이 나며, gbc가 자동으로 원인·우회 안내를 낸다.
+
+```bash
+# bash / zsh / WSL / Mac
+claude --version   # 성공하면 그 claude가 이미 회사에서 허용된 설치본
+GBC_CLAUDE_PATH=/path/to/allowed/claude gbc tui   # 그 경로를 SDK에 지정해 우회
+```
+
+```powershell
+# native Windows (PowerShell) — 회사 보안정책이 claude.exe를 막아 특정 허용 경로에 수동 설치한 경우
+claude --version
+$env:GBC_CLAUDE_PATH = "C:\allowed\path\claude.exe"; gbc tui
+```
+
+- `claude --version`이 실패하면(예: `Access denied`) claude 실행파일 자체가 회사 정책상 어디서도 허용되지 않는 것 — 보안팀에 예외를 요청해야 한다(GBC_CLAUDE_PATH로 우회 불가).
+- 성공하면 그 경로를 `GBC_CLAUDE_PATH` 환경변수로 지정한다 — `gbc run`·`gbc tui` 둘 다 읽는다(SDK `Options.pathToClaudeCodeExecutable`에 그대로 전달).
+- 지정한 claude 버전이 SDK가 기대하는 프로토콜과 안 맞으면(현재 SDK 0.3.202는 claude 2.1.202와 페어) 같은 허용 경로에 해당 버전을 추가 설치해야 할 수 있다.
+
 ## 크로스-repo 가시성
 
 여러 repo를 오가며 작업할 때, **다른 repo에 걸린 미완 작업**을 그 repo를 열지 않고도 인지하기 위한 기능이다. 세션 진입(SessionStart) 시 현재 repo의 미해결 defer 상세에 더해, **등록된 다른 repo들의 미해결 defer 요약**을 한 줄로 환기한다.

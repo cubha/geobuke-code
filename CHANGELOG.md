@@ -2,6 +2,28 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.9.2] - 2026-07-13
+
+`gbc tui` CC 표준 UX 갭 4건 + 회사 보안정책 EPERM 우회 + 디자인 개선(마스코트 S2·워드마크·안내카드·마크다운 배선). 사용자 실사용 보고("Esc가 안 먹힘·로딩 표시 없음·Ctrl+C 한 번에 바로 꺼짐")와 회사 Windows 실측(spawn EPERM으로 A-모드 엔진 사용 불가)을 계기로 한 통합 업데이트. hook/gate-core 계약 무변경 = **재init 불요**.
+
+### Added
+- **Esc로 스트리밍 중단** — `gbc tui`에서 응답 생성 중 Esc를 누르면 즉시 취소된다. `engine.ts`에 `AbortController` seam 추가, 중단은 실패(`🐢 오류:`)와 별도 채널(`🐢 중단됨`, warn 톤)로 표시한다(`formatEngineAbort` 신규).
+- **`GBC_CLAUDE_PATH` 환경변수** — 회사 보안정책이 SDK 번들 `claude.exe`의 spawn을 `EPERM`/`EACCES`로 차단하는 환경(사내 실사용 재현)에서, 이미 허용된 별도 설치 경로를 지정해 우회한다(`gbc run`/`gbc tui` 둘 다 지원, SDK `pathToClaudeCodeExecutable`에 배선). `startup-diagnostics.ts`가 `spawn EPERM/EACCES` 패턴을 인식해 `claude --version` 확인 + `GBC_CLAUDE_PATH` 안내를 낸다. README에 트러블슈팅 섹션 신설(bash/PowerShell 양쪽 예시).
+- **로딩 스피너** — 스트리밍 중 braille 프레임 스피너 + 경과초를 화면에 표시한다(`formatSpinnerLine`).
+- **Ctrl+C 2단 확인종료** — 첫 Ctrl+C는 "한 번 더 누르면 종료" 경고(게이트 줄에 상시 노출), 2초 내 두 번째 Ctrl+C에서 종료한다(오조작 방지, `ink` `exitOnCtrlC:false` + 자체 확인 로직).
+- **skills 패널(`⌃S`)** — 설치된 `.claude/skills/*/SKILL.md`를 스캔해 이름·설명을 보여준다(`gbc init`이 설치한 `/gate`·`/gbc-mute`·`/gbc-monitor` 등).
+- **디자인 개선** — 마스코트를 S2(플레이트 패턴·꼬리·입 추가, 사용자 확정)로 교체, figlet "ANSI Shadow" 폰트 "GEOBUKE" 워드마크 + 3줄 안내카드(게이트 고지·spec/defer 카운트·키맵 힌트)를 스플래시에 병치. 어시스턴트 응답에 경량 마크다운(헤딩·코드펜스·diff 색상) 배선, statusline에 마지막 턴 소요시간 표시.
+
+### Fixed
+- (scope-critic 자체검토 발견·즉시수정) `EngineResult.aborted`/`isError` 배타 불변식을 catch 분기에서 명시 강제(둘 다 true인 상태가 우연히만 안 보이던 것을 계약으로 고정).
+- (scope-critic 자체검토 발견·즉시수정) 워드마크(59열)/마스코트(60열) 표시 임계값이 어긋나 "풀 워드마크+미니 마스코트"가 뜨는 조합을 단일 상수(`SPLASH_WIDE_MIN_COLUMNS`)로 통일.
+- (scope-critic 자체검토 발견·즉시수정) 안내카드가 여러 톤의 세그먼트를 단일 톤으로 뭉개던 것을 `<Segments>` 렌더 재사용으로 수정(향후 카드에 다톤 도입 시 정보손실 방지).
+- (security-auditor QUICK 발견·즉시수정) skills 패널의 `.claude/skills/*` 스캔이 `SKILL.md` 파일 자체의 심링크만 거부해, 상위 디렉토리가 심링크면 우회되던 경계를 엔트리 디렉토리까지 lstat 검사하도록 보강.
+
+### Known follow-ups (0.9.3+ 예정, scope-critic 발견)
+- statusline의 마지막 턴 소요시간(`lastTurnMs`)이 사람의 승인 대기시간을 포함하고, 정상완료/중단/오류 3경로를 구분 없이 같은 형식으로 표시한다 — 오독 여지.
+- Static 스크롤백이 어시스턴트 응답의 줄 수만큼 엔트리를 쌓는데(마크다운 배선으로 턴당 엔트리 수 증가) 상한(cap) 로직이 없다 — 장시간 세션의 메모리 성장 가속.
+
 ## [0.9.1] - 2026-07-13
 
 `gbc tui`/`gbc run` 사내 프록시(Nexus/Artifactory류) 레지스트리 환경 설치 실패 근본수정(0.9.1 예정). 실사용자(0.9.0 배포 직후)가 회사망에서 3단계 연쇄 크래시를 겪은 것을 계기로 한 수정: ①`ink` caret range가 이미 전역에 있던 구버전과 dedup 충돌(`useWindowSize` export 없음) ②개별 패키지 재설치가 React peer dependency를 중복 설치(`useReducer` 등 훅 디스패처 null) ③두 경우 모두 원시 스택트레이스만 노출하던 에러 처리.

@@ -80,3 +80,21 @@ test("순수함수 — 같은 입력엔 항상 같은 출력(결정론)", () => 
   const msg = "SyntaxError: The requested module 'ink' does not provide an export named 'useWindowSize'";
   assert.equal(classifyTuiStartupError(msg, VERSIONS), classifyTuiStartupError(msg, VERSIONS));
 });
+
+// ===== spawn EPERM/EACCES (0.9.2 ST6 — 회사 보안정책이 SDK 번들 claude.exe spawn을 차단할 때의
+// 실사용 재현. ANALYSIS-tui-win-spawn-eperm-2026-07-13.md §1① — GBC_CLAUDE_PATH 우회 안내) =====
+
+test("spawn EPERM: GBC_CLAUDE_PATH 우회 안내 + claude --version 확인 명령", () => {
+  const out = classifyTuiStartupError("Error: spawn EPERM", VERSIONS);
+  assert.match(out, /GBC_CLAUDE_PATH/);
+  assert.match(out, /claude --version/);
+});
+
+test("spawn EACCES: 동일 분기(권한 거부 변형)", () => {
+  const out = classifyTuiStartupError("Error: spawn /tmp/claude-agent-sdk/claude.exe EACCES", VERSIONS);
+  assert.match(out, /GBC_CLAUDE_PATH/);
+});
+
+test("spawn 관련 없는 EPERM/EACCES 문자열은 오분류하지 않는다(spawn 앵커 필수)", () => {
+  assert.equal(classifyTuiStartupError("Error: EACCES: permission denied, open '/etc/passwd'", VERSIONS), null);
+});

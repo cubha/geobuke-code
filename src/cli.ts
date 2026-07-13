@@ -59,7 +59,7 @@ import { logEvent, parseEvents, computeMetrics, tagEventsWithRepo } from "./metr
 import type { EventKind } from "./metrics.js";
 import { nowIso, nowStamp } from "./time.js";
 import type { DeferStatus, Settings } from "./types.js";
-import { classifyTuiStartupError } from "./tui/startup-diagnostics.js";
+import { classifyTuiStartupError, classifySpawnPermissionError } from "./tui/startup-diagnostics.js";
 import type { TuiDepsVersions } from "./tui/startup-diagnostics.js";
 
 const CLI_PATH = fileURLToPath(import.meta.url);
@@ -1036,19 +1036,27 @@ async function cmdRun(args: string[]): Promise<void> {
   }
   const { runEngine } = await import("./engine.js");
   const { makeSdkPreToolUseHook, makeStdinPauseCanUseTool } = await import("./gate-sdk.js");
+  // GBC_CLAUDE_PATH(0.9.2 ST5) — 회사 보안정책이 SDK 번들 claude.exe spawn을 EPERM 차단할 때
+  // 이미 허용된 별도 설치 경로로 우회(ANALYSIS-tui-win-spawn-eperm-2026-07-13.md §3).
+  const claudeExecutablePath = process.env.GBC_CLAUDE_PATH;
   try {
     const res = await runEngine({
       prompt,
       cwd,
       ...(model ? { model } : {}),
       ...(maxTurns && Number.isFinite(maxTurns) ? { maxTurns } : {}),
+      ...(claudeExecutablePath ? { claudeExecutablePath } : {}),
       preToolUse: makeSdkPreToolUseHook(cwd),
       canUseTool: makeStdinPauseCanUseTool({ autoAllow }),
     });
     console.log(
       `\n🐢 gbc run ${res.isError ? "종료(error)" : "완료"} — session=${res.sessionId} turns=${res.numTurns} cost=$${res.costUsd} records=${res.records}`,
     );
-    if (res.error) console.log(`사유: ${res.error}`);
+    if (res.error) {
+      // GBC_CLAUDE_PATH 안내(0.9.2 ST6) — ink 없는 gbc run 경로도 spawn EPERM/EACCES면 원인+우회를 낸다.
+      const diag = classifySpawnPermissionError(res.error);
+      console.log(diag ?? `사유: ${res.error}`);
+    }
     if (res.auth) {
       console.log(
         `인증 상태: authenticating=${res.auth.authenticating}${res.auth.error ? ` error=${res.auth.error}` : ""} ${res.auth.output.join(" ")}`.trim(),
@@ -1090,7 +1098,11 @@ async function cmdTui(args: string[]): Promise<void> {
       import("ink"),
       import("./tui/app.js"),
     ]);
-    const { waitUntilExit } = render(React.createElement(App, { cwd, ...(model ? { model } : {}) }));
+    // exitOnCtrlC:false(0.9.2 ST10) — ink 기본은 첫 Ctrl+C에서 바로 프로세스를 죽인다. app.tsx가
+    // 2단 확인(한 번 더 눌러야 종료)을 직접 구현하므로 ink의 즉시종료를 꺼야 한다.
+    const { waitUntilExit } = render(React.createElement(App, { cwd, ...(model ? { model } : {}) }), {
+      exitOnCtrlC: false,
+    });
     await waitUntilExit();
   } catch (e) {
     const diagnosis = classifyTuiStartupError(String(e), readTuiDepsVersions());

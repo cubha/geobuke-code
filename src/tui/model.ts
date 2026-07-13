@@ -2,7 +2,7 @@
 // Ground Truth: gbc-tui-design.html 시안 A(A-⓪~A-④) + statusline 표 + 키맵 표.
 // Ink/React를 import하지 않는다 — TUI 컴포넌트(ST5)가 이 reducer를 소비한다.
 
-export type Panel = "none" | "metrics" | "repos";
+export type Panel = "none" | "metrics" | "repos" | "skills";
 export type ApprovalChoice = "y" | "n" | "e" | "d";
 
 export const APPROVAL_CHOICES: readonly ApprovalChoice[] = ["y", "n", "e", "d"];
@@ -23,6 +23,8 @@ export interface Statusline {
   model: string;
   usagePct: number;
   costUsd: number;
+  /** ST15(0.9.2) — 마지막으로 종료된 턴의 소요시간(ms). 0이면 아직 턴이 없었음(표시 생략 신호). */
+  lastTurnMs: number;
 }
 
 export interface TuiState {
@@ -34,6 +36,9 @@ export interface TuiState {
   panel: Panel;
   approval: ApprovalState | null;
   statusline: Statusline;
+  /** ST9(0.9.2) Ctrl+C 2단 확인종료 — "일정 시간 내 두 번째 입력이면 종료"의 타이머 판단은 app.tsx
+   *  (setTimeout, ST10)가 impure하게 맡고, 이 reducer는 armed 여부만 순수하게 추적한다. */
+  exitConfirmArmed: boolean;
 }
 
 const DEFAULT_STATUSLINE: Statusline = {
@@ -43,6 +48,7 @@ const DEFAULT_STATUSLINE: Statusline = {
   model: "",
   usagePct: 0,
   costUsd: 0,
+  lastTurnMs: 0,
 };
 
 export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiState {
@@ -55,6 +61,7 @@ export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiSta
     panel: "none",
     approval: null,
     statusline: { ...DEFAULT_STATUSLINE, ...statuslineSeed },
+    exitConfirmArmed: false,
   };
 }
 
@@ -69,7 +76,9 @@ export type TuiEvent =
   | { type: "APPROVAL_ANSWERED"; choice: ApprovalChoice }
   | { type: "TOGGLE_PANEL"; panel: Exclude<Panel, "none"> }
   | { type: "CLOSE_PANEL" }
-  | { type: "STATUSLINE_UPDATE"; patch: Partial<Statusline> };
+  | { type: "STATUSLINE_UPDATE"; patch: Partial<Statusline> }
+  | { type: "CTRL_C_PRESSED" }
+  | { type: "CTRL_C_RESET" };
 
 function cycleChoice(current: ApprovalChoice, direction: 1 | -1): ApprovalChoice {
   const idx = APPROVAL_CHOICES.indexOf(current);
@@ -126,6 +135,12 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
 
     case "STATUSLINE_UPDATE":
       return { ...state, statusline: { ...state.statusline, ...event.patch } };
+
+    case "CTRL_C_PRESSED":
+      return state.exitConfirmArmed ? state : { ...state, exitConfirmArmed: true };
+
+    case "CTRL_C_RESET":
+      return state.exitConfirmArmed ? { ...state, exitConfirmArmed: false } : state;
 
     default:
       return state;
