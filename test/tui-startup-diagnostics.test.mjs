@@ -45,6 +45,27 @@ test("React 인스턴스 중복: useState/useRef/useEffect/useContext 등 다른
   }
 });
 
+test("React 인스턴스 중복: useInsertionEffect — ink 자신의 루트 컴포넌트(App.js)가 무조건 호출하는 훅이라 실제로 가장 흔히 첫 타격 지점(scope-critic 실증)", () => {
+  const out = classifyTuiStartupError("TypeError: Cannot read properties of null (reading 'useInsertionEffect')", VERSIONS);
+  assert.notEqual(out, null);
+});
+
+test("버전불일치: ink/react가 아닌 모듈의 export 에러는 오분류하지 않는다(전이 의존성과 혼동 방지)", () => {
+  const out = classifyTuiStartupError(
+    "SyntaxError: The requested module 'yoga-layout' does not provide an export named 'loadYoga'",
+    VERSIONS,
+  );
+  assert.equal(out, null, "ink/react 무관 모듈의 export 에러를 ink 버전불일치로 오분류함");
+});
+
+test("버전불일치: react 모듈명도 인식(ink뿐 아니라)", () => {
+  const out = classifyTuiStartupError(
+    "SyntaxError: The requested module 'react' does not provide an export named 'use'",
+    VERSIONS,
+  );
+  assert.match(out, /버전이 안 맞습니다|버전 불일치|버전이 다릅니다/);
+});
+
 test("무관한 null-property 에러는 오탐하지 않는다(훅 이름이 아니면 null 반환)", () => {
   const out = classifyTuiStartupError("TypeError: Cannot read properties of null (reading 'foo')", VERSIONS);
   assert.equal(out, null, "훅 이름이 아닌 임의 프로퍼티 에러를 React 중복으로 오분류함");
