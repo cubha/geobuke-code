@@ -19,15 +19,22 @@ import {
   formatSpinnerLine,
   WORDMARK_GEOBUKE,
   formatWelcomeCard,
+  renderWordmark,
+  formatTagline,
+  SPLASH_WIDE_MIN_COLUMNS,
+  SPLASH_HERO_MIN_COLUMNS,
+  WELCOME_LINE,
 } from "../dist/tui/format.js";
 import { createInitialState, reduce } from "../dist/tui/model.js";
 
 // ── 마스코트 ──
 
-test("MASCOT_S2: 24×10(치수는 구 C1과 동일 — 드롭인 교체), 플레이트 패턴 행 포함", () => {
-  assert.equal(MASCOT_S2.length, 10);
-  assert.equal(MASCOT_S2[0].length, 24);
-  assert.ok(MASCOT_S2.some((row) => /DGGDD/.test(row)), "등딱지 플레이트 패턴(D 반복)이 있어야 S2");
+test("MASCOT_S2: 30×16(카와이 재설계 — 원/타원 래스터화+실루엣 윤곽선, 2026-07-14 사용자 승인), 등껍질 스컷+얼굴 요소 포함", () => {
+  assert.equal(MASCOT_S2.length, 16);
+  assert.equal(MASCOT_S2[0].length, 30);
+  assert.ok(MASCOT_S2.some((row) => row.includes("S")), "등껍질 스컷 중간톤(S)이 있어야 함");
+  assert.ok(MASCOT_S2.some((row) => row.includes("P")), "볼터치(P)가 있어야 카와이 얼굴");
+  assert.ok(MASCOT_S2.some((row) => row.includes("W")), "눈 하이라이트(W)가 있어야 함");
 });
 
 test("MASCOT_S2/C4: 모든 행 길이가 동일하고, '.' 아니면 PALETTE에 정의된 키만 사용", () => {
@@ -279,19 +286,112 @@ test("WORDMARK_GEOBUKE: 모든 행 폭이 동일, 박스drawing 문자 포함", 
   assert.ok(WORDMARK_GEOBUKE.some((row) => /[█╗╝║═╔╚]/.test(row)), "box-drawing 문자 포함");
 });
 
-test("formatWelcomeCard: 3줄 — 게이트 안내/spec·defer 카운트/키맵 힌트", () => {
-  const rows = formatWelcomeCard(8, 2);
-  assert.equal(rows.length, 3);
+// 0.9.3 D1 — formatWelcomeCard가 기본 스킬 3종 섹션을 받도록 확장(스플래시 시안 최종 확정,
+// 아티팩트 cb7c6b1c 장면01). 키맵도 시안대로 2줄로 분리(⌃M/⌃R/⌃S 한 줄 + shift+↵/esc/⌃C 한 줄 —
+// 기존 1줄 구현엔 "shift+↵ 개행" 안내 자체가 없었다: 콘텐츠 누락이었지 압축이 아니었다).
+const SKILLS = [
+  { name: "gate", blurb: "defer·spec·verify 게이트 관리" },
+  { name: "gbc-monitor", blurb: "운영 현황 조회(관측 전용)" },
+  { name: "gbc-mute", blurb: "defer 리마인드 on/off" },
+];
+
+test("formatWelcomeCard: 게이트 요약 2줄 + 기본 스킬 섹션(헤딩+스킬수만큼) + 키맵 2줄", () => {
+  const rows = formatWelcomeCard(8, 2, SKILLS);
+  assert.equal(rows.length, 2 + 1 + SKILLS.length + 2, "게이트요약2 + 스킬헤딩1 + 스킬3 + 키맵2");
   assert.match(joinTextSegments(rows[0]), /게이트 활성/);
   const line2 = joinTextSegments(rows[1]);
   assert.match(line2, /spec 8케이스/);
   assert.match(line2, /defer 2/);
-  const line3 = joinTextSegments(rows[2]);
-  assert.match(line3, /⌃M/);
-  assert.match(line3, /⌃R/);
-  assert.match(line3, /⌃S/);
+  assert.match(joinTextSegments(rows[2]), /기본 스킬/);
+  assert.match(joinTextSegments(rows[3]), /\/gate/);
+  assert.match(joinTextSegments(rows[3]), /defer·spec·verify 게이트 관리/);
+  assert.match(joinTextSegments(rows[4]), /\/gbc-monitor/);
+  assert.match(joinTextSegments(rows[5]), /\/gbc-mute/);
+  const keymap1 = joinTextSegments(rows[6]);
+  assert.match(keymap1, /⌃M/);
+  assert.match(keymap1, /⌃R/);
+  assert.match(keymap1, /⌃S/);
+  const keymap2 = joinTextSegments(rows[7]);
+  assert.match(keymap2, /shift\+↵/);
+  assert.match(keymap2, /esc 중단/);
+  assert.match(keymap2, /⌃C 종료\(2회\)/);
+});
+
+test("formatWelcomeCard: 스킬 이름 세그먼트는 accent 톤(패널 강조와 일관)", () => {
+  const rows = formatWelcomeCard(0, 0, SKILLS);
+  const skillRow = rows[3];
+  const nameSeg = skillRow.find((s) => s.text === "/gate");
+  assert.equal(nameSeg.tone, "accent");
+});
+
+test("formatWelcomeCard: 스킬 목록 비어있어도 헤딩+키맵은 유지(빈 목록 방어)", () => {
+  const rows = formatWelcomeCard(0, 0, []);
+  assert.equal(rows.length, 2 + 1 + 0 + 2);
 });
 
 test("formatWelcomeCard: 순수성 — 같은 입력엔 항상 같은 출력", () => {
-  assert.deepEqual(formatWelcomeCard(0, 0), formatWelcomeCard(0, 0));
+  assert.deepEqual(formatWelcomeCard(0, 0, SKILLS), formatWelcomeCard(0, 0, SKILLS));
+});
+
+// ── 워드마크 그라데이션 + 태그라인 (0.9.3 D1 — 승인 시안 대비 구현 누락 복원) ──
+// 시안(https://claude.ai/code/artifact/cb7c6b1c-f254-415e-991a-a43d2a2e1f33) 장면01:
+// 행별 6단 그린 그라데이션(#a7f3c9→#86efac→#5fe694→#4ade80→#2f9e63→#1c7a48).
+// 기존 구현(app.tsx)은 WORDMARK_GEOBUKE 6행 전부에 단일 tone:"accent"만 입혀 단색이었다.
+
+test("renderWordmark(truecolor): 6줄, 각 줄 리셋 종료, 트루컬러 포함, 행마다 서로 다른 색(그라데이션)", () => {
+  const lines = renderWordmark("truecolor");
+  assert.equal(lines.length, 6);
+  for (const line of lines) {
+    assert.ok(line.includes("38;2;"), "트루컬러 fg 이스케이프 포함");
+    assert.ok(line.endsWith("\x1b[0m"), "리셋으로 종료");
+  }
+  const fgCodes = lines.map((l) => l.match(/38;2;\d+;\d+;\d+/)[0]);
+  assert.equal(new Set(fgCodes).size, 6, "6행 전부 서로 다른 색이어야 그라데이션(현 결함=단색 회귀 방지)");
+});
+
+test("renderWordmark(truecolor): 정확한 그라데이션 hex 순서(시안 사양)", () => {
+  const HEX = ["a7f3c9", "86efac", "5fe694", "4ade80", "2f9e63", "1c7a48"];
+  const lines = renderWordmark("truecolor");
+  HEX.forEach((hex, i) => {
+    const r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16);
+    assert.ok(lines[i].startsWith(`\x1b[38;2;${r};${g};${b}m`), `${i}행은 #${hex}로 시작해야 함`);
+  });
+});
+
+test("renderWordmark(ansi16): 트루컬러 코드 없음, 상위 3행/하위 3행 2단 근사(서로 다른 코드)", () => {
+  const lines = renderWordmark("ansi16");
+  assert.equal(lines.length, 6);
+  for (const line of lines) assert.ok(!line.includes("38;2;"));
+  const topCode = lines[0].match(/\x1b\[(\d+)m/)[1];
+  const botCode = lines[5].match(/\x1b\[(\d+)m/)[1];
+  assert.notEqual(topCode, botCode, "상단(밝은 그린)과 하단(짙은 그린)은 다른 ansi16 코드");
+  assert.equal(lines[0].match(/\x1b\[(\d+)m/)[1], lines[1].match(/\x1b\[(\d+)m/)[1], "상위 3행은 동일 코드(2단 근사)");
+});
+
+test("renderWordmark: 각 줄 내용은 WORDMARK_GEOBUKE 원문을 보존(색만 입힘, 문자는 불변)", () => {
+  const lines = renderWordmark("truecolor");
+  lines.forEach((line, i) => {
+    const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+    assert.equal(stripped, WORDMARK_GEOBUKE[i]);
+  });
+});
+
+test("formatTagline: 버전 문자열을 그대로 보간, 하드코딩 없음", () => {
+  assert.equal(formatTagline("0.9.3"), "거북이코드 v0.9.3 · 계획↔구현↔검증 게이트");
+  assert.equal(formatTagline("1.2.3"), "거북이코드 v1.2.3 · 계획↔구현↔검증 게이트");
+});
+
+// 0.9.3 D2 — WELCOME_LINE(시안 요구 ⑦)이 D1/D2 1차 구현에서 누락됐던 것을 복원(자체 재검토 발견).
+test("WELCOME_LINE: 시안 확정 문구와 정확히 일치", () => {
+  assert.equal(WELCOME_LINE, "🐢 무엇이든 입력하세요 — 게이트가 계획 없는 구현을 지켜줍니다.");
+});
+
+// ── 반응형 임계값 분리 (0.9.3 D1) — 마스코트 폴백(60열)과 워드마크+2컬럼 병치(96열)는
+// 서로 다른 레이아웃 결정이라 단일 임계값을 공유하면 안 된다(60~95열에서 워드마크 없이
+// 마스코트 S2+카드 세로스택이라는 중간 상태가 필요 — 시안 요구 ⑧ 3단 반응형).
+// 96은 카와이 S2(30폭) 재설계로 2컬럼 폭 예산(3+30+6+54=93)이 늘어나 84→96으로 상향한 값.
+test("SPLASH_WIDE_MIN_COLUMNS(마스코트)과 SPLASH_HERO_MIN_COLUMNS(워드마크+병치)는 별개 값", () => {
+  assert.equal(SPLASH_WIDE_MIN_COLUMNS, 60);
+  assert.equal(SPLASH_HERO_MIN_COLUMNS, 96);
+  assert.ok(SPLASH_HERO_MIN_COLUMNS > SPLASH_WIDE_MIN_COLUMNS);
 });

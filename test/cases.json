@@ -46,5 +46,25 @@
     "plan_spec": "세션 관리:\n- [ ] 로그인\n- [ ] 로그아웃\n- [ ] 세션 만료 시 재로그인 유도",
     "edit_diff": "+function login() { /* ... */ }\n+function logout() { /* ... */ }\n+function onSessionExpire() { redirectToLogin(); }",
     "expected": "pass"
+  },
+  {
+    "id": "9-fa지원_기존코드오분류방지",
+    "plan_spec": "로그인 검증:\n- [ ] 빈 이메일 에러\n- [ ] 중복 이메일 차단\n- [ ] 비밀번호 8자 미만 거부",
+    "edit_diff": "+  if (pw.length < 8) return '비밀번호가 너무 짧습니다';",
+    "current_file": "function validateLogin(email, pw) {\n  if (!email) return '이메일을 입력하세요';\n  if (isDuplicate(email)) return '이미 가입된 이메일입니다';\n  if (pw.length < 8) return '비밀번호가 너무 짧습니다';\n  return null;\n}",
+    "expected": "pass"
+  },
+  {
+    "id": "10-fa지원_Write덮어쓰기회귀유지",
+    "plan_spec": "로그인 검증:\n- [ ] 빈 이메일 에러\n- [ ] 중복 이메일 차단\n- [ ] 비밀번호 8자 미만 거부",
+    "edit_diff": "--- src/auth.ts (전체 작성/덮어쓰기)\n+ function validateLogin(email, pw) {\n+   if (!email) return '이메일을 입력하세요';\n+   return null;\n+ }",
+    "current_file": "function validateLogin(email, pw) {\n  if (!email) return '이메일을 입력하세요';\n  if (isDuplicate(email)) return '이미 가입된 이메일입니다';\n  if (pw.length < 8) return '비밀번호가 너무 짧습니다';\n  return null;\n}",
+    "expected": "block"
+  },
+  {
+    "id": "11-fa지원_스펙드리프트정탐유지",
+    "plan_spec": "목록 조회 API:\n- [ ] GET /items 요청으로 목록 조회\n- [ ] 페이지네이션 파라미터(page, limit) 지원",
+    "edit_diff": "+router.post('/items', async (req, res) => {\n+  const items = await db.items.findAll();\n+  res.json(items);\n+});",
+    "expected": "block"
   }
 ]

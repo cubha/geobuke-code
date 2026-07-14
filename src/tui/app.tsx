@@ -11,15 +11,11 @@ import { createInitialState, reduce, type TuiState, type ApprovalChoice } from "
 import * as Editor from "./editor.js";
 import type { EditorState } from "./editor.js";
 import {
-  selectMascot,
-  renderMascot,
   formatGateLine,
   formatStatusline,
   formatSpinnerLine,
   formatMarkdownLite,
-  WORDMARK_GEOBUKE,
-  formatWelcomeCard,
-  SPLASH_WIDE_MIN_COLUMNS,
+  type CardSkill,
   type TextSegment,
   type Tone,
 } from "./format.js";
@@ -36,21 +32,46 @@ import { makeSdkPreToolUseHook } from "../gate-sdk.js";
 import { readSpecCases } from "../spec.js";
 import { activeDeferItems, addDefer } from "../defer.js";
 import { Segments } from "./ui/Segments.js";
-import { Mascot } from "./ui/Mascot.js";
 import { ApprovalBox } from "./ui/ApprovalBox.js";
 import { MetricsPanel } from "./ui/MetricsPanel.js";
 import { ReposPanel } from "./ui/ReposPanel.js";
 import { SkillsPanel } from "./ui/SkillsPanel.js";
+import { SplashHero } from "./ui/SplashHero.js";
 import { toneColor } from "./ui/theme.js";
+import { scanSkills } from "./skills.js";
+import { GBC_SKILL_NAMES } from "../install.js";
+
+// 0.9.3 D2 — 스플래시 카드용 짧은 blurb(⌃S 패널의 SkillInfo.description 전문과는 별개 — 54칸
+// 카드 폭엔 전문이 안 맞아 큐레이션 필요). 이름이 이 표에 없으면 실제 description을 짧게 잘라
+// fallback한다(향후 gbc 자체 스킬이 늘어도 조용히 blurb 없는 항목이 되지 않게).
+const SPLASH_SKILL_BLURBS: Record<string, string> = {
+  gate: "defer·spec·verify 게이트 관리",
+  "gbc-monitor": "운영 현황 조회(관측 전용)",
+  "gbc-mute": "defer 리마인드 on/off",
+};
+
+/** 스플래시 카드에 표시할 gbc 자체 스킬만(GBC_SKILL_NAMES 순서) — 실제 설치 확인은 scanSkills로. */
+function resolveCardSkills(cwd: string): CardSkill[] {
+  const installed = new Map(scanSkills(cwd).map((s) => [s.name, s]));
+  const out: CardSkill[] = [];
+  for (const name of GBC_SKILL_NAMES) {
+    const found = installed.get(name);
+    if (!found) continue; // 미설치(gbc init 안 함) — 조용히 생략
+    out.push({ name, blurb: SPLASH_SKILL_BLURBS[name] ?? found.description.slice(0, 40) });
+  }
+  return out;
+}
 
 type ScrollEntry =
-  | { id: number; kind: "mascot"; lines: string[] }
   | { id: number; kind: "text"; text: string; tone: Tone }
   // ST13-14(0.9.2) — formatWelcomeCard가 한 줄에 여러 톤을 섞을 수 있는 TextSegment[][]를 반환하는데,
   // "text" variant(단일 tone)로 욱여넣으면 조용히 정보가 손실된다(scope-critic 발견, 2026-07-13
   // ST13-14 판정 DECISION_CHANGED:yes). 기존 <Segments> 렌더 관례(formatGateLine/formatStatusline과
   // 동일)를 그대로 재사용해 세그먼트별 톤을 보존한다.
-  | { id: number; kind: "segments"; segments: TextSegment[] };
+  | { id: number; kind: "segments"; segments: TextSegment[] }
+  // 0.9.3 D2 — 워드마크+마스코트+카드 2컬럼 병치를 하나의 조립 단위로 커밋(개별 Static 엔트리
+  // 나열이던 기존 방식은 병치·세로중앙정렬·여백을 표현할 수 없었다 — 사용자 실사용 지적).
+  | { id: number; kind: "hero"; columns: number; version: string; specCount: number; deferCount: number; skills: CardSkill[] };
 
 function detectGit(cwd: string): { branch: string; dirty: boolean } {
   try {
@@ -74,7 +95,7 @@ function applyEditorKey(input: string, key: Key, s: EditorState): EditorState {
   return s;
 }
 
-export function App({ cwd, model }: { cwd: string; model?: string }) {
+export function App({ cwd, model, version }: { cwd: string; model?: string; version: string }) {
   const { columns } = useWindowSize();
   const [state, dispatch] = useReducer(reduce, undefined, () => {
     // detectGit은 execSync 2회(git rev-parse·git status)라 lazy initializer 안에서만 불러 마운트
@@ -141,28 +162,20 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
     }
   }, []);
 
-  // 스플래시 — 1회 커밋(Static, 워드마크+마스코트+안내카드 병치). ST13(format.ts)이 순수 포맷터를
-  // 만들고 여기선 조립만 한다. 워드마크(59열 고정폭 figlet)는 좁은 터미널에서 줄바꿈되며 깨지므로
-  // format.ts의 SPLASH_WIDE_MIN_COLUMNS(마스코트 폴백과 동일한 단일 임계값)로 그 아래에서는
-  // 생략한다(마스코트 C4 미니만 남음) — 예전엔 워드마크 자신의 폭(59)을 따로 써서 마스코트
-  // 임계값(60)과 1칸 어긋났었다(scope-critic 발견, ST13-14 판정 DECISION_CHANGED:yes).
+  // 스플래시 — 1회 커밋(Static, 단일 "hero" 엔트리). 0.9.3 D2: 워드마크·마스코트·카드를 각자
+  // 독립 Static 엔트리로 나열하던 기존 방식은 병치·세로중앙정렬·여백을 표현할 수 없어(사용자
+  // 실사용 지적, 2026-07-14) SplashHero 컴포넌트 하나로 조립을 위임한다 — 여기선 데이터만 모은다.
   useEffect(() => {
-    const mascot = renderMascot(selectMascot(columns));
-    const wordmarkEntries: ScrollEntry[] =
-      columns >= SPLASH_WIDE_MIN_COLUMNS
-        ? WORDMARK_GEOBUKE.map((line) => ({ id: nextId.current++, kind: "text" as const, text: line, tone: "accent" as const }))
-        : [];
-    // formatWelcomeCard는 한 줄에 여러 톤을 섞을 수 있는 TextSegment[][] — 기존 <Segments> 렌더
-    // 관례를 그대로 써서 톤을 보존한다(단일 tone으로 뭉개던 이전 구현의 정보손실 수정).
-    const cardEntries: ScrollEntry[] = formatWelcomeCard(readSpecCases(cwd).length, activeDeferItems(cwd).length).map(
-      (segments) => ({ id: nextId.current++, kind: "segments" as const, segments }),
-    );
-    setScrollback((s) => [
-      ...wordmarkEntries,
-      { id: nextId.current++, kind: "mascot", lines: mascot },
-      ...cardEntries,
-      ...s,
-    ]);
+    const heroEntry: ScrollEntry = {
+      id: nextId.current++,
+      kind: "hero",
+      columns,
+      version,
+      specCount: readSpecCases(cwd).length,
+      deferCount: activeDeferItems(cwd).length,
+      skills: resolveCardSkills(cwd),
+    };
+    setScrollback((s) => [heroEntry, ...s]);
     dispatch({ type: "SESSION_START" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -372,8 +385,15 @@ export function App({ cwd, model }: { cwd: string; model?: string }) {
     <Box flexDirection="column">
       <Static items={scrollback}>
         {(entry) =>
-          entry.kind === "mascot" ? (
-            <Mascot key={entry.id} lines={entry.lines} />
+          entry.kind === "hero" ? (
+            <SplashHero
+              key={entry.id}
+              columns={entry.columns}
+              version={entry.version}
+              specCount={entry.specCount}
+              deferCount={entry.deferCount}
+              skills={entry.skills}
+            />
           ) : entry.kind === "segments" ? (
             <Segments key={entry.id} segments={entry.segments} />
           ) : (

@@ -52,7 +52,7 @@ export function classifyTuiStartupError(msg: string, versions: TuiDepsVersions):
   }
   if (VERSION_MISMATCH_RE.test(msg)) {
     return (
-      `🐢 설치된 ink/react 버전이 안 맞습니다(요구: ink@${versions.ink}). 사내 프록시 레지스트리에\n` +
+      `🐢 설치된 ink/react 버전이 안 맞습니다(요구: ink@${versions.ink}). 환경의 패키지 레지스트리에\n` +
       "   남아있던 다른 버전과 충돌했을 수 있습니다.\n" +
       "   확인: npm ls -g ink react @anthropic-ai/claude-agent-sdk\n" +
       `   재설치: ${reinstallCmd(versions)}`
@@ -79,10 +79,10 @@ export function classifyTuiStartupError(msg: string, versions: TuiDepsVersions):
 export function classifySpawnPermissionError(msg: string): string | null {
   if (!SPAWN_PERM_RE.test(msg)) return null;
   return (
-    "🐢 claude 실행 파일 spawn이 거부됐습니다(EPERM/EACCES) — 회사 보안정책이 SDK가 사용하는\n" +
+    "🐢 claude 실행 파일 spawn이 거부됐습니다(EPERM/EACCES) — 실행 환경의 보안정책이 SDK가 사용하는\n" +
     "   기본 claude.exe를 차단했을 가능성이 있습니다.\n" +
     "   확인: claude --version (성공하면 그 경로가 이미 허용된 설치본입니다)\n" +
     "   우회: GBC_CLAUDE_PATH=<허용된 claude 실행파일 경로> 환경변수로 지정하세요.\n" +
-    "   그래도 안 되면 보안팀에 claude 실행파일 허용 예외를 요청하세요."
+    "   그래도 안 되면 환경 관리자(보안 담당)에게 claude 실행파일 허용 예외를 요청하세요."
   );
 }

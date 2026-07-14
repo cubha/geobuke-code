@@ -1,0 +1,30 @@
+// 0.9.3 D2 — 스플래시 안내카드. formatWelcomeCard(순수, format.ts)가 만든 행 데이터를 Ink
+// Box borderStyle로 그린다. 손으로 ┌─│└를 그리지 않는 이유: Ink/yoga가 CJK 폭(string-width)을
+// 이미 정확히 계산해 테두리를 맞추므로, 직접 패딩 계산을 재구현하면 한글 폭 오차로 테두리가
+// 어긋나는(사용자가 실제로 지적한) 문제를 다시 만들 위험이 있다. MetricsPanel/ReposPanel/
+// SkillsPanel과 동일한 테두리 관례(round·green)를 따른다.
+import React from "react";
+import { Box } from "ink";
+import { formatWelcomeCard, type CardSkill } from "../format.js";
+import { Segments } from "./Segments.js";
+
+const CARD_WIDTH = 54; // 시안(아티팩트 cb7c6b1c 장면01) 사양 — 카드 폭 54칸 고정.
+
+export function WelcomeCard({
+  specCount,
+  deferCount,
+  skills,
+}: {
+  specCount: number;
+  deferCount: number;
+  skills: CardSkill[];
+}) {
+  const rows = formatWelcomeCard(specCount, deferCount, skills);
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="green" paddingX={1} width={CARD_WIDTH}>
+      {rows.map((segments, i) => (
+        <Segments key={i} segments={segments} />
+      ))}
+    </Box>
+  );
+}

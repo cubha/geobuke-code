@@ -51,7 +51,7 @@ defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결
 | **사후 결과검증**(케이스↔증거 대조, verified>reviewed>unverifiable) | `gbc verify` |
 | 작업단위 게이트만 리셋(명세 보존·같은 단위 재게이트) | `gbc gate reset` |
 | block이 도출한 누락 케이스 체크리스트 보기 | `gbc gate review` |
-| 누락 케이스 일괄 분류(승인→spec / 미룸→defer) | `gbc gate review --spec <번호\|텍스트\|all> --defer <번호\|텍스트\|all>` |
+| 누락 케이스 일괄 분류(승인→spec / 미룸→defer / 이미완료→ack) | `gbc gate review --spec <번호\|텍스트\|all> --defer <번호\|텍스트\|all> --ack <번호\|텍스트\|all>` |
 | 판정 골든셋 캡처 토글·조회 | `gbc gate snapshot <on\|off\|status\|list\|clear>` |
 | 골든 케이스 재판정·드리프트 점검(temp 0, 뒤집힘 시 exit 1) | `gbc gate snapshot replay [--samples N]` |
 
@@ -59,10 +59,11 @@ defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결
 
 1. **게이트가 침묵 누락으로 차단했을 때**: hook이 사유와 누락 케이스를 알려주고, 그 케이스들은 `.gbc/pending-review.json`에 기록된다. 케이스가 여러 개면 하나씩 `gbc spec add`/`gbc defer add`를 반복하지 말고 **체크리스트로 일괄 분류**한다:
    1. `gbc gate review` — 도출된 누락 케이스를 번호 목록으로 본다.
-   2. 사용자에게 제시·검증받는다(승인할 케이스 / 미룰 케이스 구분).
-   3. `gbc gate review --spec <승인 번호들> --defer <미룸 번호들>` — 한 번에 승인은 spec.md 등록, 미룸은 defer 등록(겹치면 spec 우선). 펜딩은 비워진다.
+   2. 사용자에게 제시·검증받는다(승인할 케이스 / 미룰 케이스 / **실제로는 이미 구현돼 있는 케이스** 구분).
+   3. `gbc gate review --spec <승인 번호들> --defer <미룸 번호들> --ack <이미완료 번호들>` — 승인은 spec.md 등록, 미룸은 defer 등록, **이미완료는 즉시 resolved로 등록**(우선순위 spec>defer>ack). 펜딩은 비워진다.
    4. 재시도하면 등록 기준으로 재판정 → 통과.
    - 단건이면 종전대로 (a) 지금 이 변경에서 직접 다루거나 (b) `gbc defer add "케이스"`로 미뤄도 된다. (절대 주석으로만 미루지 말 것)
+   - **`--ack`는 게이트 오판을 정정하는 채널이다** — "미룬다"가 아니라 "게이트가 놓쳤을 뿐 이미 구현돼 있다"는 사실 표명. 실제로 구현이 안 됐는데 ack하면 게이트가 그 케이스를 영구히 재확인 안 하니, 정말 파일에 존재하는지 확인 후에만 쓴다.
 2. **시나리오 미지정으로 차단됐을 때 — 에이전트 도출 루프**: 사용자가 명세를 수기로 쓰지 않는다. 에이전트가 다음을 수행한다:
    1. 사용자 요청에서 의도·동작 시나리오와 형제 케이스를 **도출**한다.
    2. 도출한 케이스를 사용자에게 **제시하고 검증받는다** — **사용자 승인 없이 자동 등록·구현 금지**(같은 에이전트가 도출+구현하면 고무도장이 됨).

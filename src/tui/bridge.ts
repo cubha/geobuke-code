@@ -46,9 +46,12 @@ export function mapEngineMessageToTuiEvents(msg: SdkMessageLike): TuiEvent[] {
  * PreToolUse 판정(GateDecision)을 게이트 줄 이벤트로 매핑한다. block이면 그 순간 이미 사유 텍스트가
  * 있으므로 canUseTool의 decisionReason을 기다리지 않고 바로 APPROVAL_REQUESTED를 낸다 — SDK가 "ask"를
  * canUseTool로 라우팅할지는 하위 채널 문제고, 사유는 여기서 이미 확정돼 있다. block이 아닌 모든 판정
- * (pass/cached/doc-skip/bypass/fail-open/passthrough)은 사용자 관점에서 "통과"로 뭉뚱그린다 —
- * fail-open의 실패 고지는 SDK systemMessage(스크롤백)로 이미 별도 전달되므로 게이트 줄까지 이중고지하지
- * 않는다.
+ * (pass/cached/doc-skip/bypass/fail-open/passthrough/block-repeat)은 사용자 관점에서 "통과"로 뭉뚱그린다 —
+ * fail-open의 실패 고지, block-repeat(0.9.3 ST2 — 동일 missing 셋 재발화 강등)의 안내 문구 둘 다
+ * emit-direct 공통 경로로 SDK systemMessage(스크롤백)에 이미 별도 전달되므로 게이트 줄까지
+ * 이중고지하지 않는다. ⚠️ 신규 GateKind를 추가할 때는 이 목록에 명시로 넣을지 검토할 것 — 이 함수는
+ * exhaustiveness 체크가 없어 목록 밖 kind는 else로 조용히 흡수된다(scope-critic 발견, 2026-07-14:
+ * block-repeat 도입 시 이 함수를 검토하지 않아도 컴파일이 통과해 하마터면 미검토 상속이 될 뻔함).
  * specCount·deferCount는 둘 다 GateDecision에서 읽지 않고 호출부가 넘긴다 — decision.event.deferCount는
  * pass/block kind에서만 채워지고(gate-core.ts) cached/doc-skip/bypass(작업단위 내 최다빈도 경로)엔 아예
  * 없어 ?? 0 폴백이 "실제 defer가 있어도 항상 0"으로 보이는 정확성 결함이 됐다(자체검토로 발견). 두

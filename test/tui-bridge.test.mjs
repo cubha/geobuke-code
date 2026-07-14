@@ -31,8 +31,13 @@ test("buildGateResultEvent: kind=pass → GATE_RESULT(status:pass, specCount/def
   assert.deepEqual(buildGateResultEvent(decision, 4, 2), { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
 });
 
-test("buildGateResultEvent: doc-skip/cached/bypass/fail-open/passthrough는 전부 pass로 뭉뚱그리고, deferCount는 인자값 그대로(event 미신뢰)", () => {
-  for (const kind of ["doc-skip", "cached", "bypass", "fail-open", "passthrough"]) {
+test("buildGateResultEvent: doc-skip/cached/bypass/fail-open/passthrough/block-repeat는 전부 pass로 뭉뚱그리고, deferCount는 인자값 그대로(event 미신뢰)", () => {
+  // block-repeat(0.9.3 ST2)도 이 목록에 **의식적으로** 포함한다 — emit-direct(allow)라 사용자
+  // 관점에선 "통과"고, 안내 문구(userMessage)는 gate-sdk.ts의 gateDecisionToHookOutput이 emit-direct
+  // 공통 경로로 systemMessage에 실어 스크롤백에 이미 노출된다(fail-open과 동일 채널) — 상태줄까지
+  // 이중고지하지 않는다. scope-critic 지적(2026-07-14): 신규 kind를 이 목록 밖에 방치하면 exhaustiveness
+  // 체크 없는 else 캐치올이 "검토된 결정"과 "우연한 상속"을 구분 못 하게 되므로, 목록에 명시해 잠근다.
+  for (const kind of ["doc-skip", "cached", "bypass", "fail-open", "passthrough", "block-repeat"]) {
     const decision = { kind, output: { mode: "exit-silent" }, effects: {} }; // event 자체가 없음 — cached 등의 실제 형태
     const ev = buildGateResultEvent(decision, 0, 3);
     assert.equal(ev.type, "GATE_RESULT");

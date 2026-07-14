@@ -43,6 +43,14 @@ export interface DeferEntry {
   at: string;
   /** 수명주기 상태 — 단일 소스(옛 resolved:boolean은 읽을 때 자동 승격, 저장은 status로 통일) */
   status: DeferStatus;
+  /**
+   * 이 엔트리가 어떻게 생겼는지(0.9.3 ST4) — "ack"면 open→resolved 생애주기를 거치지 않고
+   * `gbc gate review --ack`가 즉시 resolved로 직접 등록한 것. 진짜로 미뤘다 완료한 것과 구분해
+   * `gbc defer list`가 감사 가능하게 표시한다(scope-critic 지적: 남용돼도 사후에 알 방법이
+   * 없었음 — 유일한 방어선이 SKILL.md 경고 문구뿐이라 최소 감사 채널을 코드에 남긴다).
+   * 미지정(undefined) = 기존 addDefer/resolveDefer 경로(정상 생애주기).
+   */
+  origin?: "ack";
 }
 
 /** 디스크에서 읽은 원시 엔트리 — 옛 {resolved:boolean} 포맷 하위호환 수용용 */
@@ -50,6 +58,7 @@ export interface RawDeferEntry {
   item: string;
   at: string;
   status?: DeferStatus;
+  origin?: "ack";
   /** @deprecated 0.2.4 이하 포맷 — 읽을 때만 status로 승격, 저장 시 제거 */
   resolved?: boolean;
 }
@@ -67,6 +76,8 @@ export interface PendingReview {
   source: string;
   /** 기록 시각 (ISO) */
   at: string;
+  /** 판정 당시 명세 해시(0.9.3 ST2) — 같은 작업단위(specHash)의 재발화 판별용. 빈 명세는 "". */
+  specHash: string;
 }
 
 // ===== scope 판정 (축A 파급반경 + 축B Ponytail 사다리) — 0.5.2 =====

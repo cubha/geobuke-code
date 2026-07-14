@@ -62,16 +62,20 @@ export function selectCases(cases: string[], ref: string): string[] {
 }
 
 /**
- * 펜딩 케이스를 spec-추가 / defer-등록으로 분류한다. specRefs·deferRefs는 각각 selectCases ref.
- * 한 케이스가 양쪽에 걸리면 **spec 우선**(승인이 미룸을 이긴다) — toDefer에서 toSpec 항목을 제외해
- * 같은 케이스가 spec.md와 defers.json에 이중 등록되는 것을 막는다.
+ * 펜딩 케이스를 spec-추가 / defer-등록 / ack(이미완료)로 분류한다(0.9.3 ST4 — 3분류 확장).
+ * specRefs·deferRefs·ackRefs는 각각 selectCases ref. 우선순위 spec > defer > ack — 한 케이스가
+ * 여럿에 걸리면 더 확정적인 사람 의도가 이긴다: spec 등록(승인)이 defer(미룸)를 이기고(기존 규칙),
+ * defer(사람이 의도적으로 미룸을 선언)가 ack(모델이 "이미 됐다"고 판단)보다 우선한다 — 사람이 명시
+ * 미루기로 답했는데 조용히 ack로 흡수되면 안 된다.
  */
 export function resolveRefs(
   missing: string[],
   specRefs: string,
   deferRefs: string,
-): { toSpec: string[]; toDefer: string[] } {
+  ackRefs = "",
+): { toSpec: string[]; toDefer: string[]; toAck: string[] } {
   const toSpec = selectCases(missing, specRefs);
   const toDefer = selectCases(missing, deferRefs).filter((c) => !toSpec.includes(c));
-  return { toSpec, toDefer };
+  const toAck = selectCases(missing, ackRefs).filter((c) => !toSpec.includes(c) && !toDefer.includes(c));
+  return { toSpec, toDefer, toAck };
 }

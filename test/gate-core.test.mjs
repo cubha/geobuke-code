@@ -4,7 +4,11 @@
 // 모델·디스크 없이 결정론 검증: judge/loadPlanSpec/isGated 등을 fake로 주입한다.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateGate } from "../dist/gate-core.js";
+import { evaluateGate, readCurrentFile } from "../dist/gate-core.js";
+import { computeSpecHash } from "../dist/spec.js";
+import { mkdtempSync, writeFileSync, symlinkSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function makeDeps(over = {}) {
   return {
@@ -15,8 +19,13 @@ function makeDeps(over = {}) {
     activeDeferItems: over.activeDeferItems ?? (() => []),
     resolvedDeferItems: over.resolvedDeferItems ?? (() => []),
     refreshDuringJudge: over.refreshDuringJudge,
+    readPendingReview: over.readPendingReview ?? (() => null),
+    readCurrentFile: over.readCurrentFile ?? (() => null),
   };
 }
+/** makeInput/makeDeps 기본 loadPlanSpec 텍스트의 명세 해시 — 재발화 억제 테스트가 "같은 작업단위"를
+ * 흉내내는 데 쓴다(fa-support 도그푸딩 리포트의 형제-침묵누락 반복 발화 오탐, 0.9.3 ST2). */
+const DEFAULT_SPEC_HASH = computeSpecHash("케이스 A 로그인 검증\n케이스 B 중복 이메일");
 function makeInput(over = {}) {
   return {
     toolName: over.toolName ?? "Edit",
@@ -121,6 +130,107 @@ test("pass 정상: markGated+enqueueScope, event.decision=pass, exit-gate notice
   assert.equal(refresh.calls.length, 1, "judge 경로에서만 버전 refresh 발화");
 });
 
+// ── 0.9.3 ST3: judge에 [현재 파일 상태] 클립 전달 ──
+// fa-support 도그푸딩 리포트: judge가 diff만 보고 판정해 파일에 이미 구현된 형제 케이스를 침묵
+// 누락으로 오분류하는 근본원인. deps.readCurrentFile(filePath)로 파일 현재 내용을 읽어 judge의
+// 5번째 인자로 전달한다.
+
+test("judge 호출 시 readCurrentFile(file_path) 결과를 5번째 인자로 전달", async () => {
+  const j = spyJudge();
+  await evaluateGate(
+    makeInput({ toolInput: { file_path: "src/auth.ts", old_string: "a", new_string: "b" } }),
+    makeDeps({ judge: j.fn, readCurrentFile: (p) => (p === "src/auth.ts" ? "function login() {}" : null) }),
+  );
+  assert.equal(j.calls.length, 1);
+  assert.equal(j.calls[0][4], "function login() {}", "judge(spec, edit, defers, resolved, currentFileContent)");
+});
+
+test("readCurrentFile이 null(신규 파일·조회 실패)이면 judge 5번째 인자는 undefined", async () => {
+  const j = spyJudge();
+  await evaluateGate(makeInput(), makeDeps({ judge: j.fn, readCurrentFile: () => null }));
+  assert.equal(j.calls[0][4], undefined);
+});
+
+test("readCurrentFile은 doc-skip·cached 등 judge 미호출 경로에선 호출되지 않는다(불필요 I/O 방지)", async () => {
+  let called = false;
+  const readCurrentFile = () => {
+    called = true;
+    return null;
+  };
+  await evaluateGate(
+    makeInput({ toolInput: { file_path: "README.md" } }),
+    makeDeps({ readCurrentFile }),
+  );
+  assert.equal(called, false, "doc-skip은 judge 이전에 결정되므로 파일 읽기 불필요");
+});
+
+// ── readCurrentFile 보안 보강 (security-auditor 지적, 2026-07-14) ──
+// PreToolUse는 편집이 *적용되기 전*에 실행된다 — file_path가 프로젝트 밖 임의 파일(예: 심링크로
+// 위장된 ~/.ssh/id_rsa)을 가리켜도 이 함수가 그 내용을 읽어 judge 프롬프트(→외부 API)로 실어보내면
+// 안 된다. spec.ts resolveSpecText와 동일 관례로 심링크 거부 + 병적 대용량 파일 스킵.
+
+function tmpGateCoreDir() {
+  return mkdtempSync(join(tmpdir(), "gbc-gate-core-security-"));
+}
+
+test("readCurrentFile: 일반 파일은 정상 읽는다", () => {
+  const dir = tmpGateCoreDir();
+  try {
+    const file = join(dir, "a.ts");
+    writeFileSync(file, "hello world");
+    assert.equal(readCurrentFile(file), "hello world");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readCurrentFile: 심링크는 거부(null) — 대상이 실제 파일이어도 임의 위치 읽기 차단", () => {
+  const dir = tmpGateCoreDir();
+  try {
+    const real = join(dir, "secret.txt");
+    writeFileSync(real, "민감정보");
+    const link = join(dir, "decoy.ts");
+    symlinkSync(real, link, "file");
+    assert.equal(readCurrentFile(link), null, "심링크를 따라가 민감 파일을 읽으면 안 됨");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readCurrentFile: 디렉토리 경로는 null(대상 아님)", () => {
+  const dir = tmpGateCoreDir();
+  try {
+    const sub = join(dir, "subdir");
+    mkdirSync(sub);
+    assert.equal(readCurrentFile(sub), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readCurrentFile: 존재하지 않는 파일은 null(신규 파일 — Write 대상)", () => {
+  const dir = tmpGateCoreDir();
+  try {
+    assert.equal(readCurrentFile(join(dir, "nope.ts")), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readCurrentFile: 상한(1MB) 초과 파일은 null(hot path 동기 전체로드 방지)", () => {
+  const dir = tmpGateCoreDir();
+  try {
+    const big = join(dir, "big.ts");
+    writeFileSync(big, "x".repeat(1_000_001));
+    assert.equal(readCurrentFile(big), null, "상한 초과는 스킵 — 정상 읽기와 구분");
+    const small = join(dir, "small.ts");
+    writeFileSync(small, "x".repeat(999_999));
+    assert.notEqual(readCurrentFile(small), null, "상한 이내는 정상 읽힘(경계 케이스)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("pass 빈-명세: markGated 안 함(상수 hash 영구우회 방지)·enqueue는 함·event.specHash=''", async () => {
   const j = spyJudge({ verdict: "pass", missing: [], reason: "사소한 편집" });
   const d = await evaluateGate(
@@ -183,6 +293,120 @@ test("block missing 없음: pendingReview 미기록(검토할 케이스 없음)"
   );
   assert.equal(d.kind, "block");
   assert.equal(d.effects.pendingReview, undefined, "missing 없으면 pending 기록 안 함");
+});
+
+// ── 0.9.3 ST2: 동일 missing 셋 재발화 억제 ──
+// fa-support 도그푸딩 리포트: 순차 파이프라인에서 "형제 침묵 누락" 경고가 매 편집마다 반복 발화돼
+// 노이즈였다. 같은 작업단위(specHash)에서 이미 pending-review에 기록된 missing 셋과 (정규화 후)
+// 동일하면 두 번째부터는 block 대신 block-repeat(emit-direct, permission 없음=allow)로 강등한다.
+
+test("block-repeat: 같은 specHash·같은(정규화 후) missing 셋 재발화는 block-repeat로 강등, permission 없음(허용)", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "block", missing: ["케이스 B 중복 이메일"], reason: "형제 누락" }),
+      readPendingReview: () => ({
+        missing: ["케이스 B 중복 이메일"],
+        reason: "형제 누락",
+        source: ".gbc/spec.md",
+        at: "2026-07-13T00:00:00.000Z",
+        specHash: DEFAULT_SPEC_HASH,
+      }),
+    }),
+  );
+  assert.equal(d.kind, "block-repeat");
+  assert.equal(d.output.mode, "emit-direct");
+  assert.equal(d.output.permission, undefined, "재발화는 승인 요청 없이 통과");
+  assert.match(d.output.userMessage, /gbc gate review/, "gbc gate review로 안내");
+});
+
+test("block-repeat: 정규화 후 순서만 다른 missing 셋도 재발화로 인식(순서 무관)", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({
+        verdict: "block",
+        missing: ["케이스 B 중복 이메일", "케이스 A 로그인 검증"],
+        reason: "형제 누락",
+      }),
+      readPendingReview: () => ({
+        missing: ["케이스 A 로그인 검증", "케이스 B 중복 이메일"],
+        reason: "형제 누락",
+        source: ".gbc/spec.md",
+        at: "2026-07-13T00:00:00.000Z",
+        specHash: DEFAULT_SPEC_HASH,
+      }),
+    }),
+  );
+  assert.equal(d.kind, "block-repeat");
+});
+
+test("block: pending 기록 없음(최초 발화)이면 여전히 정상 block", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "block", missing: ["케이스 B 중복 이메일"], reason: "형제 누락" }),
+      readPendingReview: () => null,
+    }),
+  );
+  assert.equal(d.kind, "block");
+  assert.equal(d.output.permission.decision, "ask");
+});
+
+test("block: missing 셋이 다르면(새 누락 추가) 재발화 아님 — 정상 block", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({
+        verdict: "block",
+        missing: ["케이스 B 중복 이메일", "케이스 C 신규"],
+        reason: "형제 누락",
+      }),
+      readPendingReview: () => ({
+        missing: ["케이스 B 중복 이메일"],
+        reason: "형제 누락",
+        source: ".gbc/spec.md",
+        at: "2026-07-13T00:00:00.000Z",
+        specHash: DEFAULT_SPEC_HASH,
+      }),
+    }),
+  );
+  assert.equal(d.kind, "block");
+});
+
+test("block: 같은 missing 셋이라도 specHash가 다르면(다른 작업단위) 재발화 아님 — 정상 block", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "block", missing: ["케이스 B 중복 이메일"], reason: "형제 누락" }),
+      readPendingReview: () => ({
+        missing: ["케이스 B 중복 이메일"],
+        reason: "형제 누락",
+        source: ".gbc/spec.md",
+        at: "2026-07-13T00:00:00.000Z",
+        specHash: "다른작업단위해시",
+      }),
+    }),
+  );
+  assert.equal(d.kind, "block");
+});
+
+test("block-repeat: pendingReview 효과는 여전히 갱신된다(최신 사유·시각 보존)", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "block", missing: ["케이스 B 중복 이메일"], reason: "형제 누락(재확인)" }),
+      readPendingReview: () => ({
+        missing: ["케이스 B 중복 이메일"],
+        reason: "형제 누락",
+        source: ".gbc/spec.md",
+        at: "2026-07-13T00:00:00.000Z",
+        specHash: DEFAULT_SPEC_HASH,
+      }),
+    }),
+  );
+  assert.deepEqual(d.effects.pendingReview.missing, ["케이스 B 중복 이메일"]);
+  assert.equal(d.effects.pendingReview.specHash, DEFAULT_SPEC_HASH);
 });
 
 test("golden capture: isGoldenCapture=true·non-failopen이면 goldenCapture 디스크립터(tool·edit·spec·expected)", async () => {

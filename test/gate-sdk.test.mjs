@@ -19,6 +19,8 @@ function makeDeps(over = {}) {
     activeDeferItems: over.activeDeferItems ?? (() => []),
     resolvedDeferItems: over.resolvedDeferItems ?? (() => []),
     refreshDuringJudge: over.refreshDuringJudge,
+    readPendingReview: over.readPendingReview ?? (() => null), // 0.9.3 ST2 — GateDeps 신규 필드
+    readCurrentFile: over.readCurrentFile ?? (() => null), // 0.9.3 ST3 — GateDeps 신규 필드
   };
 }
 function preInput(over = {}) {

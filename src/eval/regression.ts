@@ -13,6 +13,8 @@ interface Case {
   plan_spec: string;
   edit_diff: string;
   expected: "block" | "pass";
+  /** 0.9.3 ST3/ST5 — [현재 파일 상태] 골든 커버리지(fa-support 도그푸딩 오탐 케이스). 생략 시 미제공. */
+  current_file?: string;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -26,7 +28,7 @@ const results: Array<{ id: string; expected: string; got: string; ok: boolean; m
 for (const c of cases) {
   const t0 = Date.now();
   // 회귀는 defer 없는 기본 상태에서의 판정 품질을 본다.
-  const v = await judge(c.plan_spec, c.edit_diff, []);
+  const v = await judge(c.plan_spec, c.edit_diff, [], [], { currentFileContent: c.current_file });
   const ms = Date.now() - t0;
   const ok = v.verdict === c.expected;
   results.push({ id: c.id, expected: c.expected, got: v.verdict, ok, ms, reason: v.reason });
@@ -44,9 +46,10 @@ console.log(`\n===== 결과 =====`);
 console.log(`TP=${tp}(누락차단) TN=${tn}(정상통과) FP=${fp}(오탐) FN=${fn}(미탐)`);
 console.log(`정확도 ${pass}/${results.length}  ·  평균지연 ${avg}ms`);
 
-// 회귀 기준: 8/8 (스파이크 baseline). 미달 시 비정상 종료로 신호.
+// 회귀 기준: 전건 통과(baseline은 스파이크 8/8에서 시작해 0.9.3 ST5에서 fa-support 4유형 3건 추가).
+// 미달 시 비정상 종료로 신호.
 if (pass < results.length) {
-  console.error(`\n⚠️ 회귀 실패: ${pass}/${results.length} (baseline 8/8 미달)`);
+  console.error(`\n⚠️ 회귀 실패: ${pass}/${results.length} (baseline ${results.length}/${results.length} 미달)`);
   process.exit(1);
 }
 console.log(`\n✅ 회귀 통과: baseline 유지`);
