@@ -35,7 +35,7 @@ import {
 import type { SessionScore, RealM1 } from "./scoring.js";
 import { parseExtraction, extractionPath } from "./extraction.js";
 import { loadState, resetGate } from "./state.js";
-import { addDefer, loadDefers, resolveDefer, startDefer, withdrawDefer, reopenDefer, isClosedStatus } from "./defer.js";
+import { addDefer, ackDefer, loadDefers, resolveDefer, startDefer, withdrawDefer, reopenDefer, isClosedStatus } from "./defer.js";
 import { loadRepos, addRepo, removeRepo, getVerifyRunPin, setVerifyRunPin } from "./repos.js";
 import { resolveRunCommand, runRunnerCommand } from "./run.js";
 import { statVerifyResults } from "./junit.js";
@@ -48,7 +48,7 @@ import { selectedTransport, judgeM1Violation } from "./judge.js";
 import { runVerify } from "./verify.js";
 import { scaffoldVerify } from "./scaffold.js";
 import type { CaseVerdict } from "./types.js";
-import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER, assessRepoHealth } from "./install.js";
+import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER, assessRepoHealth, GBC_SKILL_NAMES } from "./install.js";
 import { readProjectSettings } from "./notice.js";
 import {
   isCacheStale,
@@ -129,7 +129,7 @@ async function cmdInit(args: string[]): Promise<void> {
   const claudeDir = join(cwd, ".claude");
   const settingsPath = join(claudeDir, "settings.json");
   // 설치 대상 스킬들(제품소스 skills/<name>/SKILL.md → .claude/skills/<name>/SKILL.md).
-  const skillNames = ["gate", "gbc-mute", "gbc-monitor"];
+  const skillNames: readonly string[] = GBC_SKILL_NAMES;
 
   if (!yes) {
     console.log(`🐢 gbc init — 다음을 수행합니다 (프로젝트 로컬만, 전역 ~/.claude 미변경):
@@ -329,7 +329,9 @@ function cmdDefer(args: string[]): void {
       resolved: "해결",
       withdrawn: "철회",
     };
-    defers.forEach((d, i) => console.log(`${i + 1}. [${label[d.status]}] ${d.item}`));
+    defers.forEach((d, i) =>
+      console.log(`${i + 1}. [${label[d.status]}${d.origin === "ack" ? "·ack" : ""}] ${d.item}`),
+    );
   } else if (sub === "start" || sub === "resolve" || sub === "withdraw" || sub === "reopen") {
     const ref = args.slice(1).join(" ").trim();
     if (!ref) {
@@ -655,31 +657,38 @@ async function cmdGateSnapshotReplay(cwd: string, args: string[]): Promise<void>
   console.log("✅ 드리프트 없음 — 캡처 시점과 동일 판정.");
 }
 
-/** `gbc gate review` 인자에서 --spec/--defer 뒤의 비-플래그 토큰을 각각 모아 ref 문자열로. */
-function parseReviewArgs(args: string[]): { specRefs: string; deferRefs: string } {
-  let cur: "spec" | "defer" | null = null;
+/** `gbc gate review` 인자에서 --spec/--defer/--ack 뒤의 비-플래그 토큰을 각각 모아 ref 문자열로. */
+function parseReviewArgs(args: string[]): { specRefs: string; deferRefs: string; ackRefs: string } {
+  let cur: "spec" | "defer" | "ack" | null = null;
   const spec: string[] = [];
   const defer: string[] = [];
+  const ack: string[] = [];
   for (const a of args) {
     if (a === "--spec") {
       cur = "spec";
     } else if (a === "--defer") {
       cur = "defer";
+    } else if (a === "--ack") {
+      cur = "ack";
     } else if (a.startsWith("--")) {
       cur = null; // 알 수 없는 플래그 — 수집 중단
     } else if (cur === "spec") {
       spec.push(a);
     } else if (cur === "defer") {
       defer.push(a);
+    } else if (cur === "ack") {
+      ack.push(a);
     }
   }
-  return { specRefs: spec.join(" "), deferRefs: defer.join(" ") };
+  return { specRefs: spec.join(" "), deferRefs: defer.join(" "), ackRefs: ack.join(" ") };
 }
 
 /**
- * 게이트 block이 도출한 펜딩 누락 케이스를 사람-승인 체크리스트로 일괄 분류한다(A1).
+ * 게이트 block이 도출한 펜딩 누락 케이스를 사람-승인 체크리스트로 일괄 분류한다(A1, 0.9.3 ST4에서
+ * 3분류로 확장).
  * - 인자 없음: 번호 체크리스트만 표시(검토 모드).
- * - --spec/--defer refs: 승인→spec.md 등록 / 미룸→defer 등록(겹치면 spec 우선), 후 펜딩 비움.
+ * - --spec/--defer/--ack refs: 승인→spec.md 등록 / 미룸→defer 등록 / 이미완료→resolved 직접 등록
+ *   (겹치면 spec > defer > ack 우선), 후 펜딩 비움.
  */
 function cmdGateReview(cwd: string, args: string[]): void {
   const pending = readPendingReview(cwd);
@@ -688,23 +697,23 @@ function cmdGateReview(cwd: string, args: string[]): void {
     return;
   }
 
-  const { specRefs, deferRefs } = parseReviewArgs(args);
+  const { specRefs, deferRefs, ackRefs } = parseReviewArgs(args);
 
   // 분류 ref 없음 = 체크리스트만(검토 모드)
-  if (specRefs === "" && deferRefs === "") {
+  if (specRefs === "" && deferRefs === "" && ackRefs === "") {
     console.log(
       `🐢 펜딩 누락 케이스 ${pending.missing.length}건 (사유: ${pending.reason} · 소스: ${pending.source}):`,
     );
     pending.missing.forEach((c, i) => console.log(`  ${i + 1}. ${c}`));
     console.log(
-      `→ 분류: gbc gate review --spec <번호|텍스트|all> --defer <번호|텍스트|all>\n` +
-        `  (승인→spec.md / 미룸→defer. 겹치면 spec 우선. 분류 후 펜딩은 비워지고, 재편집 시 등록 기준으로 재판정)`,
+      `→ 분류: gbc gate review --spec <번호|텍스트|all> --defer <번호|텍스트|all> --ack <번호|텍스트|all>\n` +
+        `  (승인→spec.md / 미룸→defer / 이미완료→ack. 겹치면 spec>defer>ack 순 우선. 분류 후 펜딩은 비워지고, 재편집 시 등록 기준으로 재판정)`,
     );
     return;
   }
 
-  const { toSpec, toDefer } = resolveRefs(pending.missing, specRefs, deferRefs);
-  if (toSpec.length === 0 && toDefer.length === 0) {
+  const { toSpec, toDefer, toAck } = resolveRefs(pending.missing, specRefs, deferRefs, ackRefs);
+  if (toSpec.length === 0 && toDefer.length === 0 && toAck.length === 0) {
     console.error("ref가 어떤 펜딩 케이스에도 매칭되지 않았습니다 — 'gbc gate review'로 번호를 확인하세요.");
     process.exit(1);
   }
@@ -730,12 +739,24 @@ function cmdGateReview(cwd: string, args: string[]): void {
       deferDup.push(c);
     }
   }
+  const ackAdded: string[] = [];
+  const ackDup: string[] = [];
+  for (const c of toAck) {
+    if (ackDefer(cwd, c).added) {
+      logCli(cwd, "gate-ack", beforeHash);
+      ackAdded.push(c);
+    } else {
+      ackDup.push(c);
+    }
+  }
   clearPendingReview(cwd);
 
   if (specAdded.length > 0) console.log(`🐢 명세 등록 ${specAdded.length}건: ${specAdded.join(", ")}`);
   if (deferAdded.length > 0) console.log(`🐢 미룸 등록 ${deferAdded.length}건: ${deferAdded.join(", ")}`);
-  if (specDup.length + deferDup.length > 0) {
-    console.log(`🐢 중복 skip ${specDup.length + deferDup.length}건: ${[...specDup, ...deferDup].join(", ")}`);
+  if (ackAdded.length > 0) console.log(`🐢 이미완료 등록 ${ackAdded.length}건: ${ackAdded.join(", ")}`);
+  const allDup = [...specDup, ...deferDup, ...ackDup];
+  if (allDup.length > 0) {
+    console.log(`🐢 중복 skip ${allDup.length}건: ${allDup.join(", ")}`);
   }
   console.log("→ 검토 완료(펜딩 비움). 같은 편집을 재시도하면 등록된 케이스 기준으로 재판정됩니다.");
 }
@@ -826,7 +847,7 @@ function cmdMetrics(args: string[]): void {
   [진짜 M1 — A2 사후대조 (extraction⨝events)]
     세션: 전체 ${real.sessions.total} · 채점가능(A-mode) ${real.sessions.scorable}
     오탐율(행동신호): ${pct(fp.rate)} — block ${fp.totalBlocks}건 중 오탐후보 ${fp.fpCandidates}${fp.failedOpen ? ` (판정불능 ${fp.failedOpen} 분모제외)` : ""}
-      해소(spec보강) ${fp.resolvedSpec} · 자가수정 ${fp.selfCorrected} · 무시 ${fp.overridden} · 포기 ${fp.abandoned}${fp.ambiguous ? ` · 귀속불확실 ${fp.ambiguous}` : ""}
+      해소(spec보강) ${fp.resolvedSpec} · 자가수정 ${fp.selfCorrected} · 재발화미해소 ${fp.repeatedUnresolved} · 오탐인정(ack) ${fp.acknowledgedFp} · 무시 ${fp.overridden} · 포기 ${fp.abandoned}${fp.ambiguous ? ` · 귀속불확실 ${fp.ambiguous}` : ""}
     위반율(LLM 사후대조): ${pct(v.rate)} — 채점 ${v.scored}건 중 위반 ${v.violated}${v.unscored ? ` (미채점 ${v.unscored})` : ""}${
       v.scored === 0 && real.sessions.scorable > 0 ? "\n      → 'gbc score'로 A-mode 세션 채점 실행" : ""
     }${real.sessions.scorable === 0 ? "\n      → 채점 대상 없음('gbc run' A-mode 세션이 extraction을 남김)" : ""}`);
@@ -1088,7 +1109,34 @@ async function cmdRun(args: string[]): Promise<void> {
  * 원시 스택트레이스 대신 실행 가능한 안내를 낸다. 분류 안 되면(classify가 null) 원본 에러를
  * 그대로 던져 main()의 범용 핸들러가 노출한다 — 진단 실패를 거짓 안내로 덮지 않는다.
  */
+/**
+ * 스플래시 위에 섞이던 것이 ink/agent-sdk의 실험적 API 사용 경고(ExperimentalWarning)뿐이라는
+ * 실사용 확인(2026-07-14) — 이 이름만 화이트리스트로 좁힌다. DeprecationWarning 등 그 외 경고는
+ * GBC_DEBUG 무관하게 항상 흘려보낸다(security-auditor 지적: 블랭킷 억제는 실제로 중요한 보안·
+ * 호환성 경고까지 기본으로 감춘다).
+ */
+const SUPPRESSED_WARNING_NAMES = new Set(["ExperimentalWarning"]);
+
+/**
+ * 0.9.3 D3 — Node는 부트스트랩 시점에 자신의 기본 warning 프린터를 'warning' 이벤트 리스너로
+ * *등록*해둔다(lib/internal/process/warning.js) — 단순히 리스너를 추가로 다는 것만으로는 이
+ * 기본 프린터를 막지 못한다(실측 확인: 리스너 유무와 무관하게 "Use `node --trace-warnings ...`"
+ * 배너가 그대로 stderr에 찍힘). 기본 프린터 자체를 제거해야 하므로 removeAllListeners로 걷어낸
+ * 뒤 화이트리스트 조건부 리스너로 교체한다 — 억제 대상(ExperimentalWarning)만 GBC_DEBUG=1일 때
+ * 원본을 그대로 다시 내보내고, 그 외 경고는 항상 stderr에 낸다(Node 기본 프린터를 대신함).
+ */
+function suppressNodeWarnings(): void {
+  process.removeAllListeners("warning");
+  process.on("warning", (w) => {
+    const suppress = SUPPRESSED_WARNING_NAMES.has(w.name);
+    if (!suppress || process.env.GBC_DEBUG === "1") {
+      process.stderr.write(`${String(w.stack ?? w)}\n`);
+    }
+  });
+}
+
 async function cmdTui(args: string[]): Promise<void> {
+  suppressNodeWarnings();
   const cwd = process.cwd();
   const mi = args.indexOf("--model");
   const model = mi >= 0 ? args[mi + 1] : undefined;
@@ -1100,9 +1148,10 @@ async function cmdTui(args: string[]): Promise<void> {
     ]);
     // exitOnCtrlC:false(0.9.2 ST10) — ink 기본은 첫 Ctrl+C에서 바로 프로세스를 죽인다. app.tsx가
     // 2단 확인(한 번 더 눌러야 종료)을 직접 구현하므로 ink의 즉시종료를 꺼야 한다.
-    const { waitUntilExit } = render(React.createElement(App, { cwd, ...(model ? { model } : {}) }), {
-      exitOnCtrlC: false,
-    });
+    const { waitUntilExit } = render(
+      React.createElement(App, { cwd, version: PKG_VERSION, ...(model ? { model } : {}) }),
+      { exitOnCtrlC: false },
+    );
     await waitUntilExit();
   } catch (e) {
     const diagnosis = classifyTuiStartupError(String(e), readTuiDepsVersions());
@@ -1141,8 +1190,8 @@ function usage(): void {
                                       spec 유래 명령 실행 금지(RCE). --save=홈 pin(~/.gbc/verify-run.json) 저장
   gbc gate reset                      작업단위 게이트만 리셋(명세 보존·같은 단위 재게이트)
   gbc gate review                     block이 도출한 누락 케이스 체크리스트 보기
-  gbc gate review --spec <ref> --defer <ref>
-                                      누락 케이스 일괄 분류(승인→spec / 미룸→defer)
+  gbc gate review --spec <ref> --defer <ref> --ack <ref>
+                                      누락 케이스 일괄 분류(승인→spec / 미룸→defer / 이미완료→ack)
   gbc gate snapshot <on|off|status|list|clear>
                                       골든셋 캡처 토글·상태(판정 드리프트 회귀락, 로컬 전용)
   gbc gate snapshot replay [--samples N]

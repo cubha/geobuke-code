@@ -16,7 +16,9 @@ function deferPath(cwd: string): string {
 function promote(raw: RawDeferEntry): DeferEntry {
   const status: DeferEntry["status"] =
     raw.status ?? (raw.resolved === true ? "resolved" : "open");
-  return { item: raw.item, at: raw.at, status };
+  return raw.origin === "ack"
+    ? { item: raw.item, at: raw.at, status, origin: "ack" }
+    : { item: raw.item, at: raw.at, status };
 }
 
 /** 디스크에서 defer 엔트리를 읽어 status 포맷으로 정규화 반환(읽기 시 자동 승격). 비배열 JSON은 [](R3). */
@@ -51,6 +53,27 @@ export function addDefer(cwd: string, item: string): { entry: DeferEntry; added:
   const dup = defers.find((d) => !isClosedStatus(d.status) && d.item === normalized);
   if (dup) return { entry: dup, added: false };
   const entry: DeferEntry = { item: normalized, at: nowIso(), status: "open" };
+  defers.push(entry);
+  save(cwd, defers);
+  return { entry, added: true };
+}
+
+/**
+ * "이미 완료된 항목"을 직접 등록한다(0.9.3 ST4 — gate review --ack). addDefer와 달리 open으로
+ * 시작하지 않는다: 애초에 미룬 적 없는 케이스가 게이트 judge에게 "누락"으로 잘못 도출됐지만
+ * 실제로는 이미 구현돼 있는 경우, resolved로 바로 기록해 resolvedDeferItems()가 즉시 judge의
+ * [이미 완료된 항목]에 실어 재차단(re-flag)을 막는다. fa-support 리포트: "오탐 시 에이전트가
+ * '이미 완료'를 기계가독으로 응답해 게이트를 통과시키는 경량 채널" 요청에 대응.
+ * 중복 감지: 정규화 텍스트가 이미 **resolved** 상태로 있으면 새로 추가하지 않는다(addDefer의
+ * 미해결-dedup과 대칭 — 여긴 "이미 완료로 기록된" 것과의 중복만 막는다).
+ * @returns { entry, added } — added=false면 entry는 기존(resolved) 항목.
+ */
+export function ackDefer(cwd: string, item: string): { entry: DeferEntry; added: boolean } {
+  const defers = loadDefers(cwd);
+  const normalized = normalizeCase(item);
+  const dup = defers.find((d) => d.status === "resolved" && d.item === normalized);
+  if (dup) return { entry: dup, added: false };
+  const entry: DeferEntry = { item: normalized, at: nowIso(), status: "resolved", origin: "ack" };
   defers.push(entry);
   save(cwd, defers);
   return { entry, added: true };

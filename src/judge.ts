@@ -99,7 +99,7 @@ export function resolveApiKey(opts: KeyResolveOpts = {}): string | null {
  * 침묵 누락(언급도 명시 defer도 없이 빠뜨림)과 시나리오 미지정만 차단한다.
  */
 const GATE_SYSTEM = `너는 코드 구현 직전에 동작하는 "게이트"다. 개발자가 막 파일을 편집하려 한다.
-[계획 명세]·[현재 편집]·[명시적으로 미룬 항목]을 보고 통과(pass)/차단(block)을 판정하라.
+[계획 명세]·[현재 파일 상태]·[현재 편집]·[명시적으로 미룬 항목]을 보고 통과(pass)/차단(block)을 판정하라.
 
 [1단계 — 편집의 종류 분류]
 이 편집이 프로그램의 *동작(behavior)을 구현하거나 바꾸는* 코드 편집인가, 아니면 동작과 무관한 편집인가?
@@ -114,6 +114,8 @@ const GATE_SYSTEM = `너는 코드 구현 직전에 동작하는 "게이트"다.
     - 코드 주석으로 "나중에"라고만 적고 미룬 항목에 등록 안 한 것도 침묵 누락이다.
     - 계획이 요구한 동작 형태(예: 인라인 에러 메시지)를 충족 못 하고 다른 형태(예: bool만 반환)로 빠뜨린 것도 누락이다.
     - ★ [이미 완료된 항목]에 있는 케이스는 **이전 작업단위에서 이미 처리된 것**이다. 형제 후보에서 제외하고 절대 누락으로 다시 차단(re-flag)하지 마라. 이 편집과 무관한 과거 완료 케이스를 침묵누락이라 막는 것은 오탐이다.
+    - ★ [현재 파일 상태] 섹션이 있다면 **[현재 편집](diff)만 보지 말고 파일 전체를 확인하라** — 이 편집이 다루지 않은 형제 케이스가 diff 밖 다른 부분에 **이미 구현돼 있을 수 있다**. 그런 형제는 missing에 넣지 마라(침묵 누락이 아니라 이미 반영됨 — diff에 안 보인다고 없는 게 아니다). [현재 파일 상태] 섹션이 없으면(신규 파일 등) 이 판단은 생략하고 diff만으로 판정한다 — 섹션이 없다는 것 자체를 별도 신호로 해석하지 마라(예: "신규 파일이라 미구현"으로 확대해석 금지, 1단계 분류에도 영향 없음).
+    - ★★ [현재 편집]이 "(전체 작성/덮어쓰기)"로 표시돼 있으면(Write — 파일 전체를 새 내용으로 교체) [현재 파일 상태]는 **곧 사라질 구버전**이다. 이때는 위 규칙이 거꾸로 적용된다: 구버전에만 있고 [현재 편집]의 새 전체 내용에는 없는 형제 케이스는 "이미 구현됨"이 아니라 **덮어쓰기로 삭제되는 회귀**다 — missing에서 빼지 말고 그대로 침묵 누락으로 취급하라. "diff 밖에 이미 구현돼 있으면 missing 제외" 규칙은 Edit/MultiEdit(파일 일부만 바뀌고 나머지는 그대로 남는 경우)에만 적용된다.
     - ★ missing에 넣는 항목은 [계획 명세]의 해당 케이스를 **원문 그대로 인용**하라(재서술·요약·ID 재조합 금지). 계획 명세에 적혀 있지 않은 항목을 만들어 넣지 마라 — 편집 본문이 언급하는 미래 작업은 missing이 아니다.
 (c) 위에 해당 없으면 → **pass**.
 
@@ -124,13 +126,24 @@ const GATE_SYSTEM = `너는 코드 구현 직전에 동작하는 "게이트"다.
 오직 아래 JSON만 출력(설명·마크다운 펜스 금지):
 {"verdict":"block"|"pass","missing":["누락된 케이스"],"reason":"한 줄 사유"}`;
 
+const MAX_CURRENT_FILE = 8000; // [현재 파일 상태] 절단(프롬프트 비대화 방지) — MAX_REVIEW_CODE와 동형
+
 function buildUserMessage(
   planSpec: string,
   editText: string,
   defers: string[],
   resolved: string[] = [],
+  currentFileContent?: string,
 ): string {
   const fmt = (xs: string[]): string => (xs.length > 0 ? xs.map((d) => `- ${d}`).join("\n") : "(없음)");
+  const trimmed = (currentFileContent ?? "").trim();
+  // 0.9.3 ST3 골든replay 실측(4-함정_문서수정 flip): 미제공 시 "(제공되지 않음)" 플레이스홀더를
+  // 보여주면 모델이 "신규 파일"이라는 문구에 낚여 이미 pass로 정리됐던 무관 편집(step1)까지
+  // 재검토해 block으로 뒤집는 오염이 관측됐다. 섹션 자체를 통째로 생략(placeholder 텍스트 자체가
+  // 신호가 되지 않게) — GATE_SYSTEM도 "섹션이 없으면 diff만으로 판정"으로 맞춰 갱신.
+  const fileStateSection = trimmed
+    ? `\n\n[현재 파일 상태]\n${trimmed.length > MAX_CURRENT_FILE ? trimmed.slice(0, MAX_CURRENT_FILE) + "\n…(절단됨)" : trimmed}`
+    : "";
   return `[계획 명세]
 ${planSpec.trim() || "(계획 명세 없음 — 개발자가 곧바로 구현을 시작함)"}
 
@@ -138,7 +151,7 @@ ${planSpec.trim() || "(계획 명세 없음 — 개발자가 곧바로 구현을
 ${fmt(defers)}
 
 [이미 완료된 항목]
-${fmt(resolved)}
+${fmt(resolved)}${fileStateSection}
 
 [현재 편집]
 ${editText}`;
@@ -323,9 +336,9 @@ export async function judge(
   editText: string,
   defers: string[] = [],
   resolved: string[] = [],
-  opts: { temperature?: number } = {},
+  opts: { temperature?: number; currentFileContent?: string } = {},
 ): Promise<Verdict> {
-  const user = buildUserMessage(planSpec, editText, defers, resolved);
+  const user = buildUserMessage(planSpec, editText, defers, resolved, opts.currentFileContent);
   const transport = selectedTransport();
   try {
     // claude -p 폴백은 temperature 플래그가 없어 핀 불가 → CLI-transport replay는 best-effort.

@@ -8,6 +8,15 @@ function clip(s: string | undefined): string {
 }
 
 /**
+ * 이 편집이 파일을 통째로 생성/덮어쓰는가(Write 또는 Write와 동형 입력)(0.9.3 ST3 — judge에게
+ * [현재 파일 상태]가 "곧 사라질 구버전"인지 알려주는 신호로도 재사용). normalizeEdit의 Write 분기
+ * 조건과 단일 소스 — 두 곳이 각자 판정하면 드리프트한다.
+ */
+export function isOverwriteEdit(toolName: string, input: EditToolInput): boolean {
+  return toolName === "Write" || (input.content !== undefined && !input.old_string && !input.edits);
+}
+
+/**
  * PreToolUse tool_input(Edit/Write/MultiEdit)을 게이트 프롬프트용
  * diff 유사 텍스트로 정규화한다. tool_name으로 분기.
  */
@@ -15,7 +24,7 @@ export function normalizeEdit(toolName: string, input: EditToolInput): string {
   const file = input.file_path ?? "(파일경로 없음)";
 
   // Write: 파일 전체 생성/덮어쓰기
-  if (toolName === "Write" || (input.content !== undefined && !input.old_string && !input.edits)) {
+  if (isOverwriteEdit(toolName, input)) {
     return `--- ${file} (전체 작성/덮어쓰기)\n+ ${clip(input.content)}`;
   }
 

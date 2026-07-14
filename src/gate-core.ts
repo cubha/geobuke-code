@@ -4,6 +4,7 @@
 // judge는 JudgeFn으로 주입 → 모델 없이 분기 결정론 단위 테스트 가능(이 추출의 회귀락 = ST4 SDK 회귀락).
 // 이 파일은 hook.ts를 import하지 않는다(단방향: hook.ts → gate-core.ts). SDK/@anthropic은 judge 안에서만
 // lazy import되고, defaultGateDeps가 judge를 lazy dynamic import로 감싸 핫패스 zero-dep을 보존한다.
+import { readFileSync, lstatSync } from "node:fs";
 import { normalizeEdit, isGatedTool } from "./normalize.js";
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated } from "./state.js";
@@ -11,7 +12,9 @@ import { isGoldenCapture } from "./config.js";
 import { activeDeferItems, resolvedDeferItems } from "./defer.js";
 import { goldenCaseId } from "./golden.js";
 import { nowIso } from "./time.js";
-import type { EditToolInput, Verdict, GoldenCase } from "./types.js";
+import { normalizeCase } from "./text.js";
+import { readPendingReview } from "./review.js";
+import type { EditToolInput, Verdict, GoldenCase, PendingReview } from "./types.js";
 import type { GateEvent } from "./metrics.js";
 
 /** 코드 파일 확장자(scope 큐잉 대상 — 문서/설정 편집은 파급반경·사다리 판정 대상 아님). */
@@ -75,7 +78,15 @@ export function shouldCacheVerdict(verdict: Verdict, specEmpty: boolean): boolea
 // ===== GateDecision 디스크립터 =====
 
 /** 판정 분기 종류(평탄화 금지 — passthrough≠bypass≠doc-skip, cached≠pass, fail-open≠pass). */
-export type GateKind = "passthrough" | "bypass" | "doc-skip" | "cached" | "pass" | "fail-open" | "block";
+export type GateKind =
+  | "passthrough"
+  | "bypass"
+  | "doc-skip"
+  | "cached"
+  | "pass"
+  | "fail-open"
+  | "block"
+  | "block-repeat";
 
 /**
  * 응답 채널(transport-neutral). emit-JSON 모양으로 굳히지 않는다 — stdin-emit 매퍼/SDK-반환 매퍼가 번역.
@@ -110,7 +121,7 @@ export interface GateEffects {
   /** scope 큐잉(축A/축B 사후판정 예약) — 코드파일 pass 편집. */
   enqueueScope?: { toolName: string; input: EditToolInput; editText: string; specHash: string };
   /** 침묵-누락 케이스를 pending-review에 기록(gbc gate review 회수용) — missing 있을 때만. */
-  pendingReview?: { missing: string[]; reason: string; source: string; at: string };
+  pendingReview?: PendingReview;
   /** 골든셋 캡처(opt-in, fail-open 제외). */
   goldenCapture?: GoldenCase;
 }
@@ -130,6 +141,7 @@ export type JudgeFn = (
   editText: string,
   defers: string[],
   resolved: string[],
+  currentFileContent?: string,
 ) => Promise<Verdict>;
 
 /** evaluateGate 입력(트랜스포트가 자기 형식에서 정규화해 전달). */
@@ -156,6 +168,40 @@ export interface GateDeps {
   resolvedDeferItems: (cwd: string) => string[];
   /** judge와 병렬로 도는 버전캐시 refresh 발화(선택). undefined면 refresh 안 함. */
   refreshDuringJudge?: () => Promise<void>;
+  /** 직전 block이 남긴 펜딩-검토 레코드(0.9.3 ST2 — 동일 missing 셋 재발화 판별용). 없으면 null. */
+  readPendingReview: (cwd: string) => PendingReview | null;
+  /**
+   * 편집 대상 파일의 현재(편집 전) 내용(0.9.3 ST3 — judge가 diff만으로 못 보는 기구현 형제 케이스를
+   * 판별하게 함). 신규 파일·읽기 실패는 null(판정에서 [현재 파일 상태] 섹션 생략).
+   */
+  readCurrentFile: (filePath: string) => string | null;
+}
+
+/**
+ * 읽기 상한(바이트) — judge.ts의 MAX_CURRENT_FILE(8000자)가 어차피 절단하므로 그보다 훨씬
+ * 넉넉하되(정상 소스 파일은 다 통과) 병적으로 큰 파일을 hot path에서 동기 전체 로드하는 것만
+ * 막는다(security-auditor 지적 — PreToolUse가 파일 크기 사전 확인 없이 동기 readFileSync).
+ */
+const MAX_READ_BYTES = 1_000_000;
+
+/**
+ * 편집 대상 파일의 현재 내용을 읽는다(0.9.3 ST3, security-auditor 보강). PreToolUse는 편집이
+ * *적용되기 전*에 실행되므로, file_path가 프로젝트 밖 임의 파일(예: 심링크로 위장된 ~/.ssh/id_rsa)을
+ * 가리켜도 이 함수가 그 내용을 읽어 judge 프롬프트로(→ 외부 API) 실어보낼 위험이 있다 — spec.ts
+ * resolveSpecText·verify.ts와 동일한 관례로 심링크를 거부한다. 크기 상한 초과도 null(스킵) —
+ * 둘 다 "실패로 보이지 않게" null 반환해 [현재 파일 상태] 섹션이 조용히 생략되게 한다(기존 계약:
+ * null=신규 파일/조회 실패와 동일하게 다뤄짐, 게이트 판정 자체를 막지 않는다).
+ */
+export function readCurrentFile(filePath: string): string | null {
+  try {
+    const st = lstatSync(filePath);
+    if (st.isSymbolicLink()) return null; // 심링크 거부 — 임의 파일 읽기 차단
+    if (!st.isFile()) return null; // 디렉토리 등은 대상 아님
+    if (st.size > MAX_READ_BYTES) return null; // 병적 대용량 — hot path 동기 전체로드 방지
+    return readFileSync(filePath, "utf8");
+  } catch {
+    return null; // 신규 파일(아직 생성 전)이거나 읽기 실패 — [현재 파일 상태] 섹션 생략으로 흡수
+  }
 }
 
 /**
@@ -164,14 +210,16 @@ export interface GateDeps {
  */
 export function defaultGateDeps(refreshDuringJudge?: () => Promise<void>): GateDeps {
   return {
-    judge: async (spec, edit, defers, resolved) =>
-      (await import("./judge.js")).judge(spec, edit, defers, resolved),
+    judge: async (spec, edit, defers, resolved, currentFileContent) =>
+      (await import("./judge.js")).judge(spec, edit, defers, resolved, { currentFileContent }),
     loadPlanSpec,
     isGated,
     isGoldenCapture,
     activeDeferItems,
     resolvedDeferItems,
     refreshDuringJudge,
+    readPendingReview,
+    readCurrentFile,
   };
 }
 
@@ -233,8 +281,11 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
   const editText = normalizeEdit(toolName, input.toolInput ?? {});
   const defers = deps.activeDeferItems(cwd);
   const resolved = deps.resolvedDeferItems(cwd);
+  // 0.9.3 ST3 — 편집 대상 파일의 현재 내용을 judge에 함께 전달(diff만으로 못 보는 기구현 형제 판별용).
+  const filePath = input.toolInput?.file_path;
+  const currentFileContent = filePath ? deps.readCurrentFile(filePath) ?? undefined : undefined;
   const refreshP = deps.refreshDuringJudge ? deps.refreshDuringJudge() : null;
-  const verdict = await deps.judge(specText, editText, defers, resolved);
+  const verdict = await deps.judge(specText, editText, defers, resolved, currentFileContent);
   if (refreshP) await refreshP; // judge 동안 이미 완료 — 이 편집의 notice가 갱신된 캐시를 읽도록
 
   const effects: GateEffects = {};
@@ -287,7 +338,29 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
   const reason = buildBlockReason(verdict, specEmpty, source);
   // 침묵-누락 케이스(missing[])를 펜딩-검토에 기록 → 'gbc gate review'가 번호 체크리스트로 회수.
   if (verdict.missing.length > 0) {
-    effects.pendingReview = { missing: verdict.missing, reason: verdict.reason, source, at: nowIso() };
+    // 0.9.3 ST2 — 같은 작업단위(specHash)에서 이미 펜딩-검토에 기록된 missing 셋과 (정규화 후)
+    // 동일하면 재발화로 본다(fa-support 도그푸딩 리포트: 순차 파이프라인에서 아직 안 다룬 후속
+    // SubTask가 매 편집마다 같은 문구로 재차단되던 노이즈). specEmpty는 대상 아님(그쪽은 ST1의
+    // walk-up이 근본원인) — 여긴 missing[] 기반 침묵-누락 반복만 다룬다.
+    const prior = deps.readPendingReview(cwd);
+    const isRepeat = !specEmpty && prior?.specHash === specHash && sameMissingSet(prior.missing, verdict.missing);
+    effects.pendingReview = { missing: verdict.missing, reason: verdict.reason, source, at: nowIso(), specHash: logHash };
+    if (isRepeat) {
+      return {
+        kind: "block-repeat",
+        output: {
+          mode: "emit-direct",
+          userMessage:
+            `🐢 거북이 게이트 — 같은 누락 케이스가 이미 안내됐습니다(재알림 생략): ${verdict.reason}\n` +
+            `→ 'gbc gate review'로 분류하거나 지금 다루세요.`,
+        },
+        effects,
+        event: {
+          at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName,
+          decision: "block-repeat", missing: verdict.missing, deferCount: defers.length,
+        },
+      };
+    }
   }
   const mode = env.GBC_BLOCK_MODE === "deny" ? "deny" : "ask";
   return {
@@ -299,4 +372,12 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
       decision: "block", missing: verdict.missing, deferCount: defers.length,
     },
   };
+}
+
+/** missing 셋 동일성 비교(순서 무관, 정규화 후) — 재발화 판별용(0.9.3 ST2). */
+function sameMissingSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const na = a.map(normalizeCase).sort();
+  const nb = b.map(normalizeCase).sort();
+  return na.every((v, i) => v === nb[i]);
 }

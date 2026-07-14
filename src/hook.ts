@@ -18,7 +18,7 @@ import {
 } from "./version.js";
 import { appendFileSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { gbcDir } from "./store.js";
+import { gbcDir, resolveProjectRoot } from "./store.js";
 import { nowIso } from "./time.js";
 import { logEvent } from "./metrics.js";
 import {
@@ -208,7 +208,10 @@ async function preToolUseBody(ctx?: HookContext, onCwd?: (cwd: string) => void):
   const input = parseHookInput<PreToolUseInput>(await readStdin());
   if (input === null) process.exit(0); // 입력 파싱 실패 → 안전하게 통과(fail-open)
 
-  const cwd = input.cwd || process.cwd();
+  // 0.9.3 ST1 — 조상 walk-up으로 프로젝트 루트를 찾는다. hook 진입 cwd가 프로젝트 루트 하위
+  // 디렉토리면 loadPlanSpec(조상 탐색 없음)이 spec.md를 못 찾아 "명세 소스: (없음)"으로 오판하던
+  // 근본원인(fa-support 도그푸딩 리포트, 2026-07-13)을 이 진입점에서 정정한다.
+  const cwd = resolveProjectRoot(input.cwd || process.cwd());
   onCwd?.(cwd);
   const session = input.session_id ?? "";
 
@@ -425,7 +428,11 @@ async function stopBody(onCwd?: (cwd: string) => void): Promise<void> {
   // 이미 한 번 리마인드해 계속 진행 중이면 루프 방지 위해 통과(scope·defer 둘 다 1회만)
   if (input.stop_hook_active === true) process.exit(0);
 
-  const cwd = input.cwd || process.cwd();
+  // 0.9.3 ST1(scope-critic 발견 확대) — PreToolUse만 resolveProjectRoot를 적용하면 같은 세션의
+  // scope-queue.json을 PreToolUse(resolve된 cwd)는 프로젝트 루트에 쓰고 Stop(raw cwd)은 하위
+  // 디렉토리에서 읽어 producer/consumer가 갈라지는 새 회귀가 난다(수정 전엔 둘 다 raw라 최소
+  // 일치했음). loadDefers·loadPlanSpec(processScopeQueue 내부)도 동일 근본원인이라 여기서 함께 정정.
+  const cwd = resolveProjectRoot(input.cwd || process.cwd());
   onCwd?.(cwd);
   const session = (input as { session_id?: string }).session_id ?? "";
 
@@ -580,7 +587,10 @@ export function runSessionStart(ctx?: HookContext): Promise<void> {
 async function sessionStartBody(ctx?: HookContext, onCwd?: (cwd: string) => void): Promise<void> {
   const input = parseHookInput<SessionStartInput>(await readStdin());
   if (input === null) process.exit(0); // 입력 파싱 실패 → 안전하게 통과(fail-open)
-  const cwd = input.cwd || process.cwd();
+  // 0.9.3 ST1 — PreToolUse/Stop과 동일 이유로 SessionStart도 프로젝트 루트로 정정(loadDefers가
+  // 하위 디렉토리 cwd에서 defers.json을 못 찾아 "미해결 0건"으로 오판하는 것 방지, 세 진입점의
+  // input.cwd 해석 계약을 일관되게 유지).
+  const cwd = resolveProjectRoot(input.cwd || process.cwd());
   onCwd?.(cwd);
   // 청중분리(Option X): contextParts는 additionalContext(Claude 컨텍스트), userNotice는
   // systemMessage(사용자 직접 배너). buildSessionStartPayload가 JSON 직렬화.

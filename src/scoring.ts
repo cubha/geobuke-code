@@ -95,6 +95,23 @@ export type BlockOutcome =
   | "resolved-spec"
   /** block → spec 변화 없이 같은 세션 pass/cached: 편집 수정으로 통과 — 정상도 오탐도 아닌 모호 */
   | "self-corrected"
+  /**
+   * block → 같은 세션 block-repeat(0.9.3 ST2, 동일 missing 셋 재발화 강등): 편집은 적용됐지만
+   * 침묵 누락이 **여전히 미해소**다 — self-corrected(수정으로 해소)와 근본적으로 다르다. spec 보강도
+   * 없이 통과했다는 점에서 abandoned·overridden과 같은 계열이라 오탐 후보로 유지한다(scope-critic
+   * 지적, 2026-07-14: block-repeat를 self-corrected로 흡수하면 "gateCaught가 아직 안 고쳐졌는데
+   * self-corrected"라는 오탐 신호 은폐가 된다).
+   */
+  | "repeated-unresolved"
+  /**
+   * block → 같은 세션(CLI 시간창) gate-ack(0.9.3 ST4, `gbc gate review --ack`): 게이트 판정을
+   * "잘못됐다"고 사람/에이전트가 **명시적으로 인정**한 것 — resolved-spec(정상작동)도 self-corrected
+   * (모호)도 아니라 **오탐이 확정된 신호**다. SPEC_CHANGE_KINDS에 섞으면 "명세 보강으로 정상
+   * 해소됨"으로 오분류돼 정반대 의미가 된다(scope-critic 지적, 2026-07-14: self-corrected에
+   * 흡수되면 오탐율 지표가 ack 남용을 못 잡음 — ack가 유일한 사후 감사 채널인데 그 신호 자체가
+   * 은폐되는 이중 결함).
+   */
+  | "acknowledged-fp"
   /** block → 이후 적용 판정 없이 gate-reset(CLI) 또는 같은 세션 bypass: 게이트 무시 = 오탐 후보 */
   | "overridden"
   /** block → 후속 이벤트 없음(재시도 포기): 오탐 후보 */
@@ -145,6 +162,8 @@ export interface RealM1 {
     fpCandidates: number;
     resolvedSpec: number;
     selfCorrected: number;
+    repeatedUnresolved: number;
+    acknowledgedFp: number;
     overridden: number;
     abandoned: number;
     /** 재시도가 판정불능(failopen)으로 통과된 block 수 — 분모 제외 대상 */
@@ -232,6 +251,8 @@ export function computeRealM1(
       fpCandidates,
       resolvedSpec: count("resolved-spec"),
       selfCorrected: count("self-corrected"),
+      repeatedUnresolved: count("repeated-unresolved"),
+      acknowledgedFp: count("acknowledged-fp"),
       overridden: count("overridden"),
       abandoned: count("abandoned"),
       failedOpen,
@@ -260,43 +281,63 @@ export function classifyBlockOutcome(events: GateEvent[]): BlockClassification[]
   const out: BlockClassification[] = [];
   for (let i = 0; i < sorted.length; i++) {
     const b = sorted[i];
+    // block-repeat(0.9.3 ST2)은 anchor로 삼지 않는다 — emit-direct(allow)라 그 자체로 이미
+    // "적용됨" 상태이고, 새 관측 창을 열 필요가 없다(재발화가 원래 block의 미해결 상태를 그대로
+    // 반영할 뿐, 별도 해소 시퀀스가 아님).
     if (b.kind !== "gate" || b.decision !== "block" || !b.session) continue;
-    // 같은 세션의 다음 적용 판정(pass/cached/failopen — 편집이 실제 반영된 판정)까지가 관측 창.
+    // 같은 세션의 다음 적용 판정(pass/cached/failopen/block-repeat — 편집이 실제 반영된 판정)까지가
+    // 관측 창. block-repeat도 emit-direct(allow)라 "적용됨"에 포함 — 아니면 그 뒤 무관한 세션 활동을
+    // 원래 block의 해소 시퀀스로 잘못 귀속시킬 수 있다.
     let endIdx = sorted.length;
     let applied = false;
     let failedOpen = false;
+    let repeatedUnresolved = false;
     for (let k = i + 1; k < sorted.length; k++) {
       const e = sorted[k];
       if (
         e.kind === "gate" &&
         e.session === b.session &&
-        (e.decision === "pass" || e.decision === "cached" || e.decision === "failopen")
+        (e.decision === "pass" || e.decision === "cached" || e.decision === "failopen" || e.decision === "block-repeat")
       ) {
         endIdx = k;
         applied = true;
         failedOpen = e.decision === "failopen";
+        repeatedUnresolved = e.decision === "block-repeat";
         break;
       }
     }
     let specChanged = false;
+    let ackOccurred = false;
     let overridden = false;
     let ambiguous = false;
     for (let k = i + 1; k <= Math.min(endIdx, sorted.length - 1); k++) {
       const e = sorted[k];
       if (k === endIdx && applied) break; // 창 끝(적용판정 자체)은 위에서 소비
       if (!e.session && SPEC_CHANGE_KINDS.has(e.kind)) specChanged = true;
+      // gate-ack(0.9.3 ST4)는 SPEC_CHANGE_KINDS에 넣지 않는다 — "명세 보강"과 "오탐 인정"은
+      // 의미가 정반대라 같은 버킷(resolved-spec)에 섞이면 안 된다(위 acknowledged-fp 주석 참조).
+      if (!e.session && e.kind === "gate-ack") ackOccurred = true;
       if (!e.session && e.kind === "gate-reset") overridden = true;
       if (e.session === b.session && e.kind === "bypass") overridden = true;
       // 타 세션 gate 혼입 = CLI 이벤트 귀속 불확실(동시 세션) — 정직 표기.
       if (e.kind === "gate" && e.session && e.session !== b.session) ambiguous = true;
     }
     // failed-open이 spec 보강 여부보다 우선 — 재판정 자체가 실패했으면 resolved라 볼 수 없다.
+    // repeated-unresolved도 failed-open 다음 우선순위 — 재발화로 닫힌 창은 spec이 바뀌었을 리 없다
+    // (block-repeat 성립 조건 자체가 "같은 specHash"라 specChanged와는 애초에 상호배타적이지만,
+    // 의도를 명시하기 위해 순서에서도 앞에 둔다). acknowledged-fp는 specChanged보다 우선 —
+    // ack가 오탐 인정이라는 더 확정적 신호이고, 드물지만 ack와 spec-add가 같은 창에서 함께 일어나도
+    // "오탐이었다"는 사실이 "명세 보강"에 가려지면 안 된다.
     const outcome: BlockOutcome = applied
       ? failedOpen
         ? "failed-open"
-        : specChanged
-          ? "resolved-spec"
-          : "self-corrected"
+        : repeatedUnresolved
+          ? "repeated-unresolved"
+          : ackOccurred
+            ? "acknowledged-fp"
+            : specChanged
+              ? "resolved-spec"
+              : "self-corrected"
       : overridden
         ? "overridden"
         : "abandoned";
@@ -304,7 +345,11 @@ export function classifyBlockOutcome(events: GateEvent[]): BlockClassification[]
       session: b.session,
       at: b.at,
       outcome,
-      fpCandidate: outcome === "overridden" || outcome === "abandoned",
+      fpCandidate:
+        outcome === "overridden" ||
+        outcome === "abandoned" ||
+        outcome === "repeated-unresolved" ||
+        outcome === "acknowledged-fp",
       ambiguous,
     });
   }

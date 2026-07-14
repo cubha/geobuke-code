@@ -13,6 +13,13 @@ import type { Settings } from "./types.js";
 export const DEV_PLACEHOLDER = "${CLAUDE_PROJECT_DIR}/dist/cli.js";
 
 /**
+ * gbc init이 설치하는 gbc 자체 스킬 이름(제품소스 skills/<name>/SKILL.md). 단일 소스 —
+ * cmdInit의 설치 대상 목록과 TUI 스플래시 카드(0.9.3 D1)의 "기본 스킬" 표시가 이 배열을 공유한다
+ * (두 곳이 각자 하드코딩하면 신규 스킬 추가 시 한쪽만 갱신되고 드리프트한다).
+ */
+export const GBC_SKILL_NAMES = ["gate", "gbc-mute", "gbc-monitor"] as const;
+
+/**
  * PreToolUse hook의 *정식* 명령 집합(절대경로 + dev placeholder). stale/normalize 판정의 공통 기준.
  * read-time(hasStalePreToolUse)은 런타임 cliPath=절대경로뿐이라 이 repo가 dev인지 모른다 → 두 정식
  * 형태 중 하나면 stale 아님으로 봐야 placeholder를 구식으로 오판하지 않는다. substring이 아니라

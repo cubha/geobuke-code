@@ -19,6 +19,8 @@ export type EventKind =
   | "defer-resolve"
   | "defer-withdraw"
   | "defer-reopen"
+  /** 0.9.3 ST4 — gate review --ack: 게이트가 잘못 도출한 누락을 "이미 완료"로 직접 등록(open 미경유). */
+  | "gate-ack"
   | "spec-add"
   | "spec-clear"
   | "gate-reset"
@@ -28,7 +30,9 @@ export type EventKind =
 
 // doc-skip(0.5.5): 문서 확장자 하드가드가 judge 미호출 통과시킨 편집 — 조용한 우회 방지 계측.
 // specHash=""로 기록돼 M1(churn)·M2(block만)에선 자동 제외, M3(session 키)엔 기존 문서편집과 동일 참여.
-export type GateDecision = "pass" | "block" | "failopen" | "cached" | "doc-skip";
+// block-repeat(0.9.3 ST2): 같은 작업단위에서 이미 안내된 missing 셋의 재발화 — 통과는 됐지만 block과
+// 동종(형제 누락이 여전히 미해소)이라 pass로 뭉뚱그리지 않고 별도 태그로 계측한다.
+export type GateDecision = "pass" | "block" | "block-repeat" | "failopen" | "cached" | "doc-skip";
 
 /** scope 판정 계측 열거형(프라이버시: 코드 본문·사유 없이 enum 태그만). */
 export type ScopeAxis = "missing" | "scope" | "rung1" | "rung2" | "rung3";
