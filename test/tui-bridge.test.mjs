@@ -62,6 +62,11 @@ test("result 메시지에 total_cost_usd 없으면 0으로", () => {
   assert.deepEqual(events[1], { type: "STATUSLINE_UPDATE", patch: { costUsd: 0 } });
 });
 
+test("result 메시지에 ttft_ms가 있으면 STATUSLINE_UPDATE patch에 lastTtftMs로 포함(0.9.4 ST7 계측)", () => {
+  const events = mapEngineMessageToTuiEvents({ type: "result", subtype: "success", total_cost_usd: 0.1, ttft_ms: 1660 });
+  assert.deepEqual(events[1], { type: "STATUSLINE_UPDATE", patch: { costUsd: 0.1, lastTtftMs: 1660 } });
+});
+
 test("assistant/system/auth_status 등 result가 아닌 메시지는 빈 배열(모델 세부 상태는 TuiState가 다루지 않음)", () => {
   assert.deepEqual(mapEngineMessageToTuiEvents({ type: "assistant" }), []);
   assert.deepEqual(mapEngineMessageToTuiEvents({ type: "system", subtype: "init" }), []);

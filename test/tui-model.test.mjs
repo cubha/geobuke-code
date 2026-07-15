@@ -31,6 +31,18 @@ test("STATUSLINE_UPDATE: lastTurnMs(0.9.2 ST15)도 다른 필드와 동일하게
   assert.equal(s.statusline.costUsd, 0, "무관 필드 보존");
 });
 
+test("createInitialState: lastTtftMs 기본값 0(0.9.4 ST7 계측 — 아직 턴 없음)", () => {
+  const s = createInitialState();
+  assert.equal(s.statusline.lastTtftMs, 0);
+});
+
+test("STATUSLINE_UPDATE: lastTtftMs(0.9.4 ST7)도 다른 필드와 동일하게 부분 병합", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "STATUSLINE_UPDATE", patch: { lastTtftMs: 1660 } });
+  assert.equal(s.statusline.lastTtftMs, 1660);
+  assert.equal(s.statusline.lastTurnMs, 0, "무관 필드 보존");
+});
+
 test("SESSION_START: splashShown을 true로(스플래시 1회 커밋 계약)", () => {
   const s = reduce(createInitialState(), { type: "SESSION_START" });
   assert.equal(s.splashShown, true);
