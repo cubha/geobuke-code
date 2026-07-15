@@ -2,7 +2,7 @@
 // runEngine(SDK I/O)은 ST7 E2E 수동 실측 — 여기선 매퍼만(순수 분리).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mapSdkMessage, buildEngineOptions } from "../dist/engine.js";
+import { mapSdkMessage, buildEngineOptions, PushableStream, buildEngineResultFromResult, makeUserMessage } from "../dist/engine.js";
 
 test("assistant tool_use 블록 → tool_use 레코드(tool·file·session)", () => {
   const recs = mapSdkMessage({
@@ -126,4 +126,100 @@ test("buildEngineOptions: claudeExecutablePath가 있으면 SDK pathToClaudeCode
   assert.ok(!("pathToClaudeCodeExecutable" in bare), "미지정은 옵션에 미포함(SDK 기본 번들 exe 사용)");
   const wired = buildEngineOptions({ prompt: "x", cwd: "/tmp/a", claudeExecutablePath: "C:\\allow\\claude.exe" });
   assert.equal(wired.pathToClaudeCodeExecutable, "C:\\allow\\claude.exe");
+});
+
+// ===== PushableStream (0.9.4 ST1 — createEngineSession의 outgoing prompt AsyncIterable) =====
+// SDK 스트리밍 입력 모드의 prompt: AsyncIterable<SDKUserMessage>를 매 submit()마다 하나씩 밀어넣는
+// pushable 큐. push가 소비보다 먼저 오든 나중에 오든 순서를 보존해야 하고(다음 for-await가 그 값을
+// 받아야), close() 후에는 대기 중이던 소비자도 정상 종료(done:true)돼야 한다(ST0 스파이크가 관찰한
+// "input generator가 안 끝나도 interrupt로 output 루프는 끝난다"와는 별개로, close()의 명시적 종료
+// 경로 자체는 결정론적으로 보장돼야 함).
+
+test("PushableStream: push 먼저 → 이후 next()가 즉시 그 값을 받는다(순서 보존)", async () => {
+  const s = new PushableStream();
+  s.push({ v: 1 });
+  s.push({ v: 2 });
+  const it = s[Symbol.asyncIterator]();
+  assert.deepEqual(await it.next(), { value: { v: 1 }, done: false });
+  assert.deepEqual(await it.next(), { value: { v: 2 }, done: false });
+});
+
+test("PushableStream: next() 먼저 대기 → 이후 push()가 그 대기를 resolve한다", async () => {
+  const s = new PushableStream();
+  const it = s[Symbol.asyncIterator]();
+  const pending = it.next();
+  s.push({ v: "late" });
+  assert.deepEqual(await pending, { value: { v: "late" }, done: false });
+});
+
+test("PushableStream: close() 이후 next()는 done:true(대기 중이던 소비자도 즉시 해제)", async () => {
+  const s = new PushableStream();
+  const it = s[Symbol.asyncIterator]();
+  const pending = it.next(); // close() 전에 대기 시작
+  s.close();
+  assert.deepEqual(await pending, { value: undefined, done: true });
+  assert.deepEqual(await it.next(), { value: undefined, done: true }, "close 후 신규 next()도 done");
+});
+
+test("PushableStream: close() 후 push()는 무시된다(재개하지 않음)", async () => {
+  const s = new PushableStream();
+  s.close();
+  s.push({ v: "too-late" });
+  const it = s[Symbol.asyncIterator]();
+  assert.deepEqual(await it.next(), { value: undefined, done: true });
+});
+
+// ===== buildEngineResultFromResult (0.9.4 ST1) =====
+// ST0 스파이크 실측: query.interrupt()는 throw하지 않고 result{subtype:"error_during_execution",
+// is_error:true}를 정상 yield한다 — 기존 catch 블록(abortController 경로)과는 다른 신호 채널이라
+// 별도 순수 매핑이 필요하다. wasInterrupted는 EngineSession이 "직전에 우리가 interrupt()를 호출했다"를
+// 추적하는 로컬 플래그를 그대로 전달한다(이 함수는 그 판단을 하지 않고 결과만 재해석).
+
+test("buildEngineResultFromResult: 정상 success result → isError false, aborted 없음", () => {
+  const r = buildEngineResultFromResult(
+    { subtype: "success", total_cost_usd: 0.01, num_turns: 1, session_id: "s1" },
+    false,
+  );
+  assert.equal(r.isError, false);
+  assert.equal(r.aborted, undefined);
+  assert.equal(r.costUsd, 0.01);
+  assert.equal(r.sessionId, "s1");
+});
+
+test("buildEngineResultFromResult: wasInterrupted=false인 error_during_execution → 진짜 오류(isError true)", () => {
+  const r = buildEngineResultFromResult(
+    { subtype: "error_during_execution", is_error: true, total_cost_usd: 0.02, session_id: "s1" },
+    false,
+  );
+  assert.equal(r.isError, true, "interrupt를 요청하지 않았으면 이 result는 실제 실패로 취급");
+  assert.equal(r.aborted, undefined);
+});
+
+test("buildEngineResultFromResult: wasInterrupted=true인 error_during_execution → aborted(isError false로 재해석)", () => {
+  const r = buildEngineResultFromResult(
+    { subtype: "error_during_execution", is_error: true, total_cost_usd: 0.02, session_id: "s1" },
+    true,
+  );
+  assert.equal(r.aborted, true, "직전 interrupt() 호출로 인한 result는 사용자 의도 취소");
+  assert.equal(r.isError, false, "aborted/isError 배타(EngineResult 계약)");
+});
+
+test("buildEngineResultFromResult: wasInterrupted=true인데 success result면 그냥 success(aborted 오염 없음)", () => {
+  // 레이스: interrupt() 호출 직후 이미 진행 중이던 턴이 정상 완료될 수 있다(interrupt는 non-blocking).
+  const r = buildEngineResultFromResult(
+    { subtype: "success", total_cost_usd: 0.01, session_id: "s1" },
+    true,
+  );
+  assert.equal(r.isError, false);
+  assert.equal(r.aborted, undefined, "정상 성공은 aborted로 오염되지 않는다");
+});
+
+// ===== makeUserMessage (0.9.4 ST1) =====
+
+test("makeUserMessage: SDKUserMessage 최소 형상(role=user·content=prompt·session_id 빈값)", () => {
+  const m = makeUserMessage("안녕");
+  assert.equal(m.type, "user");
+  assert.equal(m.message.role, "user");
+  assert.equal(m.message.content, "안녕");
+  assert.equal(m.parent_tool_use_id, null);
 });
