@@ -2,7 +2,7 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
-## [Unreleased] — 0.9.4 예정 (T1 세션 지속 + T2 partial 스트리밍)
+## [0.9.4] - 2026-07-15
 
 `gbc tui`가 매 제출마다 새 SDK 프로세스를 spawn해 대화 연속성이 없고(이전 턴을 기억 못함) 체감 지연이 컸던 문제(스트리밍 미배선, 완료까지 스피너만)의 근본수정. hook **명령** 계약 무변경 = **재init 불요**.
 
