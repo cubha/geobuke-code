@@ -31,6 +31,18 @@ test("STATUSLINE_UPDATE: lastTurnMs(0.9.2 ST15)도 다른 필드와 동일하게
   assert.equal(s.statusline.costUsd, 0, "무관 필드 보존");
 });
 
+test("createInitialState: lastTtftMs 기본값 0(0.9.4 ST7 계측 — 아직 턴 없음)", () => {
+  const s = createInitialState();
+  assert.equal(s.statusline.lastTtftMs, 0);
+});
+
+test("STATUSLINE_UPDATE: lastTtftMs(0.9.4 ST7)도 다른 필드와 동일하게 부분 병합", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "STATUSLINE_UPDATE", patch: { lastTtftMs: 1660 } });
+  assert.equal(s.statusline.lastTtftMs, 1660);
+  assert.equal(s.statusline.lastTurnMs, 0, "무관 필드 보존");
+});
+
 test("SESSION_START: splashShown을 true로(스플래시 1회 커밋 계약)", () => {
   const s = reduce(createInitialState(), { type: "SESSION_START" });
   assert.equal(s.splashShown, true);
@@ -172,4 +184,37 @@ test("CTRL_C_RESET: exitConfirmArmed를 false로(타임아웃 경과 시 app.tsx
   s = reduce(s, { type: "CTRL_C_PRESSED" });
   s = reduce(s, { type: "CTRL_C_RESET" });
   assert.equal(s.exitConfirmArmed, false);
+});
+
+// ===== streamingText (0.9.4 ST4 — T2 partial 스트리밍 동적 영역) =====
+// bridge.ts DeltaAssembler.apply()가 반환하는 "누적 텍스트"를 그대로 담는 슬롯. Static 밖 동적
+// 영역이 이 필드 하나만 보고 렌더한다 — 완성되면 app.tsx가 Static에 커밋하고 STREAM_COMMIT으로
+// 이 슬롯을 비운다(이중출력 방지, braintrust ⑥과 동일 규율을 상태모델 쪽에서 지지).
+
+test("createInitialState: streamingText 기본값 빈 문자열", () => {
+  const s = createInitialState();
+  assert.equal(s.streamingText, "");
+});
+
+test("STREAM_DELTA: streamingText를 이벤트의 누적 텍스트로 교체(append 아님 — 어셈블러가 이미 누적해서 줌)", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "STREAM_DELTA", text: "안" });
+  assert.equal(s.streamingText, "안");
+  s = reduce(s, { type: "STREAM_DELTA", text: "안녕" });
+  assert.equal(s.streamingText, "안녕", "누적은 어셈블러 책임 — reducer는 그냥 교체");
+});
+
+test("STREAM_COMMIT: streamingText를 빈 문자열로 비움(Static 커밋 직후 app.tsx가 발화)", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "STREAM_DELTA", text: "완성된 텍스트" });
+  s = reduce(s, { type: "STREAM_COMMIT" });
+  assert.equal(s.streamingText, "");
+});
+
+test("TURN_START: streamingText도 함께 리셋(직전 턴의 잔여 델타가 다음 턴에 안 섞이도록 방어)", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "STREAM_DELTA", text: "이전 턴 잔여" });
+  s = reduce(s, { type: "TURN_START" });
+  assert.equal(s.streamingText, "");
+  assert.equal(s.streaming, true, "기존 계약 유지");
 });

@@ -23,6 +23,8 @@ export interface SdkMessageLike {
   subtype?: string;
   total_cost_usd?: number;
   num_turns?: number;
+  /** ST7(0.9.4 T1 계측) — 첫 토큰까지 걸린 시간(ms). SDK result 메시지 필드(ST0 스파이크 실측 확인). */
+  ttft_ms?: number;
 }
 
 /**
@@ -34,7 +36,15 @@ export function mapEngineMessageToTuiEvents(msg: SdkMessageLike): TuiEvent[] {
   if (msg.type === "result") {
     return [
       { type: "TURN_END" },
-      { type: "STATUSLINE_UPDATE", patch: { costUsd: msg.total_cost_usd ?? 0 } },
+      {
+        type: "STATUSLINE_UPDATE",
+        patch: {
+          costUsd: msg.total_cost_usd ?? 0,
+          // ST7 — ttft_ms 부재 시 patch에 아예 안 실음(기존 계약 보존, 0으로 덮어써 이전 값을
+          // 지우지 않는다 — costUsd와 달리 매 result에 항상 있다는 보장이 없어 방어적으로 옵셔널).
+          ...(typeof msg.ttft_ms === "number" ? { lastTtftMs: msg.ttft_ms } : {}),
+        },
+      },
     ];
   }
   return [];
@@ -167,4 +177,60 @@ export function formatEngineFailure(
  */
 export function formatEngineAbort(result: Pick<EngineResult, "aborted">): string | null {
   return result.aborted ? "🐢 중단됨 — 응답 생성을 취소했습니다" : null;
+}
+
+// ── partial 스트리밍 델타 어셈블러 (0.9.4 ST3, T2) ──
+
+/** stream_event 메시지에서 이 어셈블러가 읽는 필드만(SDKPartialAssistantMessage 최소 형상). */
+interface StreamEventLike {
+  type?: string;
+  event?: {
+    type?: string;
+    index?: number;
+    content_block?: { type?: string };
+    delta?: { type?: string; text?: string };
+  };
+}
+
+/**
+ * stream_event(content_block_delta)를 content block index별로 누적해 "지금까지 텍스트"를 매
+ * delta마다 반환한다. Static 커밋-후-불변 모델과의 공존 규율: 이 어셈블러는 진행 중 표시(호출부가
+ * Static 밖 동적 영역에 렌더)만 책임지고 스스로 커밋하지 않는다 — 완성된 최종 텍스트의 커밋은
+ * 기존 mapSdkMessage(assistant 메시지 경로)가 그대로 맡는다. 두 경로가 같은 텍스트를 각자
+ * 스크롤백에 push하면 이중출력이 되므로(braintrust ⑥), 호출부(app.tsx, ST5)가 "델타 렌더 중엔
+ * assistant 최종 텍스트를 그 자리에 교체 커밋"하는 단일 소스 규율을 지켜야 한다 — 이 클래스는
+ * 그 규율을 강제하지 않고 재료(누적 텍스트)만 준다.
+ *
+ * text 블록만 추적한다(content_block_start.content_block.type === "text") — tool_use의
+ * input_json_delta 등은 T2 스코프 밖(0.9.4 plan 비목표, 텍스트만).
+ */
+export class DeltaAssembler {
+  private texts = new Map<number, string>();
+
+  apply(msg: StreamEventLike): string | null {
+    if (msg.type !== "stream_event" || !msg.event) return null;
+    const ev = msg.event;
+    const index = ev.index;
+
+    if (ev.type === "content_block_start") {
+      if (typeof index === "number" && ev.content_block?.type === "text") {
+        this.texts.set(index, "");
+      }
+      return null;
+    }
+
+    if (ev.type === "content_block_delta" && typeof index === "number" && ev.delta?.type === "text_delta" && typeof ev.delta.text === "string") {
+      if (!this.texts.has(index)) return null; // content_block_start로 text 블록임을 확인 못 했으면 추적 안 함
+      const next = (this.texts.get(index) ?? "") + ev.delta.text;
+      this.texts.set(index, next);
+      return next;
+    }
+
+    if (ev.type === "content_block_stop" && typeof index === "number") {
+      this.texts.delete(index); // 블록 완결 — 다음 턴이 같은 index를 재사용해도 안 섞이게 정리
+      return null;
+    }
+
+    return null;
+  }
 }

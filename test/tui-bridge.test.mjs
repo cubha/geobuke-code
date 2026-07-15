@@ -13,6 +13,7 @@ import {
   buildGateResultEvent,
   formatEngineFailure,
   formatEngineAbort,
+  DeltaAssembler,
 } from "../dist/tui/bridge.js";
 
 // ── buildGateResultEvent (gate-sdk.ts onDecision seam이 넘겨주는 GateDecision) ──
@@ -59,6 +60,11 @@ test("result 메시지 → TURN_END + STATUSLINE_UPDATE(costUsd)", () => {
 test("result 메시지에 total_cost_usd 없으면 0으로", () => {
   const events = mapEngineMessageToTuiEvents({ type: "result", subtype: "success" });
   assert.deepEqual(events[1], { type: "STATUSLINE_UPDATE", patch: { costUsd: 0 } });
+});
+
+test("result 메시지에 ttft_ms가 있으면 STATUSLINE_UPDATE patch에 lastTtftMs로 포함(0.9.4 ST7 계측)", () => {
+  const events = mapEngineMessageToTuiEvents({ type: "result", subtype: "success", total_cost_usd: 0.1, ttft_ms: 1660 });
+  assert.deepEqual(events[1], { type: "STATUSLINE_UPDATE", patch: { costUsd: 0.1, lastTtftMs: 1660 } });
 });
 
 test("assistant/system/auth_status 등 result가 아닌 메시지는 빈 배열(모델 세부 상태는 TuiState가 다루지 않음)", () => {
@@ -216,4 +222,65 @@ test("formatEngineFailure: error가 spawn EPERM이면 원본 대신 GBC_CLAUDE_P
 test("formatEngineFailure: spawn과 무관한 오류는 기존 그대로(원본 오류 문구 보존)", () => {
   const msg = formatEngineFailure({ isError: true, error: "network timeout" });
   assert.equal(msg, "🐢 오류: network timeout");
+});
+
+// ===== DeltaAssembler (0.9.4 ST3 — partial 스트리밍 델타 어셈블러) =====
+// stream_event(SDKPartialAssistantMessage)의 content_block_delta를 index별로 누적한다. Static
+// 커밋-후-불변 모델과의 공존: 이 어셈블러는 "지금까지 누적된 텍스트"를 매 delta마다 반환하고,
+// 완성된 assistant 메시지(mapSdkMessage 경로)가 최종 커밋을 맡는다 — 이 어셈블러는 진행 중 표시만
+// 책임지고 스스로 커밋하지 않는다(이중출력 방지, braintrust ⑥).
+
+const startEvent = (index, blockType = "text") => ({
+  type: "stream_event",
+  event: { type: "content_block_start", index, content_block: { type: blockType } },
+});
+const deltaEvent = (index, text) => ({
+  type: "stream_event",
+  event: { type: "content_block_delta", index, delta: { type: "text_delta", text } },
+});
+const stopEvent = (index) => ({ type: "stream_event", event: { type: "content_block_stop", index } });
+
+test("DeltaAssembler: text_delta 연속 → 누적 텍스트를 매번 반환", () => {
+  const a = new DeltaAssembler();
+  a.apply(startEvent(0));
+  assert.equal(a.apply(deltaEvent(0, "안")), "안");
+  assert.equal(a.apply(deltaEvent(0, "녕")), "안녕");
+  assert.equal(a.apply(deltaEvent(0, "하세요")), "안녕하세요");
+});
+
+test("DeltaAssembler: content_block_stop → 해당 인덱스 버퍼 정리(이후 delta는 처음부터 다시 누적)", () => {
+  const a = new DeltaAssembler();
+  a.apply(startEvent(0));
+  a.apply(deltaEvent(0, "첫turn"));
+  a.apply(stopEvent(0));
+  // 새 턴이 같은 index=0을 재사용해도(스트리밍은 턴마다 index가 0부터 다시 시작) 이전 텍스트가 안 섞인다.
+  a.apply(startEvent(0));
+  assert.equal(a.apply(deltaEvent(0, "새turn")), "새turn");
+});
+
+test("DeltaAssembler: 서로 다른 index는 독립적으로 누적(멀티블록)", () => {
+  const a = new DeltaAssembler();
+  a.apply(startEvent(0));
+  a.apply(startEvent(1));
+  a.apply(deltaEvent(0, "A"));
+  a.apply(deltaEvent(1, "B"));
+  assert.equal(a.apply(deltaEvent(0, "A2")), "AA2");
+  assert.equal(a.apply(deltaEvent(1, "B2")), "BB2");
+});
+
+test("DeltaAssembler: content_block_start가 text가 아니면(tool_use 등) 추적하지 않음(null 반환·delta도 무시)", () => {
+  const a = new DeltaAssembler();
+  a.apply(startEvent(0, "tool_use"));
+  assert.equal(a.apply(deltaEvent(0, "무시되어야 함")), null);
+});
+
+test("DeltaAssembler: stream_event가 아닌 메시지·text_delta 아닌 델타는 전부 null(무관 메시지 무시)", () => {
+  const a = new DeltaAssembler();
+  assert.equal(a.apply({ type: "assistant" }), null);
+  assert.equal(a.apply({ type: "stream_event", event: { type: "message_start" } }), null);
+  assert.equal(
+    a.apply({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{}" } } }),
+    null,
+    "tool_use input의 input_json_delta는 T2 스코프 밖(텍스트만)",
+  );
 });

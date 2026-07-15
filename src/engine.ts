@@ -8,7 +8,7 @@
 //    둬야 "agent-sdk가 무엇으로 과금되나"를 실측할 수 있다(하드코딩하면 ⓑ가 사문화). resolveApiKey 미사용.
 // ⚠️ settingSources:[](anti-recursion 불변식): query()가 프로젝트 .claude/settings.json을 로드하면 그 안의
 //    gbc 자신의 PreToolUse stdin hook이 실려 도구 호출마다 게이트가 이중발화/재귀한다. 명시적으로 미로드.
-import type { Options, SDKMessage, HookCallback, CanUseTool } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, SDKMessage, SDKUserMessage, HookCallback, CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import type { ExtractionRecord } from "./extraction.js";
 import { appendExtraction } from "./extraction.js";
 import { nowIso } from "./time.js";
@@ -41,6 +41,14 @@ export interface EngineOptions {
    * 지정해 우회). 호출부(cli.ts/app.tsx)가 GBC_CLAUDE_PATH 환경변수를 읽어 전달한다(ST5).
    */
   claudeExecutablePath?: string;
+  /**
+   * ST3(0.9.4 T2) — SDK Options.includePartialMessages(sdk.d.ts:1587)에 그대로 전달한다. true면
+   * query()가 stream_event(SDKPartialAssistantMessage, content_block_delta) 메시지를 추가로
+   * yield한다 — TUI(ST5)가 이걸로 어시스턴트 응답을 점진 렌더한다(DeltaAssembler 소비). headless
+   * `gbc run`(runEngine)은 완성된 assistant 메시지만 쓰므로 기본 미배선(undefined/false는 옵션에
+   * 아예 안 실어보낸다 — SDK에 굳이 false를 명시할 이유 없음).
+   */
+  includePartialMessages?: boolean;
 }
 
 /** runEngine 결과 — 사이클 요약 + ⓑ 인증·과금 실측 필드. */
@@ -141,6 +149,7 @@ export function buildEngineOptions(opts: EngineOptions): Options {
     ...(opts.canUseTool ? { canUseTool: opts.canUseTool } : {}),
     ...(opts.abortController ? { abortController: opts.abortController } : {}),
     ...(opts.claudeExecutablePath ? { pathToClaudeCodeExecutable: opts.claudeExecutablePath } : {}),
+    ...(opts.includePartialMessages ? { includePartialMessages: true } : {}),
   };
 }
 
@@ -210,4 +219,274 @@ export async function runEngine(opts: EngineOptions): Promise<EngineResult> {
     }
   }
   return result;
+}
+
+// ============================================================================
+// 0.9.4 T1 — EngineSession: 매 제출마다 새 프로세스를 spawn하는 runEngine과 달리, 단일
+// query({prompt: AsyncIterable<SDKUserMessage>})를 세션 내내 유지해 대화 연속성을 확보한다
+// (ST0 스파이크 실측: 동일 session_id로 다턴 진행 시 모델이 이전 턴을 실제로 기억함을 확인).
+// ============================================================================
+
+/**
+ * outgoing prompt AsyncIterable<SDKUserMessage> 구현체 — submit()마다 push()로 한 건씩 밀어넣는다.
+ * SDK가 이 스트림을 계속 consume하며 세션 프로세스를 살려두므로(streamInput 문서: "multi-turn
+ * conversations"), close() 전까지는 next()가 다음 push를 무기한 대기한다(async 제너레이터의 정상
+ * 유휴 상태 — 타임아웃은 EngineSession 소비측 책임).
+ */
+export class PushableStream implements AsyncIterable<SDKUserMessage> {
+  private queue: SDKUserMessage[] = [];
+  private waiters: Array<(r: IteratorResult<SDKUserMessage>) => void> = [];
+  private closed = false;
+
+  push(msg: SDKUserMessage): void {
+    if (this.closed) return; // 종료된 스트림에 밀어넣는 건 무시(재개 없음 — close는 편도)
+    const waiter = this.waiters.shift();
+    if (waiter) waiter({ value: msg, done: false });
+    else this.queue.push(msg);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    while (this.waiters.length > 0) {
+      const waiter = this.waiters.shift();
+      waiter?.({ value: undefined, done: true });
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
+    return {
+      next: (): Promise<IteratorResult<SDKUserMessage>> => {
+        if (this.queue.length > 0) {
+          return Promise.resolve({ value: this.queue.shift() as SDKUserMessage, done: false });
+        }
+        if (this.closed) return Promise.resolve({ value: undefined, done: true });
+        return new Promise((resolve) => this.waiters.push(resolve));
+      },
+    };
+  }
+}
+
+/**
+ * 0.9.4 ST2 — promise를 워치독 타임아웃과 경합시킨다. SDK ProcessTransport.write()가 죽은 stdin에
+ * 침묵 드랍(예외 없음, 실측)하는 사례의 방어선: 세션이 죽으면 submit()의 대기 promise가 영원히
+ * 안 풀릴 수 있어, 유한 시간 뒤엔 onTimeout()의 값으로 대신 정리한다. 원래 promise가 먼저 끝나면
+ * 그 값 그대로(워치독 개입 없음). 타임아웃 후 원래 promise가 뒤늦게 resolve해도 이미 반환된 값에는
+ * 영향 없다(호출부가 그 결과를 버림 — throw도 leak도 없음).
+ */
+export function withWatchdog<T>(p: Promise<T>, ms: number, onTimeout: () => T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(onTimeout());
+    }, ms);
+    p.then((v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(v);
+    });
+  });
+}
+
+/** 세션이 죽었을 때(watchdog 만료 또는 프로세스 소멸)의 표준 EngineResult(순수). aborted(사용자 의도
+ *  취소)와는 다른 채널 — 사용자가 아무것도 안 눌렀는데 세션이 사라진 경우다. */
+export function buildSessionEndedResult(
+  sessionId: string,
+  auth: EngineResult["auth"],
+  reason: string,
+): EngineResult {
+  return {
+    sessionId,
+    costUsd: 0,
+    numTurns: 0,
+    auth,
+    records: 0,
+    isError: true,
+    error: `SESSION_ENDED: ${reason}`,
+  };
+}
+
+/** SDK가 요구하는 SDKUserMessage 최소 형상으로 사용자 프롬프트 텍스트를 감싼다(ST0 스파이크로 실증된 형상). */
+export function makeUserMessage(text: string): SDKUserMessage {
+  return {
+    type: "user",
+    message: { role: "user", content: text },
+    parent_tool_use_id: null,
+  } as SDKUserMessage;
+}
+
+/**
+ * result 메시지 하나를 EngineResult 조각(costUsd·numTurns·isError·aborted·sessionId)으로 재해석한다(순수).
+ * ⚠️ interrupt() 유래 result 재해석(ST0 스파이크 실측, load-bearing): query.interrupt()는 throw하지
+ * 않고 result{subtype:"error_during_execution", is_error:true}를 *정상 yield*로 종료한다 — 기존
+ * runEngine의 abortController 경로(throw→catch에서 signal.aborted로 판별)와는 다른 신호 채널이다.
+ * wasInterrupted(EngineSession이 "직전에 우리가 interrupt()를 호출했다"를 추적하는 로컬 플래그)가
+ * true일 때만 이 result를 실패가 아닌 aborted로 재해석한다 — 레이스로 interrupt 직후 정상 success가
+ * 오면(non-blocking이라 가능) 오염 없이 그대로 success 처리한다(아래 세 번째 분기).
+ */
+export function buildEngineResultFromResult(
+  m: { subtype?: string; total_cost_usd?: number; num_turns?: number; is_error?: boolean; session_id?: string },
+  wasInterrupted: boolean,
+): Pick<EngineResult, "sessionId" | "costUsd" | "numTurns" | "isError" | "aborted"> {
+  const costUsd = m.total_cost_usd ?? 0;
+  const numTurns = m.num_turns ?? 0;
+  const sessionId = m.session_id ?? "";
+  const rawIsError = m.subtype !== "success" || m.is_error === true;
+
+  if (wasInterrupted && rawIsError) {
+    return { sessionId, costUsd, numTurns, isError: false, aborted: true };
+  }
+  return { sessionId, costUsd, numTurns, isError: rawIsError };
+}
+
+/** createEngineSession() 반환 핸들 — 세션 프로세스 하나를 여러 submit() 호출에 걸쳐 재사용한다. */
+export interface EngineSession {
+  readonly sessionId: string;
+  /** 프롬프트 1건을 세션에 밀어넣고 이번 턴의 result까지 기다려 EngineResult로 반환한다. */
+  submit(prompt: string): Promise<EngineResult>;
+  /**
+   * 진행 중인 턴을 중단한다(Esc). ST0 스파이크 실측대로 즉시 resolve(non-blocking)되며, 뒤따르는
+   * result는 submit()의 Promise가 buildEngineResultFromResult로 aborted 재해석해 받는다.
+   */
+  interrupt(): Promise<void>;
+  /** 세션 프로세스를 종료한다(이후 submit() 호출은 재개 없이 즉시 에러 EngineResult를 반환). */
+  close(): void;
+}
+
+export type EngineSessionOptions = Omit<EngineOptions, "prompt"> & {
+  /**
+   * ST2 워치독(ms, 기본 5분) — submit() 응답 상한. SDK ProcessTransport.write()가 죽은 stdin에
+   * 침묵 드랍하는 실측 사례의 방어선: 이 시간 내 result가 안 오면 세션을 SESSION_ENDED로 정리한다.
+   * 정상적인 장시간 턴(도구 체인 다수)을 오탐하지 않도록 넉넉히 잡혀 있다.
+   */
+  watchdogMs?: number;
+};
+
+const DEFAULT_WATCHDOG_MS = 5 * 60 * 1000;
+
+/**
+ * ⚠️ 이 함수 자체(I/O 루프 구동)는 단위테스트 대상이 아니다 — runEngine과 동일한 이유(SDK 프로세스
+ * 스폰은 비결정 I/O, ST0 스파이크가 그 자리의 수동 실측이다). PushableStream·buildEngineResultFromResult·
+ * makeUserMessage 세 순수 조각이 TDD 대상이었고, 이 함수는 그 조각들을 실제 query()에 배선만 한다.
+ */
+export async function createEngineSession(opts: EngineSessionOptions): Promise<EngineSession> {
+  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const options = buildEngineOptions(opts as EngineOptions);
+  const input = new PushableStream();
+  const q = query({ prompt: input, options });
+
+  let sessionId = "";
+  let auth: EngineResult["auth"] = null;
+  let recordsThisTurn = 0;
+  let pendingResolve: ((r: EngineResult) => void) | null = null;
+  let interruptRequested = false;
+  let ended = false;
+  let endReason: string | undefined;
+
+  const settle = (result: EngineResult) => {
+    if (!pendingResolve) return; // 대기 중인 submit()이 없으면(세션 유휴) 버린다 — 다음 submit이 새로 기다림
+    const resolve = pendingResolve;
+    pendingResolve = null;
+    resolve(result);
+  };
+
+  void (async () => {
+    try {
+      for await (const msg of q) {
+        const m = msg as SDKMessage & {
+          session_id?: string;
+          isAuthenticating?: boolean;
+          output?: string[];
+          error?: string;
+        };
+        if (m.session_id) sessionId = m.session_id;
+        if (opts.onMessage) {
+          try {
+            opts.onMessage(msg);
+          } catch {
+            // TUI 관측 콜백의 오류가 세션 루프(추출·과금 집계)를 끊지 않는다(runEngine과 동일 규율).
+          }
+        }
+        for (const rec of mapSdkMessage(msg)) {
+          appendExtraction(opts.cwd, rec);
+          recordsThisTurn++;
+        }
+        if (m.type === "auth_status") {
+          auth = { authenticating: Boolean(m.isAuthenticating), output: m.output ?? [], error: m.error };
+        }
+        if (m.type === "result") {
+          const wasInterrupted = interruptRequested;
+          interruptRequested = false;
+          const piece = buildEngineResultFromResult(m as { subtype?: string; total_cost_usd?: number; num_turns?: number; is_error?: boolean; session_id?: string }, wasInterrupted);
+          settle({
+            sessionId: piece.sessionId || sessionId,
+            costUsd: piece.costUsd,
+            numTurns: piece.numTurns,
+            auth,
+            records: recordsThisTurn,
+            isError: piece.isError,
+            ...(piece.aborted ? { aborted: true } : {}),
+          });
+          recordsThisTurn = 0;
+        }
+      }
+      // 루프가 예외 없이 자연 종료(Query AsyncGenerator가 done:true 반환) — 이것도 SESSION_ENDED다.
+      // catch로 안 오면 안전하다고 가정하면 안 된다는 게 ST2의 핵심 발견: 대기 중인 submit()이
+      // 있는데 다음 result 없이 스트림이 그냥 끝나면 그 promise는 영원히 안 풀린다(watchdog 없이는).
+      if (pendingResolve) {
+        endReason = "세션 프로세스가 예기치 않게 종료됨(결과 없이 스트림 종료)";
+        settle(buildSessionEndedResult(sessionId, auth, endReason));
+      }
+    } catch (e) {
+      // abortController 경로(runEngine)와 달리 스트리밍 입력 모드에서 interrupt()는 이 catch로
+      // 오지 않는다(정상 result로 종료 — 위 buildEngineResultFromResult가 처리). 여기 도달하면
+      // 세션 프로세스 자체가 죽은 것(ST2 SESSION_ENDED 감지 대상).
+      endReason = String(e).slice(0, 300);
+      settle(buildSessionEndedResult(sessionId, auth, endReason));
+    } finally {
+      ended = true;
+    }
+  })();
+
+  return {
+    get sessionId() {
+      return sessionId;
+    },
+    async submit(prompt: string): Promise<EngineResult> {
+      if (ended) {
+        return buildSessionEndedResult(sessionId, auth, endReason ?? "세션이 이미 종료됨");
+      }
+      const raw = new Promise<EngineResult>((resolve) => {
+        pendingResolve = resolve;
+        input.push(makeUserMessage(prompt));
+      });
+      const watchdogMs = opts.watchdogMs ?? DEFAULT_WATCHDOG_MS;
+      return withWatchdog(raw, watchdogMs, () => {
+        // raw는 이미 abandon됐을 뿐 leak은 아니다(withWatchdog가 뒤늦은 resolve를 조용히 버림) —
+        // 다만 세션 자체는 더 이상 신뢰할 수 없으므로 ended로 확정하고 프로세스 정리를 시도한다.
+        if (!ended) {
+          ended = true;
+          endReason = `watchdog timeout(${watchdogMs}ms) — 세션 응답 없음(프로세스가 죽었을 가능성)`;
+          pendingResolve = null;
+          try {
+            q.close();
+          } catch {
+            // 이미 죽은 프로세스 정리 시도 — 실패해도 무해(우리는 이미 ended로 확정했다).
+          }
+        }
+        return buildSessionEndedResult(sessionId, auth, endReason ?? "watchdog timeout");
+      });
+    },
+    async interrupt(): Promise<void> {
+      interruptRequested = true;
+      await q.interrupt();
+    },
+    close(): void {
+      input.close();
+      q.close();
+    },
+  };
 }

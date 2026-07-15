@@ -26,8 +26,9 @@ import {
   resolveApproval,
   formatEngineFailure,
   formatEngineAbort,
+  DeltaAssembler,
 } from "./bridge.js";
-import { runEngine, mapSdkMessage } from "../engine.js";
+import { createEngineSession, mapSdkMessage, type EngineSession } from "../engine.js";
 import { makeSdkPreToolUseHook } from "../gate-sdk.js";
 import { readSpecCases } from "../spec.js";
 import { activeDeferItems, addDefer } from "../defer.js";
@@ -120,9 +121,37 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
 
   const [scrollback, setScrollback] = useState<ScrollEntry[]>([]);
   const nextId = useRef(0);
-  // ST3(0.9.2) — 현재 스트리밍 턴의 AbortController. submit()이 매 턴 새로 만들어 채우고 finally에서
-  // 비운다(턴 종료 후 남은 참조로 다음 턴을 오작동 중단시키지 않도록).
-  const abortControllerRef = useRef<AbortController | null>(null);
+  // ST1(0.9.4 T1) — 세션 프로세스 재사용. 매 submit()마다 새로 spawn하던 runEngine 대신, 이 ref가
+  // 세션이 살아있는 동안 EngineSession 하나를 들고 있는다(대화 연속성). SESSION_ENDED 감지 시(ST2)
+  // null로 되돌려 다음 submit()이 자동으로 새 세션을 만들게 한다(kill→재생성 복구).
+  const sessionRef = useRef<EngineSession | null>(null);
+  // ST3(0.9.4 T2) — partial 델타 어셈블러. index별 누적은 세션 동안 유지해도 안전하다(content_block_stop
+  // 때 해당 인덱스가 정리되고, 다음 content_block_start가 항상 그 인덱스를 ""로 재초기화하므로 턴이
+  // 중단돼 정리가 안 남아도 다음 사용 시 덮어써진다 — bridge.ts DeltaAssembler 주석 참조).
+  const deltaAssemblerRef = useRef(new DeltaAssembler());
+  // ST5 — STREAM_DELTA dispatch 스로틀(trailing, ink 30fps 락 위반 방지 — scope-critic ST3 지적 반영).
+  const streamThrottleRef = useRef<{ timer: NodeJS.Timeout | null; lastAt: number }>({ timer: null, lastAt: 0 });
+  const STREAM_THROTTLE_MS = 80;
+  const scheduleStreamDelta = useCallback((text: string) => {
+    const t = streamThrottleRef.current;
+    if (t.timer) clearTimeout(t.timer);
+    const elapsed = Date.now() - t.lastAt;
+    const flush = () => {
+      t.lastAt = Date.now();
+      t.timer = null;
+      dispatch({ type: "STREAM_DELTA", text });
+    };
+    if (elapsed >= STREAM_THROTTLE_MS) flush();
+    else t.timer = setTimeout(flush, STREAM_THROTTLE_MS - elapsed);
+  }, []);
+  const commitStream = useCallback(() => {
+    const t = streamThrottleRef.current;
+    if (t.timer) {
+      clearTimeout(t.timer);
+      t.timer = null;
+    }
+    dispatch({ type: "STREAM_COMMIT" });
+  }, []);
   // ST10(0.9.2) — Ctrl+C 2단 확인종료 타이머(armed 상태를 일정 시간 뒤 자동 해제). model.ts는
   // armed 여부만 순수 추적하고(ST9), "일정 시간"이라는 impure 타이밍 판단은 여기서 맡는다.
   const exitConfirmTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -208,54 +237,89 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     };
   }, [cwd, activateApproval]);
 
+  const onGateDecision = useCallback(
+    (decision: GateDecision) => {
+      const specCount = readSpecCases(cwd).length;
+      const deferCount = activeDeferItems(cwd).length;
+      dispatch(buildGateResultEvent(decision, specCount, deferCount));
+    },
+    [cwd],
+  );
+
+  const handleEngineMessage = useCallback(
+    (msg: Parameters<NonNullable<Parameters<typeof createEngineSession>[0]["onMessage"]>>[0]) => {
+      // ST3(0.9.4 T2) — stream_event 델타를 동적 영역에 스로틀 렌더(진행 중 표시 전용).
+      const accum = deltaAssemblerRef.current.apply(
+        msg as unknown as { type?: string; event?: { type?: string; index?: number; content_block?: { type?: string }; delta?: { type?: string; text?: string } } },
+      );
+      if (accum !== null) scheduleStreamDelta(accum);
+
+      for (const ev of mapEngineMessageToTuiEvents(msg)) dispatch(ev);
+      for (const rec of mapSdkMessage(msg)) {
+        if (!rec.text) continue;
+        // ST15(0.9.2) — assistant 텍스트만 마크다운 경량 렌더(헤딩/코드펜스/diff 색상).
+        // tool_use/tool_result/result는 원문 그대로(JSON·명령 출력이라 마크다운 파싱 대상 아님).
+        if (rec.kind === "assistant") {
+          // 최종(완성) assistant 텍스트가 도착한 시점 — 동적 영역(진행 중 델타)을 비우고 같은 텍스트를
+          // 정적 스크롤백에 커밋한다. 순서가 중요하다(scope-critic ST3 지적): 비우기 전에 pushLine하면
+          // 한 프레임 동안 같은 텍스트가 동적 영역+스크롤백에 동시에 보이는 이중출력 프레임이 생긴다.
+          commitStream();
+          for (const seg of formatMarkdownLite(rec.text)) pushLine(seg.text, seg.tone);
+        } else {
+          pushLine(rec.text, "dim");
+        }
+      }
+    },
+    [pushLine, scheduleStreamDelta, commitStream],
+  );
+
+  // ST1(0.9.4 T1) — 세션을 지연 생성하고 재사용한다. preToolUse/canUseTool/onMessage는 세션 생성
+  // 시점에 한 번만 배선된다(EngineSession의 Options는 query() 1회 spawn에 고정 — buildEngineOptions
+  // 설계 그대로 계승). cwd/model은 TUI 마운트 후 불변이라 세션 수명 내내 유효하다.
+  const getOrCreateSession = useCallback(async (): Promise<EngineSession> => {
+    if (sessionRef.current) return sessionRef.current;
+    // GBC_CLAUDE_PATH(0.9.2 ST5) — cli.ts cmdRun과 동일 우회 seam(engine.ts claudeExecutablePath).
+    const claudeExecutablePath = process.env.GBC_CLAUDE_PATH;
+    const session = await createEngineSession({
+      cwd,
+      ...(model ? { model } : {}),
+      ...(claudeExecutablePath ? { claudeExecutablePath } : {}),
+      includePartialMessages: true,
+      preToolUse: makeSdkPreToolUseHook(cwd, undefined, onGateDecision),
+      canUseTool: makeInkCanUseTool(),
+      onMessage: handleEngineMessage,
+    });
+    sessionRef.current = session;
+    return session;
+  }, [cwd, model, makeInkCanUseTool, onGateDecision, handleEngineMessage]);
+
   const submit = useCallback(
     async (prompt: string) => {
       pushLine(`❯ ${prompt}`, "code");
       dispatch({ type: "TURN_START" });
       const turnStartedAt = Date.now(); // ST15(0.9.2) — statusline lastTurnMs 계산용
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-      const onDecision = (decision: GateDecision) => {
-        const specCount = readSpecCases(cwd).length;
-        const deferCount = activeDeferItems(cwd).length;
-        dispatch(buildGateResultEvent(decision, specCount, deferCount));
-      };
-      // GBC_CLAUDE_PATH(0.9.2 ST5) — cli.ts cmdRun과 동일 우회 seam(engine.ts claudeExecutablePath).
-      const claudeExecutablePath = process.env.GBC_CLAUDE_PATH;
       try {
-        const result = await runEngine({
-          prompt,
-          cwd,
-          ...(model ? { model } : {}),
-          ...(claudeExecutablePath ? { claudeExecutablePath } : {}),
-          preToolUse: makeSdkPreToolUseHook(cwd, undefined, onDecision),
-          canUseTool: makeInkCanUseTool(),
-          abortController: controller,
-          onMessage: (msg) => {
-            for (const ev of mapEngineMessageToTuiEvents(msg)) dispatch(ev);
-            for (const rec of mapSdkMessage(msg)) {
-              if (!rec.text) continue;
-              // ST15(0.9.2) — assistant 텍스트만 마크다운 경량 렌더(헤딩/코드펜스/diff 색상).
-              // tool_use/tool_result/result는 원문 그대로(JSON·명령 출력이라 마크다운 파싱 대상 아님).
-              if (rec.kind === "assistant") {
-                for (const seg of formatMarkdownLite(rec.text)) pushLine(seg.text, seg.tone);
-              } else {
-                pushLine(rec.text, "dim");
-              }
-            }
-          },
-        });
-        // runEngine()은 계약상 절대 rethrow하지 않는다(engine.ts) — 인증/네트워크 실패·중단 어느
-        // 쪽도 반환값으로만 알 수 있다. 버리면 화면에 아무 표시 없이 "무응답"이 된다(0.9.1 실사용자
-        // 보고). 중단(aborted)은 사용자가 의도한 취소라 실패(danger)와 다른 톤(warn)으로 먼저 본다.
-        const abortMsg = formatEngineAbort(result);
-        if (abortMsg) {
-          pushLine(abortMsg, "warn");
+        const session = await getOrCreateSession();
+        const result = await session.submit(prompt);
+        // EngineSession.submit()도 runEngine과 동일 계약(rethrow하지 않음, engine.ts) — 인증/네트워크
+        // 실패·중단 어느 쪽도 반환값으로만 알 수 있다(0.9.1 실사용자 보고 교훈 승계).
+        commitStream(); // 턴 종료 — 동적 영역에 델타 잔여가 남아있으면 정리(중단된 턴 방어)
+        if (result.isError && result.error?.startsWith("SESSION_ENDED")) {
+          // ST2(0.9.4) 감지 → 여기서 실제 복구: 죽은 세션을 버리고 다음 submit()이 새로 만들게 한다.
+          sessionRef.current = null;
+          pushLine("🐢 세션이 종료되어 다음 메시지부터 새 세션으로 다시 시작합니다.", "warn");
         } else {
-          const failureMsg = formatEngineFailure(result);
-          if (failureMsg) pushLine(failureMsg, "danger");
+          // 중단(aborted)은 사용자가 의도한 취소라 실패(danger)와 다른 톤(warn)으로 먼저 본다.
+          const abortMsg = formatEngineAbort(result);
+          if (abortMsg) {
+            pushLine(abortMsg, "warn");
+          } else {
+            const failureMsg = formatEngineFailure(result);
+            if (failureMsg) pushLine(failureMsg, "danger");
+          }
         }
       } catch (e) {
+        commitStream();
         // agent-sdk는 engine.ts가 lazy dynamic import한다(첫 프롬프트 제출 시점) — ink/react와 달리
         // cli.ts의 cmdTui try/catch는 이 실패를 못 잡는다(ST6 scope-critic 발견). 여기서 별도로
         // 친절 안내하지 않으면 사용자는 잘린 스택트레이스만 본다.
@@ -269,7 +333,6 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           pushLine(`🐢 오류: ${msg.slice(0, 200)}`, "danger");
         }
       } finally {
-        abortControllerRef.current = null;
         dispatch({ type: "TURN_END" });
         const g = detectGit(cwd);
         dispatch({
@@ -278,7 +341,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         });
       }
     },
-    [cwd, model, makeInkCanUseTool, pushLine],
+    [cwd, getOrCreateSession, pushLine, commitStream],
   );
 
   useInput((input, key) => {
@@ -363,9 +426,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       return;
     }
     if (key.escape) {
-      // ST3(0.9.2) — 스트리밍 중일 때만 중단. 유휴 상태에서 Esc는 여전히 no-op(전역 종료 단축키
-      // 아님 — Ctrl+C 2단 확인종료가 그 역할, ST9/ST10 별도 SubTask).
-      if (state.streaming) abortControllerRef.current?.abort();
+      // ST3(0.9.2)→ST1(0.9.4 T1로 대체) — 스트리밍 중일 때만 중단. 유휴 상태에서 Esc는 여전히
+      // no-op(전역 종료 단축키 아님 — Ctrl+C 2단 확인종료가 그 역할). AbortController.abort() 대신
+      // EngineSession.interrupt()를 쓴다(ST0 스파이크 실측: SDK interrupt()는 non-blocking, throw 없이
+      // result{error_during_execution}으로 종료 — engine.ts buildEngineResultFromResult가 재해석).
+      if (state.streaming) void sessionRef.current?.interrupt();
       return;
     }
     if (key.return && key.shift) {
@@ -406,6 +471,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       {state.panel === "metrics" && <MetricsPanel cwd={cwd} />}
       {state.panel === "repos" && <ReposPanel cwd={cwd} />}
       {state.panel === "skills" && <SkillsPanel cwd={cwd} />}
+      {/* ST5(0.9.4 T2) — Static 밖 동적 영역: partial 델타 진행 중 표시. 완성되면 commitStream()이
+          streamingText를 비우는 동시에 같은 텍스트가 위 Static 스크롤백에 커밋된다(이중출력 방지). */}
+      {state.streaming && !state.approval && state.streamingText && <Text>{state.streamingText}</Text>}
       {state.streaming && !state.approval && (
         <Text color="green">{formatSpinnerLine(spinnerTick, elapsedMs)}</Text>
       )}
