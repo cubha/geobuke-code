@@ -39,6 +39,10 @@ export interface TuiState {
   /** ST9(0.9.2) Ctrl+C 2단 확인종료 — "일정 시간 내 두 번째 입력이면 종료"의 타이머 판단은 app.tsx
    *  (setTimeout, ST10)가 impure하게 맡고, 이 reducer는 armed 여부만 순수하게 추적한다. */
   exitConfirmArmed: boolean;
+  /** ST4(0.9.4 T2) — bridge.ts DeltaAssembler.apply()가 반환한 누적 텍스트. Static 밖 동적 영역이
+   *  이 필드만 보고 렌더한다(진행 중 표시 전용). 완성되면 app.tsx가 Static에 커밋 후 STREAM_COMMIT으로
+   *  비운다 — 어셈블러가 이미 누적해서 주므로 reducer는 append가 아니라 단순 교체다. */
+  streamingText: string;
 }
 
 const DEFAULT_STATUSLINE: Statusline = {
@@ -62,6 +66,7 @@ export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiSta
     approval: null,
     statusline: { ...DEFAULT_STATUSLINE, ...statuslineSeed },
     exitConfirmArmed: false,
+    streamingText: "",
   };
 }
 
@@ -78,7 +83,9 @@ export type TuiEvent =
   | { type: "CLOSE_PANEL" }
   | { type: "STATUSLINE_UPDATE"; patch: Partial<Statusline> }
   | { type: "CTRL_C_PRESSED" }
-  | { type: "CTRL_C_RESET" };
+  | { type: "CTRL_C_RESET" }
+  | { type: "STREAM_DELTA"; text: string }
+  | { type: "STREAM_COMMIT" };
 
 function cycleChoice(current: ApprovalChoice, direction: 1 | -1): ApprovalChoice {
   const idx = APPROVAL_CHOICES.indexOf(current);
@@ -92,7 +99,8 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
       return { ...state, splashShown: true };
 
     case "TURN_START":
-      return { ...state, streaming: true };
+      // streamingText도 함께 리셋 — 직전 턴이 STREAM_COMMIT 없이 끝났을 경우(중단 등)의 방어.
+      return { ...state, streaming: true, streamingText: "" };
 
     case "TURN_END":
       return { ...state, streaming: false };
@@ -141,6 +149,12 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
 
     case "CTRL_C_RESET":
       return state.exitConfirmArmed ? { ...state, exitConfirmArmed: false } : state;
+
+    case "STREAM_DELTA":
+      return { ...state, streamingText: event.text };
+
+    case "STREAM_COMMIT":
+      return state.streamingText === "" ? state : { ...state, streamingText: "" };
 
     default:
       return state;

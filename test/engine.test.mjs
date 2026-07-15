@@ -2,6 +2,7 @@
 // runEngine(SDK I/O)은 ST7 E2E 수동 실측 — 여기선 매퍼만(순수 분리).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mapSdkMessage, buildEngineOptions, PushableStream, buildEngineResultFromResult, makeUserMessage, withWatchdog, buildSessionEndedResult } from "../dist/engine.js";
 
 test("assistant tool_use 블록 → tool_use 레코드(tool·file·session)", () => {
@@ -272,4 +273,20 @@ test("buildSessionEndedResult: isError true + error에 사유 포함 + records 0
   assert.match(r.error, /watchdog timeout/);
   assert.equal(r.records, 0);
   assert.equal(r.aborted, undefined, "세션 죽음은 사용자 의도 취소(aborted)와 다른 채널");
+});
+
+// ===== createEngineSession 세션경로 불변식 회귀락 (0.9.4 ST6) =====
+// buildEngineOptions 자체의 불변식(settingSources:[]·apiKey 미주입)은 위에서 이미 단위테스트로
+// 고정돼 있다 — 이 테스트가 잠그는 건 별개: "createEngineSession도 반드시 그 함수를 경유한다"는
+// *경로* 불변식이다. createEngineSession은 실 SDK I/O(dynamic import+spawn)라 runEngine과 동일한
+// 이유로 직접 단위테스트 대상이 아니므로(비결정 I/O), 소스 레벨로 "buildEngineOptions(...) 호출을
+// 우회해 Options를 직접 구성하지 않는다"를 고정한다 — 세션 경로 신설(ST1)이 이 강제 지점을 우회해
+// settingSources 누락(anti-recursion 무력화)이나 apiKey 하드코딩(ⓑ 실측 오염)을 재도입하면 이 테스트가
+// 즉시 깨진다.
+test("createEngineSession: buildEngineOptions를 경유한다(불변식 강제 지점 우회 방지)", () => {
+  const src = readFileSync(new URL("../dist/engine.js", import.meta.url), "utf8");
+  const fnStart = src.indexOf("export async function createEngineSession(");
+  assert.ok(fnStart >= 0, "createEngineSession 함수를 dist에서 찾을 수 없음 — 시그니처/이름이 바뀌었으면 이 테스트도 함께 갱신할 것");
+  const fnHead = src.slice(fnStart, fnStart + 400); // 함수 도입부(옵션 빌드 지점)만 보면 충분
+  assert.match(fnHead, /buildEngineOptions\(/, "createEngineSession은 반드시 buildEngineOptions를 경유해 Options를 구성해야 한다");
 });
