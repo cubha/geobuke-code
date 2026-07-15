@@ -23,6 +23,8 @@ export interface SdkMessageLike {
   subtype?: string;
   total_cost_usd?: number;
   num_turns?: number;
+  /** ST7(0.9.4 T1 계측) — 첫 토큰까지 걸린 시간(ms). SDK result 메시지 필드(ST0 스파이크 실측 확인). */
+  ttft_ms?: number;
 }
 
 /**
@@ -34,7 +36,15 @@ export function mapEngineMessageToTuiEvents(msg: SdkMessageLike): TuiEvent[] {
   if (msg.type === "result") {
     return [
       { type: "TURN_END" },
-      { type: "STATUSLINE_UPDATE", patch: { costUsd: msg.total_cost_usd ?? 0 } },
+      {
+        type: "STATUSLINE_UPDATE",
+        patch: {
+          costUsd: msg.total_cost_usd ?? 0,
+          // ST7 — ttft_ms 부재 시 patch에 아예 안 실음(기존 계약 보존, 0으로 덮어써 이전 값을
+          // 지우지 않는다 — costUsd와 달리 매 result에 항상 있다는 보장이 없어 방어적으로 옵셔널).
+          ...(typeof msg.ttft_ms === "number" ? { lastTtftMs: msg.ttft_ms } : {}),
+        },
+      },
     ];
   }
   return [];

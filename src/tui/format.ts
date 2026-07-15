@@ -367,6 +367,10 @@ export function formatStatusline(data: Statusline, opts?: { dirWidth?: number })
   if (data.lastTurnMs > 0) {
     segments.push({ text: `${(data.lastTurnMs / 1000).toFixed(1)}s`, tone: "dim" });
   }
+  // ST7(0.9.4 T1) — 첫 토큰까지 걸린 시간. lastTurnMs(턴 전체 소요)와 형식이 같아 접두어로 구분한다.
+  if (data.lastTtftMs > 0) {
+    segments.push({ text: `ttft ${(data.lastTtftMs / 1000).toFixed(1)}s`, tone: "dim" });
+  }
   return segments;
 }
 

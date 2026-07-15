@@ -25,6 +25,9 @@ export interface Statusline {
   costUsd: number;
   /** ST15(0.9.2) — 마지막으로 종료된 턴의 소요시간(ms). 0이면 아직 턴이 없었음(표시 생략 신호). */
   lastTurnMs: number;
+  /** ST7(0.9.4 T1) — 마지막 턴의 첫 토큰까지 걸린 시간(ms, SDK result.ttft_ms). 0이면 아직 턴이
+   *  없었거나 세션 재사용으로 체감 단축된 걸 실측할 값(성공기준 ⓐ) — 표시 생략 신호는 lastTurnMs와 동일. */
+  lastTtftMs: number;
 }
 
 export interface TuiState {
@@ -53,6 +56,7 @@ const DEFAULT_STATUSLINE: Statusline = {
   usagePct: 0,
   costUsd: 0,
   lastTurnMs: 0,
+  lastTtftMs: 0,
 };
 
 export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiState {
