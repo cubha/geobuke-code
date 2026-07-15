@@ -2,7 +2,7 @@
 // runEngine(SDK I/O)은 ST7 E2E 수동 실측 — 여기선 매퍼만(순수 분리).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mapSdkMessage, buildEngineOptions, PushableStream, buildEngineResultFromResult, makeUserMessage } from "../dist/engine.js";
+import { mapSdkMessage, buildEngineOptions, PushableStream, buildEngineResultFromResult, makeUserMessage, withWatchdog, buildSessionEndedResult } from "../dist/engine.js";
 
 test("assistant tool_use 블록 → tool_use 레코드(tool·file·session)", () => {
   const recs = mapSdkMessage({
@@ -222,4 +222,41 @@ test("makeUserMessage: SDKUserMessage 최소 형상(role=user·content=prompt·s
   assert.equal(m.message.role, "user");
   assert.equal(m.message.content, "안녕");
   assert.equal(m.parent_tool_use_id, null);
+});
+
+// ===== withWatchdog (0.9.4 ST2) =====
+// braintrust 실측 근거: SDK ProcessTransport.write()는 죽은 stdin에 침묵 드랍(예외 없음) — 세션이
+// 죽어도 submit()의 대기 Promise가 영원히 안 풀릴 수 있다. 워치독은 그 무한대기를 유한 시간으로
+// 끊는 범용 유틸(정상 응답 경로는 건드리지 않는다 — 레이스에서 원래 promise가 이기면 그대로 통과).
+
+test("withWatchdog: 원래 promise가 타임아웃 전에 resolve하면 그 값을 그대로 반환(워치독 개입 없음)", async () => {
+  const fast = Promise.resolve("정상응답");
+  const r = await withWatchdog(fast, 50, () => "타임아웃값");
+  assert.equal(r, "정상응답");
+});
+
+test("withWatchdog: 원래 promise가 타임아웃 내 resolve 안 하면 onTimeout() 값을 대신 반환", async () => {
+  const neverResolves = new Promise(() => {});
+  const r = await withWatchdog(neverResolves, 20, () => "타임아웃값");
+  assert.equal(r, "타임아웃값");
+});
+
+test("withWatchdog: 타임아웃 후 원래 promise가 뒤늦게 resolve해도 이미 반환된 결과에 영향 없음", async () => {
+  let resolveLate;
+  const late = new Promise((r) => (resolveLate = r));
+  const r = await withWatchdog(late, 20, () => "타임아웃값");
+  assert.equal(r, "타임아웃값");
+  resolveLate("뒤늦은응답"); // 워치독 이후 resolve — throw 없이 조용히 무시돼야 함
+  await new Promise((r) => setTimeout(r, 10));
+});
+
+// ===== buildSessionEndedResult (0.9.4 ST2) =====
+
+test("buildSessionEndedResult: isError true + error에 사유 포함 + records 0", () => {
+  const r = buildSessionEndedResult("sess-1", null, "watchdog timeout");
+  assert.equal(r.sessionId, "sess-1");
+  assert.equal(r.isError, true);
+  assert.match(r.error, /watchdog timeout/);
+  assert.equal(r.records, 0);
+  assert.equal(r.aborted, undefined, "세션 죽음은 사용자 의도 취소(aborted)와 다른 채널");
 });
