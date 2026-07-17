@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Verdict, ReviewVerdict, ScopeQueueEntry, ScopeVerdict, AxisAVerdict, RungVerdict } from "./types.js";
@@ -51,10 +51,19 @@ export interface CliInvocation {
   argv: string[];
   stdin: string;
 }
-export function buildCliInvocation(system: string, user: string, model: string): CliInvocation {
+/**
+ * settingsPath — 0.10.0 A3b 실기검증 이슈①(격리 렌즈 신규발견+실측 확정, 2026-07-16): keyless
+ * judge CLI 폴백(claude -p)이 판정대상 repo의 auto-memory를 그대로 읽어 "이미 완료됐다"는 편향
+ * 답변을 만든다(headless 실측: baseline이 memory 근거로 완료 단언 vs --settings로 차단 시 git
+ * diff 기반 정확한 미완 판단으로 반전). null이면 플래그 자체를 생략한다 — resolveNoMemorySettingsPath
+ * 참조: 존재하지 않는 경로를 넘기면 claude CLI가 "Settings file not found"로 하드 에러(실측
+ * 확인)하므로 파일 준비가 안 됐을 땐 아예 안 넘기는 게 fail-open이다.
+ */
+export function buildCliInvocation(system: string, user: string, model: string, settingsPath: string | null): CliInvocation {
   return {
     argv: [
       "-p",
+      ...(settingsPath ? ["--settings", settingsPath] : []),
       "--append-system-prompt",
       system,
       "--model",
@@ -64,6 +73,40 @@ export function buildCliInvocation(system: string, user: string, model: string):
     ],
     stdin: user,
   };
+}
+
+/** resolveNoMemorySettingsPath 의존성 주입(테스트용). 미지정 시 실제 homedir/fs 사용. */
+export interface NoMemorySettingsOpts {
+  homeDir?: string;
+  exists?: (path: string) => boolean;
+  mkdir?: (dir: string) => void;
+  writeFile?: (path: string, content: string) => void;
+}
+
+/**
+ * auto-memory 차단용 정적 settings 파일(~/.gbc/no-memory-settings.json)을 지연 생성해 경로를
+ * 반환한다(멱등 — 이미 있으면 다시 안 씀). JSON 문자열을 argv에 직접 넣지 않고 파일 경로로 넘기는
+ * 이유: win32 shell:true 경로(judgeViaCliWin)에서 따옴표를 포함한 값을 argv에 두면 이스케이프
+ * 리스크가 있다(기존 W2/W3 관례 — shell:true argv엔 정적 단순값만). 쓰기 실패 시 null 반환 —
+ * 존재하지 않는 경로를 --settings에 넘기면 claude CLI가 즉시 하드 에러하므로(실측 확인), 판정
+ * 자체를 깨느니 auto-memory 차단만 약화된 채 계속 진행한다(fail-open).
+ */
+export function resolveNoMemorySettingsPath(opts: NoMemorySettingsOpts = {}): string | null {
+  const home = opts.homeDir ?? homedir();
+  const dir = join(home, ".gbc");
+  const path = join(dir, "no-memory-settings.json");
+  const exists = opts.exists ?? existsSync;
+  const mkdir = opts.mkdir ?? ((d: string) => mkdirSync(d, { recursive: true }));
+  const writeFile = opts.writeFile ?? ((p: string, c: string) => writeFileSync(p, c));
+  try {
+    if (!exists(path)) {
+      mkdir(dir);
+      writeFile(path, JSON.stringify({ autoMemoryEnabled: false }));
+    }
+    return path;
+  } catch {
+    return null;
+  }
 }
 
 /** resolveApiKey 의존성 주입(테스트용). 미지정 시 실제 env/homedir/fs 사용. */
@@ -249,21 +292,39 @@ async function judgeViaApi(
   return texts.join("");
 }
 
-/** claude -p 폴백 (무설정 도그푸딩용, 느림). CC의 기존 인증 사용. model 기본=호출시점 해석(R4). */
-async function judgeViaCli(system: string, user: string, model: string = gateModel()): Promise<string> {
+/**
+ * claude -p 폴백 (무설정 도그푸딩용, 느림). CC의 기존 인증 사용. model 기본=호출시점 해석(R4).
+ * cwd(0.10.0 A3b ST4): 판정 대상 repo의 절대경로. 미지정이면 spawn이 이 프로세스의 cwd를 상속한다
+ * (기존 단일-repo 호출부 회귀 없음) — TUI가 여러 repo를 동시에 다루게 되면서, 지정하지 않으면
+ * "지금 포커스된 repo"의 CLI가 엉뚱한 repo 컨텍스트를 읽어 판정이 오염될 수 있다(LLM 재유입 경로 2).
+ */
+export async function judgeViaCli(
+  system: string,
+  user: string,
+  model: string = gateModel(),
+  cwd?: string,
+  spawnFn?: typeof spawn,
+  settingsPath: string | null = resolveNoMemorySettingsPath(),
+): Promise<string> {
   // native Windows는 claude.cmd라 별도 경로(아래) — POSIX도 W2로 user=stdin 통일(0.5.3).
-  if (process.platform === "win32") return judgeViaCliWin(system, user, model);
-  return runClaudeCli(buildCliInvocation(system, user, model));
+  if (process.platform === "win32") return judgeViaCliWin(system, user, model, cwd, spawnFn, settingsPath);
+  return runClaudeCli(buildCliInvocation(system, user, model, settingsPath), { cwd, spawnFn });
 }
 
 /**
  * 공용 CLI 러너 — CliInvocation 계약(argv=정적, stdin=동적)을 spawn으로 실행. W2(0.5.3):
  * execFile argv-프롬프트 경로를 대체해 user가 프로세스 목록에 노출되지 않는다.
  * kill-timeout 필수 — 무응답 stdin이 판정을 무한 차단하면 안 됨 → 기존 CLI_TIMEOUT_MS 동일.
+ * opts.spawnFn은 테스트 주입 seam(기본 node:child_process.spawn) — 실제 claude 바이너리 없이
+ * spawn() 호출 옵션(특히 cwd 전달)을 단정하기 위함.
  */
-function runClaudeCli(inv: CliInvocation, opts: { shell?: boolean } = {}): Promise<string> {
+export function runClaudeCli(
+  inv: CliInvocation,
+  opts: { shell?: boolean; cwd?: string; spawnFn?: typeof spawn } = {},
+): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const child = spawn("claude", inv.argv, { shell: opts.shell ?? false });
+    const spawnImpl = opts.spawnFn ?? spawn;
+    const child = spawnImpl("claude", inv.argv, { shell: opts.shell ?? false, cwd: opts.cwd });
     let out = "";
     let err = "";
     let done = false;
@@ -316,14 +377,26 @@ function runClaudeCli(inv: CliInvocation, opts: { shell?: boolean } = {}): Promi
  *  '판정 품질'만 프롬프트 전달 방식이 다르고, 이는 가시적 fail-open으로 바운드된다.)
  * kill-timeout 필수 — 무응답 stdin이 PreToolUse를 무한 차단하면 ENOENT보다 나쁘다 → fail-open 강제.
  */
-function judgeViaCliWin(system: string, user: string, model: string = gateModel()): Promise<string> {
+export function judgeViaCliWin(
+  system: string,
+  user: string,
+  model: string = gateModel(),
+  cwd?: string,
+  spawnFn?: typeof spawn,
+  settingsPath: string | null = resolveNoMemorySettingsPath(),
+): Promise<string> {
   // shell:true 경로라 argv엔 동적 데이터 절대 금지 — system조차 stdin에 결합(기존 검증된 형태 보존).
+  // settingsPath는 사용자 입력이 아닌 gbc 자신의 고정 홈 경로다(JSON 문자열이 아닌 파일 경로라
+  // 따옴표 이스케이프 리스크는 없다 — resolveNoMemorySettingsPath 참조). ⚠️ homedir()이 공백을
+  // 포함할 수 있다는 점(Windows "C:\Users\John Doe\...")은 기존 --model safeModel(model)과
+  // 동일한 미검증 가정이다(scope-critic ST4 지적) — Node spawn(shell:true)의 win32 argv
+  // 자동이스케이프에 위임하며, 별도 하드닝은 이 SubTask 범위 밖(기존 관례 그대로).
   return runClaudeCli(
     {
-      argv: ["-p", "--model", safeModel(model), "--output-format", "json"],
+      argv: ["-p", ...(settingsPath ? ["--settings", settingsPath] : []), "--model", safeModel(model), "--output-format", "json"],
       stdin: `${system}\n\n${user}`,
     },
-    { shell: true },
+    { shell: true, cwd, spawnFn },
   );
 }
 
@@ -336,16 +409,18 @@ export async function judge(
   editText: string,
   defers: string[] = [],
   resolved: string[] = [],
-  opts: { temperature?: number; currentFileContent?: string } = {},
+  opts: { temperature?: number; currentFileContent?: string; cwd?: string } = {},
 ): Promise<Verdict> {
   const user = buildUserMessage(planSpec, editText, defers, resolved, opts.currentFileContent);
   const transport = selectedTransport();
   try {
     // claude -p 폴백은 temperature 플래그가 없어 핀 불가 → CLI-transport replay는 best-effort.
+    // cwd(ST4): CLI 트랜스포트만 spawn을 실제로 하므로 cwd가 의미 있다 — API 트랜스포트는 프로세스를
+    // 띄우지 않아 cwd 상속 오염 경로 자체가 없다(전달할 이유 없음).
     const raw =
       transport === "api"
         ? await judgeViaApi(GATE_SYSTEM, user, opts.temperature)
-        : await judgeViaCli(GATE_SYSTEM, user);
+        : await judgeViaCli(GATE_SYSTEM, user, gateModel(), opts.cwd);
     const verdict = parseVerdict(raw);
     // missing 출처 하드가드(0.5.5) — 명세 무근거 항목 드롭. block 판정 자체는 유지(reason이 사유
     // 담당). 드롭 발생은 reason에 정직 고지 — pending-review·defer 유도로 발명 항목이 새는 길 차단.

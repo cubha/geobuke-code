@@ -313,10 +313,12 @@ gbc run "add.js에 두 수를 더하는 add(a,b)를 만들어줘" --yes
 - **사람-pause(`canUseTool`)** — 도구 실행 전 사람에게 허용을 묻는 최소 blocking(고무도장 방지). 미응답·빈 입력은 deny(안전측). ⚠️ **게이트(`evaluateGate`)는 코드 편집(Edit/Write/MultiEdit)만 판정**하고, Bash 등 그 외 도구의 실행 승인은 오로지 이 pause에 달렸다. `--yes`는 비대화형(CI·자동)용 자동 허용이며 **모든 도구를 무관문 자동승인**(Bash 임의 명령 포함)하므로 신뢰할 수 있는 프롬프트에만 쓴다.
 - **관측 sink → 사후대조 채점** — SDK 스트림(도구 사용·판정·결과)을 `.gbc/extraction.jsonl`로 기록한다(session_id 조인키, 시크릿 redaction). 이 1차 자산을 `gbc score`가 `events.jsonl`과 조인해 **통과 후 시나리오 위반율(진짜 M1)**을 채점한다(0.8.0) — [계측](#계측-m1m3) 참조.
 - **격리 규율** — agent-sdk에 **API 키를 주입하지 않고**(SDK 자체 인증 우선순위 사용), `settingSources: []`로 프로젝트 설정을 로드하지 않는다(gbc 자신의 stdin hook이 겹쳐 이중발화·재귀하는 것을 차단). B-모드 hook 핫패스는 agent-sdk를 **절대 로드하지 않는다**(런타임 격리).
+  - **끊는 것**: settings.json·CLAUDE.md·skills·hooks(`settingSources:[]`) + **auto-memory**(`~/.claude/projects/<repo>/memory/` — `settingSources:[]`와 별개 레이어라 명시적으로 `settings:{autoMemoryEnabled:false}`를 추가 배선한다, 0.10.0). auto-memory를 안 끄면 spawn된 세션이 그 repo의 과거 작업 메모를 읽고(+**쓰기 역류**로 사용자의 Claude Code 프로젝트 메모리를 조용히 갱신할 수도 있고), keyless 환경의 게이트 판정(`claude -p` 폴백)도 "이미 완료됐다"는 메모리 서사에 편향돼 미완 작업을 통과시킬 위험이 있다(실측 확인 — [CHANGELOG 0.10.0](CHANGELOG.md) 참조).
+  - **공유하는 것**: 계정에 연결된 번들 스킬·MCP 커넥터 등 claude CLI 자체의 세션 부속 기능 — gbc가 별도로 끊지 않는다(끄려면 사용자가 자기 claude 설정에서 직접 조정).
 
-## 풀스크린 TUI (`gbc tui`) — 0.9.0 A3a
+## 풀스크린 TUI (`gbc tui`) — 0.9.0 A3a / 0.10.0 A3b(다중탭)
 
-> **단일-repo 전용(0.9.0)**. multi-repo 스위처는 후속 버전(A3b) 과제다.
+> 0.10.0부터 좌측 상시 사이드바에서 `gbc repos`에 등록된 repo를 opt-in 탭(⌃1..9)으로 전환·병행할 수 있다. 대화 스크롤백은 **화면 전체 폭**으로 흐른다 — ink `<Static>`이 트리 내 위치와 무관하게 항상 최상단 전체폭으로 렌더되는 구조적 제약 때문이며(Claude Code 본체·gemini-cli 등 ink 기반 TUI 전반이 동일), 사이드바 옆 좁은 컬럼에 코드블록·긴 텍스트를 가두는 것보다 가독성이 낫다고 판단해 의도적으로 수용한 레이아웃이다. 사이드바(고정폭)는 입력창·스트리밍 프리뷰·statusline 등 하단 동적 영역 옆에만 병치된다.
 
 `gbc run`(A-모드 CLI 실행)과 같은 in-process 엔진 위에, 승인 프롬프트·실시간 게이트 줄·계측 패널을 갖춘 풀스크린 화면을 얹는다.
 

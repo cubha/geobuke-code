@@ -135,13 +135,18 @@ export interface GateDecision {
   event?: GateEvent;
 }
 
-/** 게이트 판정 함수(judge) 주입 계약 — 모델 호출을 대체 가능하게. */
+/**
+ * 게이트 판정 함수(judge) 주입 계약 — 모델 호출을 대체 가능하게.
+ * cwd(0.10.0 A3b ST4): CLI 트랜스포트 spawn에 판정 대상 repo를 명시하기 위한 전달 통로 —
+ * TUI가 여러 repo를 동시에 다룰 때 프로세스 cwd 상속으로 무관한 컨텍스트가 새는 걸 막는다.
+ */
 export type JudgeFn = (
   planSpec: string,
   editText: string,
   defers: string[],
   resolved: string[],
   currentFileContent?: string,
+  cwd?: string,
 ) => Promise<Verdict>;
 
 /** evaluateGate 입력(트랜스포트가 자기 형식에서 정규화해 전달). */
@@ -210,8 +215,8 @@ export function readCurrentFile(filePath: string): string | null {
  */
 export function defaultGateDeps(refreshDuringJudge?: () => Promise<void>): GateDeps {
   return {
-    judge: async (spec, edit, defers, resolved, currentFileContent) =>
-      (await import("./judge.js")).judge(spec, edit, defers, resolved, { currentFileContent }),
+    judge: async (spec, edit, defers, resolved, currentFileContent, cwd) =>
+      (await import("./judge.js")).judge(spec, edit, defers, resolved, { currentFileContent, cwd }),
     loadPlanSpec,
     isGated,
     isGoldenCapture,
@@ -285,7 +290,7 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
   const filePath = input.toolInput?.file_path;
   const currentFileContent = filePath ? deps.readCurrentFile(filePath) ?? undefined : undefined;
   const refreshP = deps.refreshDuringJudge ? deps.refreshDuringJudge() : null;
-  const verdict = await deps.judge(specText, editText, defers, resolved, currentFileContent);
+  const verdict = await deps.judge(specText, editText, defers, resolved, currentFileContent, cwd);
   if (refreshP) await refreshP; // judge 동안 이미 완료 — 이 편집의 notice가 갱신된 캐시를 읽도록
 
   const effects: GateEffects = {};

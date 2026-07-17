@@ -24,6 +24,14 @@ import {
   SPLASH_WIDE_MIN_COLUMNS,
   SPLASH_HERO_MIN_COLUMNS,
   WELCOME_LINE,
+  formatTabStatusGlyph,
+  computeContentColumns,
+  SIDEBAR_COLUMNS,
+  tailLines,
+  computePreviewRowBudget,
+  PREVIEW_RESERVED_ROWS,
+  formatSidebarRepoPath,
+  formatReposPanelPath,
 } from "../dist/tui/format.js";
 import { createInitialState, reduce } from "../dist/tui/model.js";
 
@@ -402,4 +410,167 @@ test("SPLASH_WIDE_MIN_COLUMNS(마스코트)과 SPLASH_HERO_MIN_COLUMNS(워드마
   assert.equal(SPLASH_WIDE_MIN_COLUMNS, 60);
   assert.equal(SPLASH_HERO_MIN_COLUMNS, 96);
   assert.ok(SPLASH_HERO_MIN_COLUMNS > SPLASH_WIDE_MIN_COLUMNS);
+});
+
+// ── 탭 상태 어휘 (0.10.0 A3b ST9) — tabs.ts TabStatus를 좌측 사이드바에 표시할 아이콘/톤으로
+// 번역한다. 기존 ReposPanel의 ●활성/○idle(게이트 설치 여부)과 겹치면 오독이므로 완전히 다른
+// 어휘를 쓴다(▶스트리밍/⏸승인대기/●생존/○세션없음/✖사망) — braintrust UX 렌즈 확정 사양. ──
+
+test("formatTabStatusGlyph: 5개 상태 전부 서로 다른 아이콘(오독 방지)", () => {
+  const statuses = ["streaming", "awaiting-approval", "alive", "no-session", "dead"];
+  const icons = statuses.map((s) => formatTabStatusGlyph(s).icon);
+  assert.equal(new Set(icons).size, 5, "5개 상태의 아이콘이 전부 달라야 한다");
+});
+
+test("formatTabStatusGlyph: 정확한 어휘 사양(braintrust UX 렌즈 확정)", () => {
+  assert.equal(formatTabStatusGlyph("streaming").icon, "▶");
+  assert.equal(formatTabStatusGlyph("awaiting-approval").icon, "⏸");
+  assert.equal(formatTabStatusGlyph("alive").icon, "●");
+  assert.equal(formatTabStatusGlyph("no-session").icon, "○");
+  assert.equal(formatTabStatusGlyph("dead").icon, "✖");
+});
+
+test("formatTabStatusGlyph: 승인대기는 최상위 시각 우선순위(yellow=warn 톤)", () => {
+  assert.equal(formatTabStatusGlyph("awaiting-approval").tone, "warn");
+});
+
+test("formatTabStatusGlyph: 사망은 danger 톤(red), 세션없음/유휴는 danger가 아님(과잉경고 방지)", () => {
+  assert.equal(formatTabStatusGlyph("dead").tone, "danger");
+  assert.notEqual(formatTabStatusGlyph("no-session").tone, "danger");
+  assert.notEqual(formatTabStatusGlyph("alive").tone, "danger");
+});
+
+test("formatTabStatusGlyph: label은 사람이 읽을 한글 문구(빈 문자열 아님)", () => {
+  for (const s of ["streaming", "awaiting-approval", "alive", "no-session", "dead"]) {
+    assert.ok(formatTabStatusGlyph(s).label.length > 0);
+  }
+});
+
+// ── 2컬럼 레이아웃 가용폭 재산정 (0.10.0 A3b ST9) — SplashHero/대화 컬럼은 전체 터미널 폭이
+// 아니라 "좌측 사이드바를 뺀 나머지"만 쓸 수 있다. 임계값(SPLASH_WIDE/HERO_MIN_COLUMNS)은
+// 무변경 — 그 임계값에 넣는 *입력값*을 전체 폭에서 사이드바 폭을 뺀 값으로 바꾸는 게 이 함수. ──
+
+test("SIDEBAR_COLUMNS: 양수의 합리적인 고정폭(WelcomeCard CARD_WIDTH=54와 같은 고정폭 관례)", () => {
+  assert.ok(SIDEBAR_COLUMNS > 0);
+  assert.ok(SIDEBAR_COLUMNS < 60, "사이드바가 히어로 임계값(60)보다 넓으면 좁은 터미널에서 남는 폭이 없다");
+});
+
+test("computeContentColumns: 사이드바 없음(0)이면 전체 폭 그대로(단일 컬럼 기존 동작 보존)", () => {
+  assert.equal(computeContentColumns(120, 0), 120);
+});
+
+test("computeContentColumns: 전체 폭에서 사이드바 폭을 뺀 값", () => {
+  assert.equal(computeContentColumns(120, SIDEBAR_COLUMNS), 120 - SIDEBAR_COLUMNS);
+});
+
+test("computeContentColumns: 사이드바가 전체 폭보다 넓어도 음수를 반환하지 않는다(0 하한)", () => {
+  assert.equal(computeContentColumns(10, SIDEBAR_COLUMNS), 0);
+});
+
+test("computeContentColumns: 2컬럼 레이아웃(사이드바 포함) 128열 터미널이 히어로 임계값(96) 밑으로 떨어질 수 있음을 실증", () => {
+  // 이게 ST9의 핵심 동기 — 전체 128열은 SPLASH_HERO_MIN_COLUMNS(96)를 넘지만, 사이드바를 뺀
+  // 가용폭은 96 밑으로 떨어질 수 있다. 이 값을 SplashHero columns prop에 넣지 않으면 실제로
+  // 안 맞는 2컬럼 병치 레이아웃을 잘못 선택한다(터미널 폭 재산정 없이 columns를 그대로 쓰던
+  // 기존 버그, braintrust R1 지적).
+  const available = computeContentColumns(128, SIDEBAR_COLUMNS);
+  assert.ok(available < SPLASH_HERO_MIN_COLUMNS, `사이드바 반영 후 가용폭(${available})이 임계값보다 작아야 이 테스트가 의미 있음`);
+});
+
+// ── 스트리밍 프리뷰 tail 윈도잉 (0.10.0 A3b 실기검증 이슈③, braintrust 4렌즈 만장일치) — ink
+// <Static>은 뷰포트 초과 시 이전 프레임을 못 지워 잔상이 쌓인다(tmux 실측: "안녕하세요" 8회 중복).
+// 표준형(Claude Code 본체·gemini-cli MaxSizedBox 동일 패턴): 마지막 N줄만 남기고 잘림을 표시. ──
+
+test("tailLines: 줄 수가 상한 이하면 원문 그대로(자르지 않음)", () => {
+  assert.equal(tailLines("a\nb\nc", 5), "a\nb\nc");
+  assert.equal(tailLines("a\nb\nc", 3), "a\nb\nc");
+});
+
+test("tailLines: 줄 수가 상한을 넘으면 마지막 몇 줄만 남기고 잘림 헤더를 붙인다(헤더도 예산 안에서 1줄 소비)", () => {
+  const out = tailLines("1\n2\n3\n4\n5", 2);
+  assert.equal(out, "… (+4줄 생략)\n5");
+  assert.equal(out.split("\n").length, 2, "반환값 총 줄 수는 maxLines(2)를 넘지 않아야 한다");
+});
+
+test("tailLines: 계약 — 잘렸을 때 반환값의 총 줄 수는 절대 maxLines를 넘지 않는다(헤더 포함)", () => {
+  for (const maxLines of [1, 2, 3, 5, 10]) {
+    const out = tailLines("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12", maxLines);
+    assert.ok(out.split("\n").length <= maxLines, `maxLines=${maxLines}인데 실제 ${out.split("\n").length}줄 반환`);
+  }
+});
+
+test("tailLines: maxLines=1이면 헤더만(콘텐츠 0줄, 잘림 없는 것처럼 보이는 slice(-0) 함정 없음)", () => {
+  const out = tailLines("1\n2\n3\n4\n5", 1);
+  assert.equal(out, "… (+5줄 생략)");
+});
+
+test("tailLines: maxLines가 0 이하면 빈 문자열", () => {
+  assert.equal(tailLines("a\nb", 0), "");
+  assert.equal(tailLines("a\nb", -1), "");
+});
+
+test("tailLines: 빈 문자열 입력은 빈 문자열 그대로", () => {
+  assert.equal(tailLines("", 5), "");
+});
+
+test("tailLines: 단일 줄(개행 없음)은 상한과 무관하게 그대로", () => {
+  assert.equal(tailLines("한 줄짜리 텍스트", 1), "한 줄짜리 텍스트");
+});
+
+test("computePreviewRowBudget: 전체 행수에서 예약분을 뺀 값", () => {
+  assert.equal(computePreviewRowBudget(40, 10), 30);
+});
+
+test("computePreviewRowBudget: 예약분 미지정 시 PREVIEW_RESERVED_ROWS 기본값 사용", () => {
+  assert.equal(computePreviewRowBudget(40), 40 - PREVIEW_RESERVED_ROWS);
+});
+
+test("computePreviewRowBudget: 결과가 음수로 내려가지 않는다(최소 3행 보장 — 너무 작으면 프리뷰가 아예 안 보임)", () => {
+  assert.equal(computePreviewRowBudget(5, 30), 3);
+});
+
+// ===== formatSidebarRepoPath (0.10.0 tmux 캡처 실증 버그) — 사이드바 폭(36열, 내부 32열)보다 긴
+// repo 경로가 ink Text 줄바꿈으로 │ 테두리를 뚫고 흘러넘쳤다(실측: /mnt/d/workspace/daily-news-
+// dispatch 36자). 폭 예산 = 내부32 − 프리픽스7(커서2+⌃N 3+글리프2) − isStart면 " (시작)" 7. =====
+
+test("formatSidebarRepoPath: 예산 이하 경로는 그대로 반환", () => {
+  assert.equal(formatSidebarRepoPath("/mnt/d/ws/short", false), "/mnt/d/ws/short");
+});
+
+test("formatSidebarRepoPath: 실측 버그 케이스 — 36자 경로가 '…/마지막세그먼트'로 축약되어 25자 예산에 들어간다", () => {
+  const out = formatSidebarRepoPath("/mnt/d/workspace/daily-news-dispatch", false);
+  assert.equal(out, "…/daily-news-dispatch");
+  assert.ok(out.length <= 25, `25자 예산 초과: ${out.length}자`);
+});
+
+test("formatSidebarRepoPath: isStart면 ' (시작)' 접미 7열만큼 예산이 줄어든다(18자)", () => {
+  // 25자 경로 — 일반은 예산(25) 딱 맞아 원본 유지, 시작 repo는 축약
+  const p = "/mnt/d/workspace/dev-note"; // 25자
+  assert.equal(formatSidebarRepoPath(p, false), p);
+  assert.equal(formatSidebarRepoPath(p, true), "…/dev-note");
+});
+
+test("formatSidebarRepoPath: 마지막 세그먼트 자체가 예산을 넘으면 세그먼트 꼬리만 남긴다(테두리 침범 0 계약)", () => {
+  const out = formatSidebarRepoPath("/repo/" + "x".repeat(60), true);
+  assert.ok(out.length <= 18, `18자 예산 초과: ${out.length}자`);
+});
+
+// ===== formatReposPanelPath — ⌃R 토글 ReposPanel도 동일 계열 오버플로(사이드바 수정 시 scope-critic
+// 지적, 2026-07-17). 패널은 고정폭이 아니라 우측 컬럼(터미널−사이드바36) 가변폭이므로 가용폭을
+// 인자로 받는다. 한 줄 오버헤드 = 테두리2+paddingX2+커서2 + 경로 뒤 고정부("  "+상태6+"  "+
+// "defer "+카운트≤3 = 19) = 25. =====
+
+test("formatReposPanelPath: 예산 이하 경로는 그대로 반환(120열 터미널=우측 84열이면 36자 경로 무축약)", () => {
+  const p = "/mnt/d/workspace/daily-news-dispatch"; // 36자 ≤ 84-25=59
+  assert.equal(formatReposPanelPath(p, 84), p);
+});
+
+test("formatReposPanelPath: 좁은 터미널(80열=우측 44열)에서는 축약되어 예산(19자)에 들어간다", () => {
+  const out = formatReposPanelPath("/mnt/d/workspace/daily-news-dispatch", 44);
+  assert.ok(out.length <= 44 - 25, `예산(${44 - 25}자) 초과: "${out}" ${out.length}자`);
+  assert.ok(out.startsWith("…"), "축약 표시로 시작");
+});
+
+test("formatReposPanelPath: 가용폭이 오버헤드 이하로 좁아도 최소 8자는 남긴다(빈 문자열·음수예산 방지)", () => {
+  const out = formatReposPanelPath("/mnt/d/workspace/geobuke-code", 20);
+  assert.ok(out.length >= 1 && out.length <= 8, `최소보장 위반: "${out}" ${out.length}자`);
 });

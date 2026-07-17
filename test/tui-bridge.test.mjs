@@ -13,6 +13,8 @@ import {
   buildGateResultEvent,
   formatEngineFailure,
   formatEngineAbort,
+  formatResumeFallbackBanner,
+  formatCrashDump,
   DeltaAssembler,
 } from "../dist/tui/bridge.js";
 
@@ -206,6 +208,63 @@ test("formatEngineAbort: aborted:true → 중단 문구", () => {
 test("formatEngineAbort: aborted:false/undefined → null", () => {
   assert.equal(formatEngineAbort({ aborted: false }), null);
   assert.equal(formatEngineAbort({}), null);
+});
+
+// ── formatResumeFallbackBanner (0.10.0 A3b ST5 — resume 시도가 SESSION_ENDED로 실패해
+// createEngineSessionWithResumeFallback이 새 세션으로 재시도했을 때, 그 사실을 사용자에게 정직하게
+// 알리는 세션경계 배너. "환각처럼 보일 수 있는 기억 단절"을 배너로 명시해 오해를 막는다. ──
+
+test("formatResumeFallbackBanner: resumeFallback 있으면 이전 세션id를 포함한 경계 문구", () => {
+  const msg = formatResumeFallbackBanner({ resumeFallback: { previousSessionId: "sess-abc123" } });
+  assert.match(msg, /새 세션/);
+  assert.match(msg, /sess-abc123/, "어느 세션이 끊겼는지 식별 가능해야 함");
+});
+
+test("formatResumeFallbackBanner: resumeFallback 없으면 null(정상 진행 — 배너 불필요)", () => {
+  assert.equal(formatResumeFallbackBanner({}), null);
+  assert.equal(formatResumeFallbackBanner({ resumeFallback: undefined }), null);
+});
+
+// ── formatCrashDump (0.10.0 A3b ST12 — 알트스크린 teardown 보존 안 됨의 보완) ──
+
+test("formatCrashDump: text kind 엔트리만 순서대로 이어붙인다", () => {
+  const entries = [
+    { kind: "text", text: "❯ 안녕" },
+    { kind: "text", text: "안녕하세요" },
+  ];
+  const out = formatCrashDump(entries, "SIGINT", "2026-07-16T00:00:00.000Z");
+  assert.match(out, /안녕[\s\S]*안녕하세요/);
+});
+
+test("formatCrashDump: hero·segments kind는 생략(복잡한 조립구조라 평문 재구성 안 함)", () => {
+  const entries = [
+    { kind: "hero", text: undefined },
+    { kind: "segments", text: undefined },
+    { kind: "text", text: "본문만 남음" },
+  ];
+  const out = formatCrashDump(entries, "exit", "2026-07-16T00:00:00.000Z");
+  const bodyLines = out.split("\n").filter((l) => l === "본문만 남음");
+  assert.equal(bodyLines.length, 1);
+  assert.doesNotMatch(out, /undefined/, "text 없는 엔트리가 문자열 'undefined'로 새면 안 됨");
+});
+
+test("formatCrashDump: 헤더에 사유와 시각을 포함한다", () => {
+  const out = formatCrashDump([], "uncaughtException: boom", "2026-07-16T12:34:56.000Z");
+  assert.match(out, /uncaughtException: boom/);
+  assert.match(out, /2026-07-16T12:34:56\.000Z/);
+});
+
+test("formatCrashDump: 빈 scrollback도 크래시 없이 헤더만 반환", () => {
+  const out = formatCrashDump([], "exit", "2026-07-16T00:00:00.000Z");
+  assert.match(out, /gbc TUI 세션 종료/);
+});
+
+test("formatCrashDump: text가 빈 문자열인 엔트리는 제외(빈 줄 오염 방지)", () => {
+  const entries = [{ kind: "text", text: "" }, { kind: "text", text: "실제 내용" }];
+  const out = formatCrashDump(entries, "exit", "2026-07-16T00:00:00.000Z");
+  // 반환값은 항상 trailing newline 1개로 끝난다(포맷 계약) — 그걸 제외한 본문 줄에 빈 줄이 없어야 한다.
+  const bodyLines = out.replace(/\n$/, "").split("\n");
+  assert.ok(!bodyLines.includes(""), "빈 텍스트 엔트리가 빈 줄로 새면 안 됨");
 });
 
 // ── formatEngineFailure: spawn EPERM/EACCES 진단 배선 (0.9.2 ST6 — runEngine이 rethrow하지 않고

@@ -2,6 +2,23 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.10.0] - 2026-07-17
+
+**A3b 다중탭 스위처** — 좌측 상시 사이드바에서 `gbc repos` 등록 repo를 opt-in 탭(⌃1..9 전환, ⌃W opt-out)으로 병행 운용한다(여러 repo 세션 동시 상주, resume 보존, 알트스크린 2컬럼). 이후 tmux 실기검증에서 발견된 이슈들을 braintrust 4렌즈(UX·격리/신뢰·공수/회귀·선례) 만장일치 권고안대로 수정해 함께 발행.
+
+### Added
+- **다중탭 스위처(A3b)** — `tabs.ts` 탭 레지스트리+상태전이, `session-map.ts` repo별 세션 영속, `Sidebar.tsx` 상시 좌측 패널(등록 repo 목록+탭 상태 글리프 ▶⏸●○✖+하단 마스코트), 탭전환 시 TuiState 완전재시드, 크래시 덤프 4경로(`.gbc/crash-dump.txt`), `store.ts` atomic write+락.
+
+### Fixed
+- **auto-memory 격리 누출** — `settingSources:[]`는 auto-memory(`~/.claude/projects/<repo>/memory/`)를 제어하지 않는다는 게 SDK 공식 문서로 확인됐다. 새 `gbc tui` 세션이 도구 호출 없이 해당 repo의 과거 작업 메모를 알고 응답하는 것을 실측했다(트랜스크립트 확인) — 방치 시 gbc TUI 대화가 사용자의 Claude Code 프로젝트 메모리를 조용히 갱신하는 **쓰기 역류** 위험까지 있다. `buildEngineOptions`(A-mode SDK 엔진)에 `settings:{autoMemoryEnabled:false}`를 배선해 차단.
+- **게이트 판정 편향(신규 발견)** — keyless 환경의 `judgeViaCli`/`judgeViaCliWin`(CLI 폴백)도 같은 경로로 판정대상 repo의 auto-memory를 읽어, "이 작업은 이미 완료됐다"는 메모리 서사에 편향된 답을 만드는 것을 실측 확인(headless `claude -p` 스모크: memory 있으면 "완료됐다"+메모리 근거 명시 → `--settings '{"autoMemoryEnabled":false}'` 적용 시 git diff 기반 정확한 "미완" 판단으로 반전). `resolveNoMemorySettingsPath()`가 `~/.gbc/no-memory-settings.json`을 지연 생성해 CLI `--settings`로 차단(파일 준비 실패 시 플래그 자체를 생략하는 fail-open — 존재하지 않는 설정 파일을 넘기면 claude CLI가 즉시 하드 에러하는 것을 실측 확인했기 때문).
+- **스트리밍 프리뷰 중복 렌더** — ink `<Static>`은 alt-screen 동적 영역(사이드바 포함) 전체가 터미널 행수를 넘으면 이전 프레임을 지우지 못해 잔상이 쌓인다(tmux 실측: 같은 응답 첫 줄이 8회 중복 관측). `tailLines`/`computePreviewRowBudget`(순수함수, `src/tui/format.ts`)로 스트리밍 프리뷰·승인 대기 화면(`ApprovalBox`의 reason·derivedCase·편집 중 텍스트)을 터미널 행수 예산 안으로 잘라 렌더 — 완성된 텍스트는 그대로 스크롤백에 커밋되므로 정보 손실 없음.
+- **사이드바·⌃R 패널 경로 오버플로**(tmux 실캡처 발견) — 폭 예산보다 긴 repo 경로(예: `/mnt/d/workspace/daily-news-dispatch` 36자)가 ink Text 줄바꿈으로 `│` 테두리를 뚫고 흘러넘쳤다. `formatSidebarRepoPath`(사이드바, 예산 = 내부32−프리픽스7−시작접미7)·`formatReposPanelPath`(⌃R 패널, 예산 = 우측 컬럼 가용폭−오버헤드25, 최소 8자)로 `…/마지막세그먼트` 축약. 사이드바 `flexShrink={0}` 동반 — ink Box 기본 flexShrink=1이라 좁은 터미널(80열 실측)에서 "고정폭" 36이 27로 쪼그라들어 축약 예산이 무력화되던 것을 차단.
+
+### 문서화
+- 스크롤백 전체폭 레이아웃은 ink 구조적 제약에 따른 의도된 설계로 명시(README "풀스크린 TUI" 절).
+- gbc 세션 격리 규율에 "끊는 것/공유하는 것" 범위를 명시(README).
+
 ## [0.9.4] - 2026-07-15
 
 `gbc tui`가 매 제출마다 새 SDK 프로세스를 spawn해 대화 연속성이 없고(이전 턴을 기억 못함) 체감 지연이 컸던 문제(스트리밍 미배선, 완료까지 스피너만)의 근본수정. hook **명령** 계약 무변경 = **재init 불요**.

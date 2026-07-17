@@ -1148,9 +1148,12 @@ async function cmdTui(args: string[]): Promise<void> {
     ]);
     // exitOnCtrlC:false(0.9.2 ST10) — ink 기본은 첫 Ctrl+C에서 바로 프로세스를 죽인다. app.tsx가
     // 2단 확인(한 번 더 눌러야 종료)을 직접 구현하므로 ink의 즉시종료를 꺼야 한다.
+    // alternateScreen(0.10.0 A3b ST10) — 터틀 덱 2컬럼 레이아웃 확정과 함께 승인된 전환(0.9.0
+    // "인라인+Static, alt-screen 기각" 결정의 공식 번복 — project_0_9_0_tui_stack_decision.md History).
+    // teardown 프레임은 보존되지 않는다(ink 공식 동작) — 그 보완이 ST12 크래시 덤프.
     const { waitUntilExit } = render(
       React.createElement(App, { cwd, version: PKG_VERSION, ...(model ? { model } : {}) }),
-      { exitOnCtrlC: false },
+      { exitOnCtrlC: false, alternateScreen: true },
     );
     await waitUntilExit();
   } catch (e) {

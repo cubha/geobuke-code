@@ -3,7 +3,7 @@
 // (~/.gbc/api-key·~/.gbc/version-check.json과 동위. gbcDir(homedir())가 ~/.gbc를 보장.)
 import { homedir } from "node:os";
 import { join, resolve, isAbsolute } from "node:path";
-import { gbcDir, readJson, readJsonArray, writeJson } from "./store.js";
+import { gbcDir, readJson, readJsonArray, writeJson, withStoreLock } from "./store.js";
 
 function reposPath(): string {
   return join(gbcDir(homedir()), "repos.json");
@@ -21,24 +21,33 @@ export function loadRepos(): string[] {
   );
 }
 
-/** repo 등록(절대경로 정규화·멱등 dedup). 반환=등록 후 전체 목록. */
+/**
+ * repo 등록(절대경로 정규화·멱등 dedup). 반환=등록 후 전체 목록.
+ * withStoreLock(0.10.0 A3b ST8): read(loadRepos)→modify→write 전체를 락으로 감싼다 — temp+rename
+ * 단독으로는 이 read-modify-write 시퀀스 중간에 다른 프로세스(gbc CLI 단발 호출 vs TUI 장수 프로세스)가
+ * 끼어들어 서로의 추가/삭제를 지우는 lost-update를 막지 못한다(scope-critic 지적).
+ */
 export function addRepo(path: string): string[] {
   const abs = resolve(path);
-  const repos = loadRepos();
-  if (!repos.includes(abs)) {
-    repos.push(abs);
-    writeJson(reposPath(), repos);
-  }
-  return repos;
+  return withStoreLock(reposPath(), () => {
+    const repos = loadRepos();
+    if (!repos.includes(abs)) {
+      repos.push(abs);
+      writeJson(reposPath(), repos);
+    }
+    return repos;
+  });
 }
 
-/** repo 등록 해제(절대경로 정규화). 반환=해제 후 전체 목록. */
+/** repo 등록 해제(절대경로 정규화). 반환=해제 후 전체 목록. withStoreLock — addRepo와 동일 이유. */
 export function removeRepo(path: string): string[] {
   const abs = resolve(path);
-  const repos = loadRepos();
-  const next = repos.filter((r) => r !== abs);
-  if (next.length !== repos.length) writeJson(reposPath(), next);
-  return next;
+  return withStoreLock(reposPath(), () => {
+    const repos = loadRepos();
+    const next = repos.filter((r) => r !== abs);
+    if (next.length !== repos.length) writeJson(reposPath(), next);
+    return next;
+  });
 }
 
 // ===== verify --run 홈 pin (0.6.0 ST-D) =====
@@ -64,10 +73,12 @@ export function getVerifyRunPin(repoPath: string): string | null {
   return typeof cmd === "string" && cmd.trim() !== "" ? cmd : null;
 }
 
-/** repo별 러너 명령 pin 저장(덮어쓰기). */
+/** repo별 러너 명령 pin 저장(덮어쓰기). withStoreLock — addRepo와 동일한 read-modify-write 보호. */
 export function setVerifyRunPin(repoPath: string, cmd: string): void {
   const abs = resolve(repoPath);
-  const raw = readVerifyRunMap();
-  raw[abs] = cmd;
-  writeJson(verifyRunPath(), raw);
+  withStoreLock(verifyRunPath(), () => {
+    const raw = readVerifyRunMap();
+    raw[abs] = cmd;
+    writeJson(verifyRunPath(), raw);
+  });
 }
