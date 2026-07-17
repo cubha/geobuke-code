@@ -2957,38 +2957,56 @@ test("computeMetrics: scope 롤업(파급반경 broken·사다리 걸림·degrad
 
 test("buildCliInvocation: 동적 user는 stdin에만 실리고 argv에 없다", () => {
   const user = "[현재 편집] rm -rf $(secret) `whoami` 매우 긴 diff 본문";
-  const inv = buildCliInvocation("SYSTEM", user, "claude-haiku-4-5");
+  const inv = buildCliInvocation("SYSTEM", user, "claude-haiku-4-5", null);
   assert.equal(inv.stdin, user);
   assert.ok(!inv.argv.some((a) => a.includes(user)), "user가 argv에 노출되면 안 됨");
   assert.ok(!inv.argv.some((a) => a.includes("whoami")), "user 부분 문자열도 argv 금지");
 });
 
 test("buildCliInvocation: 정적 system은 --append-system-prompt argv로 유지", () => {
-  const inv = buildCliInvocation("GATE_SYS_PROMPT", "user", "claude-haiku-4-5");
+  const inv = buildCliInvocation("GATE_SYS_PROMPT", "user", "claude-haiku-4-5", null);
   const i = inv.argv.indexOf("--append-system-prompt");
   assert.ok(i >= 0, "--append-system-prompt 플래그 존재");
   assert.equal(inv.argv[i + 1], "GATE_SYS_PROMPT");
 });
 
 test("buildCliInvocation: -p는 프롬프트 인자 없이 단독(다음 원소는 플래그)", () => {
-  const inv = buildCliInvocation("S", "U", "claude-haiku-4-5");
+  const inv = buildCliInvocation("S", "U", "claude-haiku-4-5", null);
   const i = inv.argv.indexOf("-p");
   assert.ok(i >= 0, "-p 존재");
   assert.ok(String(inv.argv[i + 1] ?? "--").startsWith("--"), "-p 뒤는 프롬프트가 아닌 플래그");
 });
 
 test("buildCliInvocation: 모델은 safeModel 화이트리스트 경유(메타문자→기본모델)", () => {
-  const inv = buildCliInvocation("S", "U", "evil;model$(x)");
+  const inv = buildCliInvocation("S", "U", "evil;model$(x)", null);
   const i = inv.argv.indexOf("--model");
   assert.equal(inv.argv[i + 1], "claude-haiku-4-5");
-  const ok = buildCliInvocation("S", "U", "claude-sonnet-4-6");
+  const ok = buildCliInvocation("S", "U", "claude-sonnet-4-6", null);
   assert.equal(ok.argv[ok.argv.indexOf("--model") + 1], "claude-sonnet-4-6");
 });
 
 test("buildCliInvocation: --output-format json 유지(기존 파싱 계약 보존)", () => {
-  const inv = buildCliInvocation("S", "U", "claude-haiku-4-5");
+  const inv = buildCliInvocation("S", "U", "claude-haiku-4-5", null);
   const i = inv.argv.indexOf("--output-format");
   assert.equal(inv.argv[i + 1], "json");
+});
+
+// ===== 0.10.0 A3b 실기검증 이슈①(격리 렌즈 신규발견+실측 확정, 2026-07-16): judge CLI 폴백이
+// 판정대상 repo의 auto-memory를 읽어 "이미 완료됐다"는 편향 답변을 만든다(headless `claude -p`
+// 실측: baseline="0.10.0 완료됐다"+메모리 근거 명시 vs `--settings '{"autoMemoryEnabled":false}'`
+// 적용 시 git diff 기반 정확한 미완 판단으로 반전). buildCliInvocation의 settingsPath 4번째
+// 인자가 이 플래그를 배선한다. =====
+
+test("buildCliInvocation: settingsPath가 있으면 --settings 플래그로 배선된다", () => {
+  const inv = buildCliInvocation("S", "U", "claude-haiku-4-5", "/home/user/.gbc/no-memory-settings.json");
+  const i = inv.argv.indexOf("--settings");
+  assert.ok(i >= 0, "--settings 플래그 존재");
+  assert.equal(inv.argv[i + 1], "/home/user/.gbc/no-memory-settings.json");
+});
+
+test("buildCliInvocation: settingsPath가 null이면 --settings 플래그 자체를 생략한다(fail-open — 파일 쓰기 실패 시 claude CLI가 'Settings file not found'로 즉시 에러 종료하므로, 없는 경로를 억지로 넘기면 판정 자체가 깨진다)", () => {
+  const inv = buildCliInvocation("S", "U", "claude-haiku-4-5", null);
+  assert.ok(!inv.argv.includes("--settings"), "settingsPath 없으면 --settings 미포함");
 });
 
 // ===== ST2 (0.5.3): version-check latest semver 형식 검증 =====

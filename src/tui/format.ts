@@ -4,6 +4,7 @@
 // color>)는 소비처(ST5) 책임이다. 단 마스코트는 픽셀아트 특성상 이 파일에서 ANSI 문자열까지 만든다.
 
 import type { TuiState, Statusline } from "./model.js";
+import type { TabStatus } from "./tabs.js";
 
 // ── 팔레트 & 마스코트 ──
 
@@ -205,6 +206,59 @@ export function selectMascot(terminalWidth: number): readonly string[] {
  */
 export const SPLASH_HERO_MIN_COLUMNS = 96;
 
+/**
+ * 좌측 상시 사이드바 고정폭(0.10.0 A3b ST9, 터틀 덱 2컬럼 레이아웃) — WelcomeCard의 CARD_WIDTH(54)와
+ * 같은 고정폭 관례. abbreviateDir 기본폭(formatStatusline dirWidth=40)보다 살짝 좁게 잡아 상태
+ * 아이콘+여백까지 borderStyle 안에 들어오게 한다. SPLASH_WIDE_MIN_COLUMNS(60)보다 좁아야 가장
+ * 좁은 지원 터미널에서도 대화 컬럼에 남는 폭이 있다.
+ */
+export const SIDEBAR_COLUMNS = 36;
+
+/**
+ * 2컬럼 레이아웃에서 우측(스플래시/대화) 컬럼이 실제로 쓸 수 있는 폭(순수) — 전체 터미널 폭에서
+ * 좌측 사이드바 폭을 뺀 값. 사이드바가 없으면(단일 컬럼, sidebarColumns=0) 전체 폭 그대로 반환해
+ * 기존(0.9.x 단일 컬럼) 동작을 보존한다. SplashHero의 columns prop은 이 함수의 반환값을 받아야
+ * 한다 — 전체 폭을 그대로 넣으면 사이드바가 실제로 차지하는 폭을 무시하고 안 맞는 2컬럼 병치
+ * 레이아웃을 잘못 선택한다(braintrust R1 지적).
+ */
+export function computeContentColumns(totalColumns: number, sidebarColumns: number): number {
+  return Math.max(0, totalColumns - sidebarColumns);
+}
+
+/**
+ * 스트리밍 프리뷰 행수 예약분(0.10.0 A3b 실기검증 이슈③) — 사이드바(테두리2+헤더1+repo≤9+마스코트
+ * 미니3)+우측 고정UI(스피너1+입력창테두리포함3+게이트줄1+상태줄1) 대략치. ink는 alt-screen에서
+ * Static 밖 동적 영역 전체(사이드바 포함)를 매 프레임 재렌더하는데, 그 합이 터미널 행수를 넘으면
+ * 이전 프레임을 못 지워 잔상이 쌓인다(tmux 실측: "안녕하세요! 👋" 8회 중복). 정밀 측정이 아닌
+ * 보수적 여유값 — 터미널이 이보다 낮으면 여전히 초과 가능한 알려진 한계(완전 해소 아님).
+ */
+export const PREVIEW_RESERVED_ROWS = 21;
+
+/** 전체 터미널 행수에서 예약분을 뺀 스트리밍 프리뷰 행 상한(순수). 최소 3행 보장 — 0이면 프리뷰가 아예 안 보여 스트리밍 중임을 알 길이 없다. */
+export function computePreviewRowBudget(totalRows: number, reservedRows: number = PREVIEW_RESERVED_ROWS): number {
+  return Math.max(3, totalRows - reservedRows);
+}
+
+/**
+ * 마지막 몇 줄만 남기고 잘림을 표시(순수). **계약: 잘렸을 때 반환값의 총 줄 수는 절대 maxLines를
+ * 넘지 않는다** — 잘림 헤더("… (+N줄 생략)")도 예산 안에서 1줄을 소비한다(scope-critic 지적,
+ * 헤더를 예산 밖에서 덧붙이면 호출부가 maxLines로 예약한 행수를 실제로는 넘겨 렌더해 이슈③(잔상)이
+ * 재발한다). 논리 줄(개행) 기준이라 소프트랩(터미널 폭 초과로 한 논리줄이 화면 여러 행을 먹는
+ * 경우)은 반영하지 않는다 — computePreviewRowBudget의 보수적 여유값이 이 오차를 흡수하는 걸
+ * 전제한다(알려진 단순화).
+ */
+export function tailLines(text: string, maxLines: number): string {
+  if (maxLines <= 0) return "";
+  if (!text) return text;
+  const lines = text.split("\n");
+  if (lines.length <= maxLines) return text;
+  const keep = Math.max(0, maxLines - 1); // 헤더 1줄이 예산을 소비
+  const omitted = lines.length - keep;
+  const header = `… (+${omitted}줄 생략)`;
+  if (keep === 0) return header; // slice(-0)은 전체 배열을 반환하는 함정 — keep=0은 별도 분기
+  return `${header}\n${lines.slice(-keep).join("\n")}`;
+}
+
 // ── 시맨틱 톤 & 세그먼트 ──
 
 export type Tone = "plain" | "dim" | "accent" | "warn" | "danger" | "code";
@@ -344,11 +398,63 @@ export function abbreviateDir(dir: string, maxWidth: number): string {
   return `…/${tail.slice(-(Math.max(1, maxWidth - 2)))}`;
 }
 
+// ── 사이드바 repo 경로 축약 (0.10.0 tmux 캡처 실증 버그) ──
+// 사이드바 내부 가용폭 = SIDEBAR_COLUMNS(36) − 테두리2 − paddingX2 = 32. 각 repo 줄의 프리픽스
+// = 커서("❯ "/"  ")2 + "⌃N "3 + 상태글리프("▶ "/"· ")2 = 7. 시작 repo는 " (시작)" 접미 7열
+// (공백1+괄호2+한글2자×2)이 더 붙는다. 이 예산을 넘는 경로는 ink Text가 줄바꿈해 │ 테두리를
+// 뚫고 흘러넘쳤다(실측: /mnt/d/workspace/daily-news-dispatch 36자, 2026-07-17 캡처).
+const SIDEBAR_INNER_COLUMNS = SIDEBAR_COLUMNS - 4;
+const SIDEBAR_REPO_PREFIX_COLUMNS = 7;
+const SIDEBAR_START_SUFFIX_COLUMNS = 7;
+
+/** 사이드바 repo 목록 한 줄에 들어가도록 경로를 폭 예산에 맞게 축약(순수). */
+export function formatSidebarRepoPath(path: string, isStart: boolean): string {
+  const budget =
+    SIDEBAR_INNER_COLUMNS - SIDEBAR_REPO_PREFIX_COLUMNS - (isStart ? SIDEBAR_START_SUFFIX_COLUMNS : 0);
+  return abbreviateDir(path, budget);
+}
+
+// ⌃R 토글 ReposPanel도 동일 계열 오버플로(사이드바 수정 시 scope-critic 지적, 2026-07-17).
+// 패널은 고정폭이 아닌 우측 컬럼(터미널−사이드바) 가변폭 — 한 줄 오버헤드 = 테두리2 + paddingX2
+// + 커서("❯ "/"  ")2 + 경로 뒤 고정부("  "2 + 상태("● 활성"/"○ idle")6 + "  "2 + "defer "6 +
+// 카운트≤3) = 25. 최소 8자는 남긴다(극단적으로 좁은 터미널에서 빈 문자열·음수 예산 방지 —
+// 어차피 그 폭에선 패널 전체가 깨지므로 경로 식별자 최소치만 보장).
+const REPOS_PANEL_ROW_OVERHEAD = 25;
+
+/** ⌃R ReposPanel 한 줄에 들어가도록 경로를 가용폭(우측 컬럼) 예산에 맞게 축약(순수). */
+export function formatReposPanelPath(path: string, contentColumns: number): string {
+  return abbreviateDir(path, Math.max(8, contentColumns - REPOS_PANEL_ROW_OVERHEAD));
+}
+
 export function formatUsageBar(pct: number, width = 10): string {
   const clamped = Math.max(0, Math.min(100, pct));
   const filled = Math.round((clamped / 100) * width);
   const bar = "▰".repeat(filled) + "▱".repeat(width - filled);
   return `${bar} ${Math.round(clamped)}%`;
+}
+
+// ── 탭 상태 어휘 (0.10.0 A3b ST9) ──
+// ReposPanel의 기존 ●활성/○idle(게이트 설치 여부, 파일시스템 조회)과 완전히 다른 축이라 어휘도
+// 겹치지 않게 새로 정한다 — 세션 "생존 여부"를 나타내지, "이 repo에 gbc가 설치돼 있나"가 아니다.
+// 승인대기가 시각 우선순위 최상위(yellow)인 이유: 사용자 입력을 기다리는 상태가 가장 눈에 띄어야
+// 한다(braintrust UX 렌즈 확정 사양) — 그 외 danger는 사망(✖)에만 쓴다(과잉경고 방지).
+
+export interface TabStatusGlyph {
+  icon: string;
+  label: string;
+  tone: Tone;
+}
+
+const TAB_STATUS_GLYPHS: Record<TabStatus, TabStatusGlyph> = {
+  streaming: { icon: "▶", label: "스트리밍", tone: "accent" },
+  "awaiting-approval": { icon: "⏸", label: "승인대기", tone: "warn" },
+  alive: { icon: "●", label: "생존", tone: "accent" },
+  "no-session": { icon: "○", label: "세션없음", tone: "dim" },
+  dead: { icon: "✖", label: "사망", tone: "danger" },
+};
+
+export function formatTabStatusGlyph(status: TabStatus): TabStatusGlyph {
+  return TAB_STATUS_GLYPHS[status];
 }
 
 export function formatStatusline(data: Statusline, opts?: { dirWidth?: number }): TextSegment[] {

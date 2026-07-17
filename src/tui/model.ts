@@ -89,7 +89,12 @@ export type TuiEvent =
   | { type: "CTRL_C_PRESSED" }
   | { type: "CTRL_C_RESET" }
   | { type: "STREAM_DELTA"; text: string }
-  | { type: "STREAM_COMMIT" };
+  | { type: "STREAM_COMMIT" }
+  // 0.10.0 A3b ST11 — 활성 탭 전환. TuiState는 "지금 포커스된 탭의 라이브 뷰"만 표현하므로(tabs.ts
+  // 설계 주석 참조), 다른 repo로 전환하면 그 뷰 전체를 새 탭 기준으로 다시 시드한다(스트리밍·승인·
+  // 게이트 상태는 절대 이어받지 않는다 — 다른 세션의 진행 상태를 여기 남기면 그 자체가 교차오염
+  // 표면이 된다). scrollback 초기화는 app.tsx 책임(이 reducer는 TuiState만 다룸).
+  | { type: "TAB_SWITCHED"; dir: string; branch: string; dirty: boolean; model: string; specCount: number; deferCount: number };
 
 function cycleChoice(current: ApprovalChoice, direction: 1 | -1): ApprovalChoice {
   const idx = APPROVAL_CHOICES.indexOf(current);
@@ -159,6 +164,13 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
 
     case "STREAM_COMMIT":
       return state.streamingText === "" ? state : { ...state, streamingText: "" };
+
+    case "TAB_SWITCHED": {
+      // createInitialState를 그대로 재사용해 "새 탭 = 완전히 새 라이브 뷰" 계약을 한 곳에서만
+      // 정의한다(App 마운트 시드 로직과 동일 조립 방식 — app.tsx가 중복 구현하지 않음).
+      const base = createInitialState({ dir: event.dir, branch: event.branch, dirty: event.dirty, model: event.model });
+      return { ...base, specCount: event.specCount, deferCount: event.deferCount, splashShown: true };
+    }
 
     default:
       return state;

@@ -6,8 +6,12 @@ import { lstatSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { loadRepos } from "../../repos.js";
 import { loadDefers, isClosedStatus } from "../../defer.js";
+import { formatReposPanelPath } from "../format.js";
 
-export function ReposPanel({ cwd }: { cwd: string }) {
+// contentColumns — 이 패널이 놓이는 우측 컬럼(터미널−사이드바) 가용폭. 긴 repo 경로가 ink Text
+// 줄바꿈으로 │ 테두리를 뚫는 오버플로(사이드바와 동일 계열, 2026-07-17 scope-critic 지적) 방지용.
+// 미지정(단독 렌더 테스트 등) 시 80열 보수적 기본값.
+export function ReposPanel({ cwd, contentColumns = 80 }: { cwd: string; contentColumns?: number }) {
   const repos = loadRepos();
 
   return (
@@ -29,7 +33,7 @@ export function ReposPanel({ cwd }: { cwd: string }) {
           const isCwd = r === cwd;
           return (
             <Text key={r}>
-              <Text color={isCwd ? "green" : undefined}>{isCwd ? "❯ " : "  "}{r}</Text>{"  "}
+              <Text color={isCwd ? "green" : undefined}>{isCwd ? "❯ " : "  "}{formatReposPanelPath(r, contentColumns)}</Text>{"  "}
               <Text color={gated ? "green" : "gray"}>{gated ? "● 활성" : "○ idle"}</Text>{"  "}
               defer <Text color={unresolved > 0 ? "yellow" : undefined}>{unresolved}</Text>
             </Text>

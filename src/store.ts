@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, lstatSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmdirSync, lstatSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -63,6 +63,73 @@ export function readJsonArray<T>(path: string): T[] {
   return Array.isArray(raw) ? (raw as T[]) : [];
 }
 
+/**
+ * 원자적 쓰기(0.10.0 A3b ST8) — repos.json/verify-run.json/session-map.json은 다른 프로세스(gbc
+ * CLI 단발 호출·TUI 장수 프로세스)가 동시에 쓸 수 있는 글로벌 파일이다. writeFileSync(path, data)로
+ * 대상 파일을 직접 덮어쓰면, 쓰는 도중(특히 큰 페이로드가 여러 write syscall로 쪼개질 때) 다른
+ * 프로세스가 torn(잘린) JSON을 읽을 수 있다. 같은 디렉토리에 temp로 먼저 쓰고 rename()으로 교체하면
+ * — rename은 POSIX에서 원자적(같은 파일시스템 내)이라 — 읽는 쪽은 항상 "이전 완전한 내용" 또는
+ * "새 완전한 내용" 둘 중 하나만 본다. temp 파일명에 pid를 넣어 서로 다른 프로세스가 동시에 써도
+ * temp끼리 충돌하지 않는다(단일 프로세스 내부는 동기 실행이라 애초에 겹칠 수 없음).
+ */
 export function writeJson(path: string, data: unknown): void {
-  writeFileSync(path, JSON.stringify(data, null, 2) + "\n", "utf8");
+  const tmpPath = join(dirname(path), `.${basenameOf(path)}.tmp-${process.pid}`);
+  writeFileSync(tmpPath, JSON.stringify(data, null, 2) + "\n", "utf8");
+  renameSync(tmpPath, path);
+}
+
+function basenameOf(path: string): string {
+  const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return idx >= 0 ? path.slice(idx + 1) : path;
+}
+
+// ===== 최소 크로스프로세스 락(0.10.0 A3b ST8) =====
+// temp+rename(위 writeJson)은 torn read(쓰는 도중 깨진 내용 읽기)만 막는다 — repos.ts의
+// addRepo/removeRepo, session-map.ts의 setLastSessionId/clearLastSessionId처럼 "읽고→고치고→쓰는"
+// 시퀀스 전체를 다른 프로세스(gbc CLI 단발 호출 vs TUI 장수 프로세스)가 끼어들면 lost-update(먼저
+// 쓴 쪽의 변경이 나중 rename에 덮여 사라짐)가 여전히 가능하다(scope-critic 지적). mkdirSync는 POSIX·
+// Windows 공통으로 "디렉토리가 이미 있으면 EEXIST" 원자성이 보장돼, 별도 의존성 없이 락 프리미티브로
+// 쓸 수 있다.
+
+// 최악의 경우 이 시간까지만 대기 — 그 이상은 fail-open(무기한 차단 금지). TUI는 이 대기 동안 이벤트
+// 루프가 완전히 블로킹되므로(동기 busy-spin, scope-critic 지적) 500ms보다 짧게 잡아 화면 무응답
+// 체감을 줄인다 — 경합 자체가 희귀 이벤트(TUI 저장 vs CLI 단발 호출이 정확히 같은 순간)라 값을
+// 줄여도 lost-update 방지 효과는 거의 그대로 유지된다.
+const LOCK_TIMEOUT_MS = 150;
+const LOCK_RETRY_SPIN_MS = 5;
+
+/** 동기 스핀 대기(짧고 유한) — 이 코드베이스 전체가 동기 I/O라 진짜 sleep이 없다. */
+function spinWait(ms: number): void {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    /* 의도적 busy-wait — LOCK_TIMEOUT_MS로 총 상한이 걸려 있다 */
+  }
+}
+
+/**
+ * path에 대한 read-modify-write 전체를 락으로 감싼다. 락 획득 실패(타임아웃)는 **fail-open**으로
+ * 그냥 진행한다 — 이 락은 최선의 보호이지 게이트가 아니다(gbc의 fail-open 원칙과 동형, judge.ts
+ * failOpenVerdict 참조): 락 파일이 죽은 프로세스 것으로 stale해도 이 프로그램이 영구히 멈추면 안 된다.
+ */
+export function withStoreLock<T>(path: string, fn: () => T): T {
+  const lockDir = `${path}.lock`;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      mkdirSync(lockDir);
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) break; // fail-open
+      spinWait(LOCK_RETRY_SPIN_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      rmdirSync(lockDir);
+    } catch {
+      // 이미 없거나(경합) 정리 실패 — 다음 락 획득자가 mkdirSync로 다시 만들 뿐 무해.
+    }
+  }
 }

@@ -179,6 +179,39 @@ export function formatEngineAbort(result: Pick<EngineResult, "aborted">): string
   return result.aborted ? "🐢 중단됨 — 응답 생성을 취소했습니다" : null;
 }
 
+/**
+ * 0.10.0 A3b ST5 — createEngineSessionWithResumeFallback이 resume 실패로 새 세션을 만들어
+ * 재시도했을 때(EngineResult.resumeFallback) 사용자에게 정직하게 알리는 경계 배너. 이 배너 없이
+ * 조용히 새 세션으로 넘어가면, 모델이 방금 전 대화를 기억 못 하는 게 "환각"처럼 보일 수 있다 —
+ * 실제로는 세션 경계가 끊겼을 뿐임을 명시해 사용자의 오해를 막는다.
+ */
+export function formatResumeFallbackBanner(result: Pick<EngineResult, "resumeFallback">): string | null {
+  if (!result.resumeFallback) return null;
+  return `🐢 이전 세션(${result.resumeFallback.previousSessionId})을 이어받지 못해 새 세션으로 다시 시작했습니다 — 방금 전 대화는 기억하지 못합니다.`;
+}
+
+// ── 크래시 덤프 (0.10.0 A3b ST12) ──
+// 알트스크린(ST10) 전환의 대가: ink는 teardown 프레임을 보존하지 않는다(공식 동작) — 종료 사유
+// 불문(정상 종료·SIGINT·SIGTERM·uncaughtException) 화면이 그냥 사라진다. 대화 자체는 서버측
+// resume(ST2/ST7)이 보존하지만, "화면에 뭐가 떠 있었는지"는 이 덤프가 유일한 복구 경로다.
+
+export interface DumpableEntry {
+  kind: string;
+  text?: string;
+}
+
+/**
+ * scrollback을 사람이 읽을 평문으로 직렬화한다(순수). hero/segments 엔트리는 복잡한 조립 구조라
+ * (SplashHero/Segments) 텍스트로 완전 재구성하지 않고 생략한다 — 덤프의 목적은 "대화 내용 복구"지
+ * 화면 재현이 아니다(text kind만도 실질 대화 내용은 전부 커버).
+ */
+export function formatCrashDump(entries: DumpableEntry[], reason: string, atIso: string): string {
+  const lines = entries.filter((e) => e.kind === "text" && e.text).map((e) => e.text as string);
+  const header = `🐢 gbc TUI 세션 종료 — ${reason} (${atIso})`;
+  const divider = "=".repeat(Math.max(header.length, 20));
+  return `${header}\n${divider}\n${lines.join("\n")}\n`;
+}
+
 // ── partial 스트리밍 델타 어셈블러 (0.9.4 ST3, T2) ──
 
 /** stream_event 메시지에서 이 어셈블러가 읽는 필드만(SDKPartialAssistantMessage 최소 형상). */

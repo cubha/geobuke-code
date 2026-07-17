@@ -3,6 +3,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { ApprovalState, ApprovalChoice } from "../model.js";
 import { APPROVAL_CHOICES } from "../model.js";
+import { tailLines } from "../format.js";
 
 const LABEL: Record<ApprovalChoice, string> = {
   y: "승인 (y)",
@@ -24,10 +25,15 @@ export function ApprovalBox({
   approval,
   editing,
   editText,
+  previewRows = 6,
 }: {
   approval: ApprovalState;
   editing: boolean;
   editText: string;
+  /** 0.10.0 A3b 실기검증 이슈③ scope-critic 지적(ST2 2라운드) — derivedCase/reason도 streamingText와
+   * 같은 근본원인(alt-screen 동적영역 초과 시 ink 잔상)에 노출된다. app.tsx가 스트리밍 프리뷰와
+   * 동일 예산(computePreviewRowBudget)을 넘겨준다 — 미지정(단독 렌더 테스트 등) 시 6줄 보수적 기본값. */
+  previewRows?: number;
 }) {
   const labels = approval.kind === "spec-add" ? LABEL : GENERIC_LABEL;
   return (
@@ -36,18 +42,23 @@ export function ApprovalBox({
         🐢 승인 대기
       </Text>
       {approval.kind === "generic" ? (
-        <Text color="gray">도구 실행 승인 요청{approval.reason ? ` — ${approval.reason}` : ""}</Text>
+        <Text color="gray">
+          도구 실행 승인 요청{approval.reason ? ` — ${tailLines(approval.reason, previewRows)}` : ""}
+        </Text>
       ) : approval.derivedCase === null ? (
         <Text color="gray">엔진이 차단 사유 수신 → 시나리오 도출 중…</Text>
       ) : editing ? (
         <>
-          <Text>수정 중: {editText}█</Text>
+          {/* editText는 Editor 상태(editor.ts)에서 오며 줄 수 상한이 없다 — derivedCase(LLM 도출
+              자유형식 문장)를 그대로 옮겨와 수정하는 경로라 원문 길이를 그대로 물려받는다.
+              reason/derivedCase와 동일 근본원인(scope-critic ST2 2라운드 지적)이라 동일 처리. */}
+          <Text>수정 중: {tailLines(editText, previewRows)}█</Text>
           <Text color="gray">Enter로 편집 확정</Text>
         </>
       ) : (
         <>
           <Text>
-            gbc spec add <Text color="cyan">&quot;{approval.derivedCase}&quot;</Text>
+            gbc spec add <Text color="cyan">&quot;{tailLines(approval.derivedCase, previewRows)}&quot;</Text>
           </Text>
           <Text color="gray">근거: gate BLOCK 해소용 도출 시나리오 — 승인 시 재시도</Text>
         </>
