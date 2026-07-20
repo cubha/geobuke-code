@@ -57,16 +57,6 @@ export const MASCOT_S2: readonly string[] = [
   "....BB...BB....B....BB........",
 ];
 
-// C4 미니 — <60열 폴백, 12×6px → 3줄.
-export const MASCOT_C4: readonly string[] = [
-  "..LLLLLL....",
-  ".LGGGGGGL.MM",
-  ".GGLGGLGG.MB",
-  "DDDDDDDDDDMM",
-  ".CCCCCCCC...",
-  "..MM..MM....",
-];
-
 // 등껍질 배지 — 워드마크 우측 장식(≥96열 2컬럼 레이아웃 한정), 9×6, GEOBUKE 워드마크의 실제
 // 'O' 글리프(WORDMARK_GEOBUKE 17~25열)에서 파생 — 사용자가 "박스드로잉선을 문자열 아스키
 // 박스드로잉과 동일 색상/디자인으로" 요청(2026-07-14 7차 후속). 원본 O자는 속이 빈 고리
@@ -182,71 +172,38 @@ export function renderMascot(matrix: readonly string[], mode: MascotColorMode = 
 }
 
 /**
- * 스플래시 구성요소(마스코트·워드마크)의 "넓은 레이아웃" 임계값 — 단일 소스. app.tsx의 워드마크
- * 표시 조건이 예전엔 `WORDMARK_GEOBUKE[0].length`(59)를 따로 써서 이 상수(60)와 1칸 어긋나
- * "59열=풀 워드마크+미니 마스코트"라는 의도치 않은 조합이 났었다(scope-critic 발견,
- * 2026-07-13 ST13-14 판정 DECISION_CHANGED:yes) — 두 소비처가 이 상수 하나만 참조하도록 통일.
- */
-export const SPLASH_WIDE_MIN_COLUMNS = 60;
-
-/** 활성 영역 폭에 따라 스플래시 마스코트를 고른다(<60열 → C4 미니). */
-export function selectMascot(terminalWidth: number): readonly string[] {
-  return terminalWidth < SPLASH_WIDE_MIN_COLUMNS ? MASCOT_C4 : MASCOT_S2;
-}
-
-/**
  * 워드마크(GEOBUKE)+등껍질 배지 상시노출 임계값(0.10.1 braintrust 2026-07-20 확정) — 워드마크
  * (WORDMARK_GEOBUKE[0].length=59) + WORDMARK_BADGE_GAP(4) + 배지(SHELL_BADGE_GLYPH[0].length=9)
  * = 72. 미만이면 판독 불가한 아스키 잔해가 되므로 텍스트 태그라인(formatTagline)만 표시하는
- * 강등 규칙. 0.9.3까지는 "SPLASH_HERO_MIN_COLUMNS(2컬럼 병치) 이상일 때만" 워드마크를 같이
- * 그렸으나, 0.10.1부터 워드마크 표시는 2컬럼 병치와 *독립* 판정이다(selectHeroLayout) — 이
- * 폭만 넘으면 마스코트/카드가 세로 스택이어도 워드마크는 상단 전체폭에 항상 뜬다.
+ * 강등 규칙.
  */
 export const SPLASH_WORDMARK_MIN_COLUMNS = 72;
 
 /**
- * 마스코트/카드 2컬럼 병치 레이아웃의 "히어로" 임계값(0.9.3 D1, 0.10.1 재계산) — SPLASH_WIDE_MIN_COLUMNS
- * (마스코트 S2/C4 선택, 60열)·SPLASH_WORDMARK_MIN_COLUMNS(워드마크 상시노출, 72열)와 *의도적으로
- * 분리*한다. 3단 반응형: <60열=마스코트 C4 미니+카드 세로스택(워드마크 생략), 60~71열=마스코트
- * S2+카드 세로스택(워드마크 생략), 72~72열=워드마크 노출+세로스택(중간 상태), ≥73열=워드마크+
- * 마스코트·카드 2컬럼 병치. 단일 임계값을 공유하면 이 중간 단계들이 사라진다.
- *
- * 값 근거(2컬럼 폭 예산): HERO_LEFT_MARGIN(3) + 마스코트폭(S2 30) + MASCOT_CARD_GAP(6) +
- * CARD_WIDTH(34, 0.10.1 사이드바 동일폭 통일 — 이전 54) = 73칸. 이전 96(카드54 기준 93칸 예산)은
- * 카드가 34로 좁아지며 더 이상 유효하지 않아 73으로 하향 재계산.
+ * 활성 영역 폭에 따라 워드마크를 상단 전체폭에 그릴지 판정한다(순수, 0.10.1 SubTask8). 구
+ * selectHeroLayout의 twoColumn 축(마스코트+카드 2컬럼 병치)은 폐기 — 카드가 좌측 상시 스택으로
+ * 이동하고 독립 스플래시 마스코트가 사이드바 것 하나로 통합되며(SubTask9/10) 병치 개념 자체가
+ * 없어졌다. selectMascot(<60열 C4 폴백)도 같은 이유로 폐기 — 스플래시엔 이제 마스코트가 없다.
  */
-export const SPLASH_HERO_MIN_COLUMNS = 73;
-
-export interface HeroLayout {
-  /** 워드마크(GEOBUKE)+등껍질 배지를 상단 전체폭에 그릴지 — false면 formatTagline 텍스트만. */
-  showWordmark: boolean;
-  /** 마스코트+카드를 2컬럼으로 병치할지 — false면 세로 스택. */
-  twoColumn: boolean;
-}
-
-/** 활성 영역 폭에 따라 스플래시 히어로 레이아웃을 판정한다(순수, 0.10.1). */
-export function selectHeroLayout(columns: number): HeroLayout {
-  return {
-    showWordmark: columns >= SPLASH_WORDMARK_MIN_COLUMNS,
-    twoColumn: columns >= SPLASH_HERO_MIN_COLUMNS,
-  };
+export function shouldShowWordmark(columns: number): boolean {
+  return columns >= SPLASH_WORDMARK_MIN_COLUMNS;
 }
 
 /**
  * 좌측 상시 사이드바 고정폭 — 0.10.1(braintrust 2026-07-20 확정)에서 WelcomeCard(카드)와 **동일폭
  * 34**로 통일했다. 34 = S2 카와이 마스코트(30폭, MASCOT_S2 실측 — 사이드바에도 이 폭으로 배치,
  * SubTask3) 무잘림 최소치 + 테두리2 + paddingX2. 0.10.0의 36과 카드 CARD_WIDTH(54)가 서로 달라
- * 두 패널 폭이 어긋나던 것을 사용자 실측 지적으로 통일(아티팩트 ff0eb0b1). SPLASH_WIDE_MIN_COLUMNS
- * (60)보다 좁아야 가장 좁은 지원 터미널에서도 대화 컬럼에 남는 폭이 있다.
+ * 두 패널 폭이 어긋나던 것을 사용자 실측 지적으로 통일(아티팩트 ff0eb0b1). SPLASH_WORDMARK_MIN_COLUMNS
+ * (72)보다 좁아야 가장 좁은 지원 터미널에서도 대화 컬럼에 남는 폭이 있다.
  */
 export const SIDEBAR_COLUMNS = 34;
 
 /**
  * 2컬럼 레이아웃에서 우측(스플래시/대화) 컬럼이 실제로 쓸 수 있는 폭(순수) — 전체 터미널 폭에서
  * 좌측 사이드바 폭을 뺀 값. 사이드바가 없으면(단일 컬럼, sidebarColumns=0) 전체 폭 그대로 반환해
- * 기존(0.9.x 단일 컬럼) 동작을 보존한다. SplashHero의 columns prop은 이 함수의 반환값을 받아야
- * 한다 — 전체 폭을 그대로 넣으면 사이드바가 실제로 차지하는 폭을 무시하고 안 맞는 2컬럼 병치
- * 레이아웃을 잘못 선택한다(braintrust R1 지적).
+ * 기존(0.9.x 단일 컬럼) 동작을 보존한다. SplashHeader의 columns prop은 이 함수의 반환값을 받아야
+ * 한다 — 전체 폭을 그대로 넣으면 사이드바가 실제로 차지하는 폭을 무시하고 워드마크 노출 판정을
+ * 잘못 내린다(braintrust R1 지적).
  */
 export function computeContentColumns(totalColumns: number, sidebarColumns: number): number {
   return Math.max(0, totalColumns - sidebarColumns);

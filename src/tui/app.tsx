@@ -23,6 +23,10 @@ import {
   tailLines,
   SIDEBAR_COLUMNS,
   PREVIEW_RESERVED_ROWS,
+  MASCOT_S2,
+  renderMascot,
+  WELCOME_LINE,
+  shouldShowWordmark,
   type CardSkill,
   type TextSegment,
   type Tone,
@@ -53,12 +57,22 @@ import { ApprovalBox } from "./ui/ApprovalBox.js";
 import { MetricsPanel } from "./ui/MetricsPanel.js";
 import { ReposPanel } from "./ui/ReposPanel.js";
 import { SkillsPanel } from "./ui/SkillsPanel.js";
-import { SplashHero } from "./ui/SplashHero.js";
+import { SplashHeader } from "./ui/SplashHeader.js";
+import { WelcomeCard } from "./ui/WelcomeCard.js";
+import { Mascot } from "./ui/Mascot.js";
 import { Sidebar } from "./ui/Sidebar.js";
 import { Frame } from "./ui/Frame.js";
 import { toneColor } from "./ui/theme.js";
 import { scanSkills } from "./skills.js";
 import { GBC_SKILL_NAMES } from "../install.js";
+
+// SubTask9(0.10.1) — 스플래시 히어로의 마스코트는 이제 항상 S2 하나(구 selectMascot의 <60열 C4
+// 폴백 폐기, format.ts 참조) — 사이드바(Sidebar.tsx)와 동일하게 모듈 로드 시 1회만 렌더한다.
+const HERO_MASCOT_LINES = renderMascot(MASCOT_S2);
+// 구 SplashHero.tsx의 여백 사양 그대로 유지(SubTask10에서 좌측 상시 스택으로 재배선 예정 — 그
+// 전까지는 기존 시안 여백을 그대로 보존).
+const HERO_LEFT_MARGIN = 3;
+const HERO_TOP_MARGIN = 2;
 
 // 0.9.3 D2 — 스플래시 카드용 짧은 blurb(⌃S 패널의 SkillInfo.description 전문과는 별개 — 54칸
 // 카드 폭엔 전문이 안 맞아 큐레이션 필요). 이름이 이 표에 없으면 실제 description을 짧게 잘라
@@ -710,14 +724,19 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           <Static items={scrollback}>
             {(entry) =>
               entry.kind === "hero" ? (
-                <SplashHero
-                  key={entry.id}
-                  columns={entry.columns}
-                  version={entry.version}
-                  specCount={entry.specCount}
-                  deferCount={entry.deferCount}
-                  skills={entry.skills}
-                />
+                // SubTask9 과도기 — SplashHeader(헤더만)로 분리했으나 마스코트+카드+웰컴 배선은
+                // 구 SplashHero.tsx 세로스택 경로를 그대로 인라인 보존한다(좌측 상시 스택 이전은
+                // SubTask10 몫). twoColumn 병치 경로는 그 개념 자체가 폐기돼 없다.
+                <Box key={entry.id} flexDirection="column" marginLeft={HERO_LEFT_MARGIN} marginTop={HERO_TOP_MARGIN}>
+                  <SplashHeader columns={entry.columns} version={entry.version} />
+                  <Box flexDirection="column" marginTop={shouldShowWordmark(entry.columns) ? 2 : 0}>
+                    <Mascot lines={HERO_MASCOT_LINES} />
+                    <WelcomeCard specCount={entry.specCount} deferCount={entry.deferCount} skills={entry.skills} />
+                  </Box>
+                  <Box marginTop={1} marginBottom={2}>
+                    <Text color="green">{WELCOME_LINE}</Text>
+                  </Box>
+                </Box>
               ) : entry.kind === "segments" ? (
                 <Segments key={entry.id} segments={entry.segments} />
               ) : (
