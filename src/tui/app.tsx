@@ -19,8 +19,10 @@ import {
   formatMarkdownLite,
   computeContentColumns,
   computePreviewRowBudget,
+  computeFrameLayout,
   tailLines,
   SIDEBAR_COLUMNS,
+  PREVIEW_RESERVED_ROWS,
   type CardSkill,
   type TextSegment,
   type Tone,
@@ -53,6 +55,7 @@ import { ReposPanel } from "./ui/ReposPanel.js";
 import { SkillsPanel } from "./ui/SkillsPanel.js";
 import { SplashHero } from "./ui/SplashHero.js";
 import { Sidebar } from "./ui/Sidebar.js";
+import { Frame } from "./ui/Frame.js";
 import { toneColor } from "./ui/theme.js";
 import { scanSkills } from "./skills.js";
 import { GBC_SKILL_NAMES } from "../install.js";
@@ -118,6 +121,11 @@ function applyEditorKey(input: string, key: Key, s: EditorState): EditorState {
 
 export function App({ cwd, model, version }: { cwd: string; model?: string; version: string }) {
   const { columns, rows } = useWindowSize();
+  // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 활성이면 좌우 거터가 콘텐츠 가용폭을 잠식한다.
+  // 히어로/repos 패널의 columns 산정과 스트리밍 프리뷰 행 예산 모두 이 innerColumns/bandRows를
+  // 거쳐야 프레임 두께만큼 겹치거나 잘리지 않는다(computeFrameLayout은 순수 판정, 실제 렌더는
+  // <Frame>이 전담).
+  const frameLayout = computeFrameLayout(columns, rows);
   const [state, dispatch] = useReducer(reduce, undefined, () => {
     // detectGit은 execSync 2회(git rev-parse·git status)라 lazy initializer 안에서만 불러 마운트
     // 시점 1회로 제한한다 — 컴포넌트 본문 최상단에 두면 매 리렌더(=매 키입력)마다 재실행돼 타이핑이
@@ -294,7 +302,8 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       kind: "hero",
       // ST10(0.10.0 A3b) — 좌측 사이드바가 상시 폭을 차지하므로, 히어로/대화 컬럼은 전체 터미널
       // 폭이 아니라 그 나머지만 쓸 수 있다(ST9 computeContentColumns, braintrust R1 지적).
-      columns: computeContentColumns(columns, SIDEBAR_COLUMNS),
+      // 0.10.1 — '+' 프레임이 활성이면 거터도 추가로 잠식하므로 columns 대신 frameLayout.innerColumns.
+      columns: computeContentColumns(frameLayout.innerColumns, SIDEBAR_COLUMNS),
       version,
       specCount: readSpecCases(cwd).length,
       deferCount: activeDeferItems(cwd).length,
@@ -688,65 +697,75 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   });
 
   return (
-    // ST10(0.10.0 A3b) — 터틀 덱 2컬럼: 좌측 상시 사이드바(고정폭)+우측 대화 컬럼(가변폭, flexGrow).
-    // 사이드바는 토글 패널 시스템(state.panel)과 별개 축이라 ⌃M/⌃R/⌃S 기존 동작은 무변경.
-    <Box flexDirection="row">
-      <Sidebar cwd={cwd} tabs={tabs} />
-      <Box flexDirection="column" flexGrow={1}>
-        <Static items={scrollback}>
-          {(entry) =>
-            entry.kind === "hero" ? (
-              <SplashHero
-                key={entry.id}
-                columns={entry.columns}
-                version={entry.version}
-                specCount={entry.specCount}
-                deferCount={entry.deferCount}
-                skills={entry.skills}
-              />
-            ) : entry.kind === "segments" ? (
-              <Segments key={entry.id} segments={entry.segments} />
-            ) : (
-              <Text key={entry.id} color={toneColor(entry.tone)}>
-                {entry.text}
-              </Text>
-            )
-          }
-        </Static>
-        {state.panel === "metrics" && <MetricsPanel cwd={cwd} />}
-        {state.panel === "repos" && (
-          <ReposPanel cwd={cwd} contentColumns={computeContentColumns(columns, SIDEBAR_COLUMNS)} />
-        )}
-        {state.panel === "skills" && <SkillsPanel cwd={cwd} />}
-        {/* ST5(0.9.4 T2) — Static 밖 동적 영역: partial 델타 진행 중 표시. 완성되면 commitStream()이
-            streamingText를 비우는 동시에 같은 텍스트가 위 Static 스크롤백에 커밋된다(이중출력 방지).
-            0.10.0 A3b 실기검증 이슈③ — 이 영역(사이드바 포함 동적 트리 전체)이 터미널 행수를
-            넘으면 ink가 이전 프레임을 못 지워 잔상이 쌓인다(tmux 실측: "안녕하세요" 8회 중복).
-            tailLines로 마지막 N줄만 렌더 — 완성 텍스트는 무변경으로 Static에 커밋되므로 정보
-            손실은 없다(프리뷰만 잘림). */}
-        {state.streaming && !state.approval && state.streamingText && (
-          <Text>{tailLines(state.streamingText, computePreviewRowBudget(rows))}</Text>
-        )}
-        {state.streaming && !state.approval && (
-          <Text color="green">{formatSpinnerLine(spinnerTick, elapsedMs)}</Text>
-        )}
-        {state.approval ? (
-          <ApprovalBox
-            approval={state.approval}
-            editing={approvalEditing}
-            editText={Editor.getText(approvalEditor)}
-            previewRows={computePreviewRowBudget(rows)}
-          />
-        ) : (
-          <Box borderStyle="round" borderColor="gray" paddingX={1}>
-            <Text color="cyan">❯ </Text>
-            <Text>{Editor.getText(editorState)}</Text>
-            <Text>█</Text>
-          </Box>
-        )}
-        <Segments segments={formatGateLine(state)} />
-        <Segments segments={formatStatusline(state.statusline)} />
+    // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 화면 전체를 감싼다. <Static>/스크롤백 구조는
+    // 무변경(0.10.2 박스형 대화창 스코프 밖) — Frame은 동적 영역(사이드바+대화 컬럼) 바깥쪽
+    // 장식만 담당한다.
+    <Frame columns={columns} rows={rows}>
+      {/* ST10(0.10.0 A3b) — 터틀 덱 2컬럼: 좌측 상시 사이드바(고정폭)+우측 대화 컬럼(가변폭, flexGrow).
+          사이드바는 토글 패널 시스템(state.panel)과 별개 축이라 ⌃M/⌃R/⌃S 기존 동작은 무변경. */}
+      <Box flexDirection="row">
+        <Sidebar cwd={cwd} tabs={tabs} />
+        <Box flexDirection="column" flexGrow={1}>
+          <Static items={scrollback}>
+            {(entry) =>
+              entry.kind === "hero" ? (
+                <SplashHero
+                  key={entry.id}
+                  columns={entry.columns}
+                  version={entry.version}
+                  specCount={entry.specCount}
+                  deferCount={entry.deferCount}
+                  skills={entry.skills}
+                />
+              ) : entry.kind === "segments" ? (
+                <Segments key={entry.id} segments={entry.segments} />
+              ) : (
+                <Text key={entry.id} color={toneColor(entry.tone)}>
+                  {entry.text}
+                </Text>
+              )
+            }
+          </Static>
+          {state.panel === "metrics" && <MetricsPanel cwd={cwd} />}
+          {state.panel === "repos" && (
+            <ReposPanel cwd={cwd} contentColumns={computeContentColumns(frameLayout.innerColumns, SIDEBAR_COLUMNS)} />
+          )}
+          {state.panel === "skills" && <SkillsPanel cwd={cwd} />}
+          {/* ST5(0.9.4 T2) — Static 밖 동적 영역: partial 델타 진행 중 표시. 완성되면 commitStream()이
+              streamingText를 비우는 동시에 같은 텍스트가 위 Static 스크롤백에 커밋된다(이중출력 방지).
+              0.10.0 A3b 실기검증 이슈③ — 이 영역(사이드바 포함 동적 트리 전체)이 터미널 행수를
+              넘으면 ink가 이전 프레임을 못 지워 잔상이 쌓인다(tmux 실측: "안녕하세요" 8회 중복).
+              tailLines로 마지막 N줄만 렌더 — 완성 텍스트는 무변경으로 Static에 커밋되므로 정보
+              손실은 없다(프리뷰만 잘림). */}
+          {state.streaming && !state.approval && state.streamingText && (
+            <Text>
+              {tailLines(
+                state.streamingText,
+                computePreviewRowBudget(rows, PREVIEW_RESERVED_ROWS + frameLayout.bandRows * 2),
+              )}
+            </Text>
+          )}
+          {state.streaming && !state.approval && (
+            <Text color="green">{formatSpinnerLine(spinnerTick, elapsedMs)}</Text>
+          )}
+          {state.approval ? (
+            <ApprovalBox
+              approval={state.approval}
+              editing={approvalEditing}
+              editText={Editor.getText(approvalEditor)}
+              previewRows={computePreviewRowBudget(rows, PREVIEW_RESERVED_ROWS + frameLayout.bandRows * 2)}
+            />
+          ) : (
+            <Box borderStyle="round" borderColor="gray" paddingX={1}>
+              <Text color="cyan">❯ </Text>
+              <Text>{Editor.getText(editorState)}</Text>
+              <Text>█</Text>
+            </Box>
+          )}
+          <Segments segments={formatGateLine(state)} />
+          <Segments segments={formatStatusline(state.statusline)} />
+        </Box>
       </Box>
-    </Box>
+    </Frame>
   );
 }
