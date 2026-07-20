@@ -35,6 +35,7 @@ import {
   PREVIEW_RESERVED_ROWS,
   formatSidebarRepoPath,
   formatReposPanelPath,
+  computeFrameLayout,
 } from "../dist/tui/format.js";
 import { createInitialState, reduce } from "../dist/tui/model.js";
 
@@ -630,4 +631,42 @@ test("formatReposPanelPath: 좁은 터미널(80열=우측 44열)에서는 축약
 test("formatReposPanelPath: 가용폭이 오버헤드 이하로 좁아도 최소 8자는 남긴다(빈 문자열·음수예산 방지)", () => {
   const out = formatReposPanelPath("/mnt/d/workspace/geobuke-code", 20);
   assert.ok(out.length >= 1 && out.length <= 8, `최소보장 위반: "${out}" ${out.length}자`);
+});
+
+// ===== computeFrameLayout (0.10.1 — 외부 '+' 글리프 배경 프레임, braintrust 확정) — ink엔 셀
+// 단위 배경 페인팅이 없어 상하 밴드+좌우 거터를 수동 조립한다. 80열/30행 미만이면 전체 생략
+// (부분 렌더는 반쪽 프레임이 더 깨져 보임 — 활성/비활성만 있고 중간 단계 없음). =====
+
+test("computeFrameLayout: 80열 미만이면 비활성(폭 부족)", () => {
+  const layout = computeFrameLayout(79, 40);
+  assert.equal(layout.enabled, false);
+});
+
+test("computeFrameLayout: 30행 미만이면 비활성(행 부족)", () => {
+  const layout = computeFrameLayout(100, 29);
+  assert.equal(layout.enabled, false);
+});
+
+test("computeFrameLayout: 비활성이면 innerColumns는 입력 columns 그대로(패스스루 — 기존 레이아웃 무변경)", () => {
+  const layout = computeFrameLayout(70, 20);
+  assert.equal(layout.innerColumns, 70);
+  assert.equal(layout.bandRows, 0);
+  assert.equal(layout.gutterColumns, 0);
+});
+
+test("computeFrameLayout: 정확히 경계(80열×30행)면 활성", () => {
+  const layout = computeFrameLayout(80, 30);
+  assert.equal(layout.enabled, true);
+});
+
+test("computeFrameLayout: 활성이면 innerColumns = columns − 거터*2, bandRows/gutterColumns > 0", () => {
+  const layout = computeFrameLayout(120, 40);
+  assert.equal(layout.enabled, true);
+  assert.equal(layout.innerColumns, 120 - layout.gutterColumns * 2);
+  assert.ok(layout.bandRows > 0);
+  assert.ok(layout.gutterColumns > 0);
+});
+
+test("computeFrameLayout: 순수성 — 같은 입력엔 항상 같은 출력", () => {
+  assert.deepEqual(computeFrameLayout(100, 35), computeFrameLayout(100, 35));
 });
