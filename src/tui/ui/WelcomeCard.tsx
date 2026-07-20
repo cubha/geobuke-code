@@ -25,7 +25,11 @@ export function WelcomeCard({
 }) {
   const rows = formatWelcomeCard(specCount, deferCount, skills);
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="green" paddingX={1} width={CARD_WIDTH}>
+    // flexShrink=0 — SubTask10(0.10.1)에서 이 카드가 Sidebar와 같은 열(column)로 상시 좌측
+    // 스택에 합류하며, 그 스택이 flexGrow 대화 컬럼과 같은 행(row)에 놓인다. Sidebar.tsx가 이미
+    // 겪은 것과 동일한 함정(ink Box 기본 flexShrink=1이라 "고정폭"이 실제로는 쪼그라듦, 2026-07-17
+    // tmux 실측) — 같은 원인이라 같은 가드를 적용한다.
+    <Box flexDirection="column" borderStyle="round" borderColor="green" paddingX={1} width={CARD_WIDTH} flexShrink={0}>
       {rows.map((segments, i) => (
         <Segments key={i} segments={segments} />
       ))}

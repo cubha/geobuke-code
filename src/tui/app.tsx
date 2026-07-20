@@ -23,10 +23,7 @@ import {
   tailLines,
   SIDEBAR_COLUMNS,
   PREVIEW_RESERVED_ROWS,
-  MASCOT_S2,
-  renderMascot,
   WELCOME_LINE,
-  shouldShowWordmark,
   type CardSkill,
   type TextSegment,
   type Tone,
@@ -59,18 +56,14 @@ import { ReposPanel } from "./ui/ReposPanel.js";
 import { SkillsPanel } from "./ui/SkillsPanel.js";
 import { SplashHeader } from "./ui/SplashHeader.js";
 import { WelcomeCard } from "./ui/WelcomeCard.js";
-import { Mascot } from "./ui/Mascot.js";
 import { Sidebar } from "./ui/Sidebar.js";
 import { Frame } from "./ui/Frame.js";
 import { toneColor } from "./ui/theme.js";
 import { scanSkills } from "./skills.js";
 import { GBC_SKILL_NAMES } from "../install.js";
 
-// SubTask9(0.10.1) — 스플래시 히어로의 마스코트는 이제 항상 S2 하나(구 selectMascot의 <60열 C4
-// 폴백 폐기, format.ts 참조) — 사이드바(Sidebar.tsx)와 동일하게 모듈 로드 시 1회만 렌더한다.
-const HERO_MASCOT_LINES = renderMascot(MASCOT_S2);
-// 구 SplashHero.tsx의 여백 사양 그대로 유지(SubTask10에서 좌측 상시 스택으로 재배선 예정 — 그
-// 전까지는 기존 시안 여백을 그대로 보존).
+// 구 SplashHero.tsx의 여백 사양 그대로 유지(SubTask10 — 전체폭 헤더로 위치가 바뀌어도 좌측
+// 여백·상단 여백 값 자체는 승인 시안과 동일하게 보존).
 const HERO_LEFT_MARGIN = 3;
 const HERO_TOP_MARGIN = 2;
 
@@ -106,10 +99,10 @@ type ScrollEntry =
   // "text" variant(단일 tone)로 욱여넣으면 조용히 정보가 손실된다(scope-critic 발견, 2026-07-13
   // ST13-14 판정 DECISION_CHANGED:yes). 기존 <Segments> 렌더 관례(formatGateLine/formatStatusline과
   // 동일)를 그대로 재사용해 세그먼트별 톤을 보존한다.
-  | { id: number; kind: "segments"; segments: TextSegment[] }
-  // 0.9.3 D2 — 워드마크+마스코트+카드 2컬럼 병치를 하나의 조립 단위로 커밋(개별 Static 엔트리
-  // 나열이던 기존 방식은 병치·세로중앙정렬·여백을 표현할 수 없었다 — 사용자 실사용 지적).
-  | { id: number; kind: "hero"; columns: number; version: string; specCount: number; deferCount: number; skills: CardSkill[] };
+  | { id: number; kind: "segments"; segments: TextSegment[] };
+// SubTask10(0.10.1) — "hero" variant 폐기. 워드마크+카드+웰컴은 더 이상 대화 스크롤백(Static)의
+// 1회성 커밋 항목이 아니라, splashDismissed 조건부의 일반 JSX로 화면 최상단/좌측 스택에 그린다
+// (Static은 commit-once라 조건부 소멸을 표현할 수 없었다 — SubTask7 scope-critic 판정에서 확인).
 
 function detectGit(cwd: string): { branch: string; dirty: boolean } {
   try {
@@ -166,6 +159,12 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
 
   const [scrollback, setScrollback] = useState<ScrollEntry[]>([]);
   const nextId = useRef(0);
+
+  // SubTask10 — 안내카드의 스킬 목록(skills.ts scanSkills 파일 I/O)만 마운트 시 1회 지연 계산한다.
+  // spec/defer 카운트는 이미 state.specCount/deferCount(위 lazy initializer가 시드)가 있어 별도
+  // 계산이 불필요 — 카드는 splashDismissed=false인 동안(첫 턴 전)만 보이므로 GATE_RESULT로 갱신될
+  // 일도 없다(첫 턴이 시작돼야 GATE_RESULT가 온다).
+  const [cardSkills] = useState(() => resolveCardSkills(cwd));
 
   // ST11(0.10.0 A3b) — 탭 레지스트리(tabs.ts, ST1). cwd(App 시작 repo)가 항상 첫 탭 — tabs.ts
   // "최소 1탭 유지" 불변식과 대칭. activeTabId가 바뀌면 TuiState 전체를 TAB_SWITCHED로 재시드한다
@@ -307,27 +306,8 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     }
   }, []);
 
-  // 스플래시 — 1회 커밋(Static, 단일 "hero" 엔트리). 0.9.3 D2: 워드마크·마스코트·카드를 각자
-  // 독립 Static 엔트리로 나열하던 기존 방식은 병치·세로중앙정렬·여백을 표현할 수 없어(사용자
-  // 실사용 지적, 2026-07-14) SplashHero 컴포넌트 하나로 조립을 위임한다 — 여기선 데이터만 모은다.
-  useEffect(() => {
-    const heroEntry: ScrollEntry = {
-      id: nextId.current++,
-      kind: "hero",
-      // ST10(0.10.0 A3b) — 좌측 사이드바가 상시 폭을 차지하므로, 히어로/대화 컬럼은 전체 터미널
-      // 폭이 아니라 그 나머지만 쓸 수 있다(ST9 computeContentColumns, braintrust R1 지적).
-      // 0.10.1 — '+' 프레임이 활성이면 거터도 추가로 잠식하므로 columns 대신 frameLayout.innerColumns.
-      columns: computeContentColumns(frameLayout.innerColumns, SIDEBAR_COLUMNS),
-      version,
-      specCount: readSpecCases(cwd).length,
-      deferCount: activeDeferItems(cwd).length,
-      skills: resolveCardSkills(cwd),
-    };
-    setScrollback((s) => [heroEntry, ...s]);
-    // splashDismissed는 이제 TURN_START(첫 제출)가 직접 설정한다(0.10.1) — 마운트 시점엔
-    // dispatch할 게 없다. 이 useEffect의 나머지(Static hero 커밋)는 SubTask10에서 걷어낸다.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // SubTask10 — 스플래시(워드마크+카드+웰컴)는 더 이상 Static에 커밋하지 않는다. splashDismissed는
+  // TURN_START(첫 제출)가 직접 설정하고, 아래 root JSX가 그 값을 조건부 렌더로 직접 소비한다.
 
   // repoId(0.10.0 A3b ST3): 이 canUseTool 인스턴스가 어느 repo의 세션에 배선됐는지. getOrCreateSession이
   // 세션 생성 시점에 그 세션의 repoId를 넘긴다 — 지금은 단일 세션(App의 cwd)뿐이라 항상 cwd와 같지만,
@@ -712,32 +692,29 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   });
 
   return (
-    // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 화면 전체를 감싼다. <Static>/스크롤백 구조는
-    // 무변경(0.10.2 박스형 대화창 스코프 밖) — Frame은 동적 영역(사이드바+대화 컬럼) 바깥쪽
-    // 장식만 담당한다.
+    // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 화면 전체를 감싼다. Frame은 동적 영역(헤더+
+    // 좌측 스택+대화 컬럼) 바깥쪽 장식만 담당한다.
     <Frame columns={columns} rows={rows}>
-      {/* ST10(0.10.0 A3b) — 터틀 덱 2컬럼: 좌측 상시 사이드바(고정폭)+우측 대화 컬럼(가변폭, flexGrow).
-          사이드바는 토글 패널 시스템(state.panel)과 별개 축이라 ⌃M/⌃R/⌃S 기존 동작은 무변경. */}
+      {/* SubTask10 — 워드마크는 사이드바까지 포함한 전체 화면 폭 기준으로 좌우 스택 위에 1회
+          그린다(승인 시안). splashDismissed=true(첫 제출 이후)면 완전히 사라진다 — Static
+          커밋이 아니라 일반 조건부 렌더라 소멸이 즉시 반영된다(SubTask7 splashDismissed 참조). */}
+      {!state.splashDismissed && (
+        <Box marginLeft={HERO_LEFT_MARGIN} marginTop={HERO_TOP_MARGIN}>
+          <SplashHeader columns={frameLayout.innerColumns} version={version} />
+        </Box>
+      )}
+      {/* ST10(0.10.0 A3b) — 터틀 덱 2컬럼: 좌측 상시 스택(카드+사이드바, 고정폭)+우측 대화 컬럼
+          (가변폭, flexGrow). 사이드바는 토글 패널 시스템(state.panel)과 별개 축이라 ⌃M/⌃R/⌃S
+          기존 동작은 무변경. SubTask10 — 카드가 사이드바와 동일폭 34로 이 스택에 합류한다. */}
       <Box flexDirection="row">
-        <Sidebar cwd={cwd} tabs={tabs} />
+        <Box flexDirection="column">
+          {!state.splashDismissed && <WelcomeCard specCount={state.specCount} deferCount={state.deferCount} skills={cardSkills} />}
+          <Sidebar cwd={cwd} tabs={tabs} />
+        </Box>
         <Box flexDirection="column" flexGrow={1}>
           <Static items={scrollback}>
             {(entry) =>
-              entry.kind === "hero" ? (
-                // SubTask9 과도기 — SplashHeader(헤더만)로 분리했으나 마스코트+카드+웰컴 배선은
-                // 구 SplashHero.tsx 세로스택 경로를 그대로 인라인 보존한다(좌측 상시 스택 이전은
-                // SubTask10 몫). twoColumn 병치 경로는 그 개념 자체가 폐기돼 없다.
-                <Box key={entry.id} flexDirection="column" marginLeft={HERO_LEFT_MARGIN} marginTop={HERO_TOP_MARGIN}>
-                  <SplashHeader columns={entry.columns} version={entry.version} />
-                  <Box flexDirection="column" marginTop={shouldShowWordmark(entry.columns) ? 2 : 0}>
-                    <Mascot lines={HERO_MASCOT_LINES} />
-                    <WelcomeCard specCount={entry.specCount} deferCount={entry.deferCount} skills={entry.skills} />
-                  </Box>
-                  <Box marginTop={1} marginBottom={2}>
-                    <Text color="green">{WELCOME_LINE}</Text>
-                  </Box>
-                </Box>
-              ) : entry.kind === "segments" ? (
+              entry.kind === "segments" ? (
                 <Segments key={entry.id} segments={entry.segments} />
               ) : (
                 <Text key={entry.id} color={toneColor(entry.tone)}>
@@ -767,6 +744,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           )}
           {state.streaming && !state.approval && (
             <Text color="green">{formatSpinnerLine(spinnerTick, elapsedMs)}</Text>
+          )}
+          {/* SubTask10 — 웰컴 라인은 카드와 짝이던 자리(대화 컬럼, 입력창 바로 위)를 그대로
+              지킨다. 카드와 동일하게 splashDismissed로 소멸. */}
+          {!state.splashDismissed && (
+            <Box marginTop={1} marginBottom={1}>
+              <Text color="green">{WELCOME_LINE}</Text>
+            </Box>
           )}
           {state.approval ? (
             <ApprovalBox
