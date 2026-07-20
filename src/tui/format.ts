@@ -195,16 +195,42 @@ export function selectMascot(terminalWidth: number): readonly string[] {
 }
 
 /**
- * 워드마크+마스코트/카드 2컬럼 병치 레이아웃의 "히어로" 임계값(0.9.3 D1) — SPLASH_WIDE_MIN_COLUMNS
- * (마스코트 S2/C4 선택, 60열)와 *의도적으로 분리*한다. 최종 확정 시안(아티팩트 cb7c6b1c 장면01)의
- * 3단 반응형: <60열=마스코트 C4 미니+카드 세로스택, 60~95열=마스코트 S2+카드 세로스택(워드마크 생략),
- * ≥96열=워드마크+마스코트·카드 2컬럼 병치. 단일 임계값을 공유하면 이 중간 단계가 사라진다.
+ * 워드마크(GEOBUKE)+등껍질 배지 상시노출 임계값(0.10.1 braintrust 2026-07-20 확정) — 워드마크
+ * (WORDMARK_GEOBUKE[0].length=59) + WORDMARK_BADGE_GAP(4) + 배지(SHELL_BADGE_GLYPH[0].length=9)
+ * = 72. 미만이면 판독 불가한 아스키 잔해가 되므로 텍스트 태그라인(formatTagline)만 표시하는
+ * 강등 규칙. 0.9.3까지는 "SPLASH_HERO_MIN_COLUMNS(2컬럼 병치) 이상일 때만" 워드마크를 같이
+ * 그렸으나, 0.10.1부터 워드마크 표시는 2컬럼 병치와 *독립* 판정이다(selectHeroLayout) — 이
+ * 폭만 넘으면 마스코트/카드가 세로 스택이어도 워드마크는 상단 전체폭에 항상 뜬다.
+ */
+export const SPLASH_WORDMARK_MIN_COLUMNS = 72;
+
+/**
+ * 마스코트/카드 2컬럼 병치 레이아웃의 "히어로" 임계값(0.9.3 D1, 0.10.1 재계산) — SPLASH_WIDE_MIN_COLUMNS
+ * (마스코트 S2/C4 선택, 60열)·SPLASH_WORDMARK_MIN_COLUMNS(워드마크 상시노출, 72열)와 *의도적으로
+ * 분리*한다. 3단 반응형: <60열=마스코트 C4 미니+카드 세로스택(워드마크 생략), 60~71열=마스코트
+ * S2+카드 세로스택(워드마크 생략), 72~72열=워드마크 노출+세로스택(중간 상태), ≥73열=워드마크+
+ * 마스코트·카드 2컬럼 병치. 단일 임계값을 공유하면 이 중간 단계들이 사라진다.
  *
  * 값 근거(2컬럼 폭 예산): HERO_LEFT_MARGIN(3) + 마스코트폭(S2 30) + MASCOT_CARD_GAP(6) +
- * CARD_WIDTH(54) = 93칸. 카와이 S2(30×16px, 구 24×10px보다 확대)로 교체하며 84→96으로 상향해
- * 예산을 실제로 커버하도록 재계산했다(구 84는 구버전 25폭 기준 88칸 요구보다도 작아 여유가 없었음).
+ * CARD_WIDTH(34, 0.10.1 사이드바 동일폭 통일 — 이전 54) = 73칸. 이전 96(카드54 기준 93칸 예산)은
+ * 카드가 34로 좁아지며 더 이상 유효하지 않아 73으로 하향 재계산.
  */
-export const SPLASH_HERO_MIN_COLUMNS = 96;
+export const SPLASH_HERO_MIN_COLUMNS = 73;
+
+export interface HeroLayout {
+  /** 워드마크(GEOBUKE)+등껍질 배지를 상단 전체폭에 그릴지 — false면 formatTagline 텍스트만. */
+  showWordmark: boolean;
+  /** 마스코트+카드를 2컬럼으로 병치할지 — false면 세로 스택. */
+  twoColumn: boolean;
+}
+
+/** 활성 영역 폭에 따라 스플래시 히어로 레이아웃을 판정한다(순수, 0.10.1). */
+export function selectHeroLayout(columns: number): HeroLayout {
+  return {
+    showWordmark: columns >= SPLASH_WORDMARK_MIN_COLUMNS,
+    twoColumn: columns >= SPLASH_HERO_MIN_COLUMNS,
+  };
+}
 
 /**
  * 좌측 상시 사이드바 고정폭 — 0.10.1(braintrust 2026-07-20 확정)에서 WelcomeCard(카드)와 **동일폭

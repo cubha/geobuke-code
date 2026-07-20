@@ -2,6 +2,9 @@
 // 조립한다(승인 시안, 아티팩트 cb7c6b1c 장면01). 기존 구현은 워드마크·마스코트·카드를 app.tsx가
 // 각각 독립된 Static 엔트리로 나열해 병치·세로중앙정렬·여백이 전부 빠진 상태였다(사용자 실사용
 // 지적, 2026-07-14) — 이 컴포넌트가 하나의 Static 엔트리로 조립을 대신한다.
+// 0.10.1 — 워드마크 노출(showWordmark)과 2컬럼 병치(twoColumn)가 selectHeroLayout(format.ts)의
+// 독립 불리언 2개로 분리됐다(braintrust 확정). 이전엔 단일 SPLASH_HERO_MIN_COLUMNS 하나로 "96열
+// 미만이면 워드마크째 생략"했으나, 이제 워드마크는 더 좁은 폭(72열)부터 항상 상단에 뜬다.
 import React from "react";
 import { Box, Text } from "ink";
 import {
@@ -10,9 +13,9 @@ import {
   renderWordmark,
   renderShellBadge,
   formatTagline,
+  selectHeroLayout,
   WORDMARK_GEOBUKE,
   WELCOME_LINE,
-  SPLASH_HERO_MIN_COLUMNS,
   type CardSkill,
 } from "../format.js";
 import { Mascot } from "./Mascot.js";
@@ -47,25 +50,14 @@ export function SplashHero({
     </Box>
   );
 
-  // 60~83열: 워드마크 생략, 마스코트(C4 미니 또는 S2)+카드 세로 스택.
-  if (columns < SPLASH_HERO_MIN_COLUMNS) {
-    return (
-      <Box flexDirection="column" marginLeft={HERO_LEFT_MARGIN} marginTop={HERO_TOP_MARGIN}>
-        <Mascot lines={mascotLines} />
-        {card}
-        {welcome}
-      </Box>
-    );
-  }
+  const { showWordmark, twoColumn } = selectHeroLayout(columns);
 
-  // ≥84열: 워드마크(그라데이션)+태그라인(우측 정렬) → 마스코트+카드 2컬럼 병치(세로 중앙정렬).
   // 워드마크 위 여백은 태그라인↔마스코트/카드 사이 여백(HERO_TOP_MARGIN=마스코트+카드 marginTop과
   // 동일값)과 대칭되도록 맞춘다 — 기존엔 위 여백이 0이라 워드마크가 화면 상단에 바짝 붙어 비대칭이었음
-  // (사용자 실사용 지적, 2026-07-14).
-  return (
-    <Box flexDirection="column" marginLeft={HERO_LEFT_MARGIN} marginTop={HERO_TOP_MARGIN}>
-      {/* Mascot은 이름과 달리 "사전 컬러링된 ANSI 줄 배열을 그대로 출력"하는 범용 컴포넌트라
-          워드마크 그라데이션 렌더에도 재사용한다(Mascot.tsx 헤더 주석 참조). */}
+  // (사용자 실사용 지적, 2026-07-14). Mascot은 이름과 달리 "사전 컬러링된 ANSI 줄 배열을 그대로
+  // 출력"하는 범용 컴포넌트라 워드마크 그라데이션 렌더에도 재사용한다(Mascot.tsx 헤더 주석 참조).
+  const header = showWordmark ? (
+    <>
       <Box flexDirection="row">
         <Mascot lines={renderWordmark()} />
         <Box width={WORDMARK_BADGE_GAP} />
@@ -74,11 +66,30 @@ export function SplashHero({
       <Box width={WORDMARK_GEOBUKE[0].length} justifyContent="flex-end">
         <Text color="#166534">{formatTagline(version)}</Text>
       </Box>
-      <Box flexDirection="row" alignItems="center" marginTop={2}>
-        <Mascot lines={mascotLines} />
-        <Box width={MASCOT_CARD_GAP} />
-        {card}
-      </Box>
+    </>
+  ) : (
+    <Text color="#166534">{formatTagline(version)}</Text>
+  );
+
+  // twoColumn=false: 마스코트(C4 미니 또는 S2)+카드 세로 스택. 워드마크가 뜨는 [72,73) 좁은
+  // 중간 구간에서는 header와의 대칭 여백을 유지하기 위해 marginTop=2(showWordmark일 때만).
+  const body = twoColumn ? (
+    <Box flexDirection="row" alignItems="center" marginTop={2}>
+      <Mascot lines={mascotLines} />
+      <Box width={MASCOT_CARD_GAP} />
+      {card}
+    </Box>
+  ) : (
+    <Box flexDirection="column" marginTop={showWordmark ? 2 : 0}>
+      <Mascot lines={mascotLines} />
+      {card}
+    </Box>
+  );
+
+  return (
+    <Box flexDirection="column" marginLeft={HERO_LEFT_MARGIN} marginTop={HERO_TOP_MARGIN}>
+      {header}
+      {body}
       {welcome}
     </Box>
   );
