@@ -458,6 +458,42 @@ export function formatReposPanelPath(path: string, contentColumns: number): stri
   return abbreviateDir(path, Math.max(8, contentColumns - REPOS_PANEL_ROW_OVERHEAD));
 }
 
+// ── 외부 '+' 배경 프레임 (0.10.1 A3b braintrust 확정, 아티팩트 ff0eb0b1) — ink엔 셀 단위 배경
+// 페인팅이 없어 상하 밴드('+'.repeat(cols) 1행)+좌우 거터(고정폭 '+' 컬럼)를 Frame.tsx가 수동
+// 조립한다. 여기(format.ts)는 그 레이아웃 예산만 순수 판정한다 — 실제 렌더는 Frame.tsx 소관.
+// 80열/30행 미만이면 전체 생략(부분 렌더는 반쪽 프레임이 더 깨져 보인다는 braintrust 판정 —
+// 활성/비활성 이진, 중간 강등 단계 없음).
+
+const FRAME_MIN_COLUMNS = 80;
+const FRAME_MIN_ROWS = 30;
+const FRAME_GUTTER_COLUMNS = 2;
+const FRAME_BAND_ROWS = 1;
+
+export interface FrameLayout {
+  /** 프레임을 그릴지 — false면 아래 필드는 전부 0/패스스루(기존 레이아웃 무변경). */
+  enabled: boolean;
+  /** 프레임 내부(사이드바+대화 컬럼)가 실제로 쓸 수 있는 폭 — 비활성이면 입력 columns 그대로. */
+  innerColumns: number;
+  /** 상/하 밴드 각각의 행 수. */
+  bandRows: number;
+  /** 좌/우 거터 각각의 열 수. */
+  gutterColumns: number;
+}
+
+/** 터미널 크기에 따라 외부 '+' 프레임 표시 여부·예산을 판정한다(순수). */
+export function computeFrameLayout(columns: number, rows: number): FrameLayout {
+  const enabled = columns >= FRAME_MIN_COLUMNS && rows >= FRAME_MIN_ROWS;
+  if (!enabled) {
+    return { enabled: false, innerColumns: columns, bandRows: 0, gutterColumns: 0 };
+  }
+  return {
+    enabled: true,
+    innerColumns: Math.max(0, columns - FRAME_GUTTER_COLUMNS * 2),
+    bandRows: FRAME_BAND_ROWS,
+    gutterColumns: FRAME_GUTTER_COLUMNS,
+  };
+}
+
 export function formatUsageBar(pct: number, width = 10): string {
   const clamped = Math.max(0, Math.min(100, pct));
   const filled = Math.round((clamped / 100) * width);
