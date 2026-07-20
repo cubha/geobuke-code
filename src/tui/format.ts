@@ -207,12 +207,13 @@ export function selectMascot(terminalWidth: number): readonly string[] {
 export const SPLASH_HERO_MIN_COLUMNS = 96;
 
 /**
- * 좌측 상시 사이드바 고정폭(0.10.0 A3b ST9, 터틀 덱 2컬럼 레이아웃) — WelcomeCard의 CARD_WIDTH(54)와
- * 같은 고정폭 관례. abbreviateDir 기본폭(formatStatusline dirWidth=40)보다 살짝 좁게 잡아 상태
- * 아이콘+여백까지 borderStyle 안에 들어오게 한다. SPLASH_WIDE_MIN_COLUMNS(60)보다 좁아야 가장
- * 좁은 지원 터미널에서도 대화 컬럼에 남는 폭이 있다.
+ * 좌측 상시 사이드바 고정폭 — 0.10.1(braintrust 2026-07-20 확정)에서 WelcomeCard(카드)와 **동일폭
+ * 34**로 통일했다. 34 = S2 카와이 마스코트(30폭, MASCOT_S2 실측 — 사이드바에도 이 폭으로 배치,
+ * SubTask3) 무잘림 최소치 + 테두리2 + paddingX2. 0.10.0의 36과 카드 CARD_WIDTH(54)가 서로 달라
+ * 두 패널 폭이 어긋나던 것을 사용자 실측 지적으로 통일(아티팩트 ff0eb0b1). SPLASH_WIDE_MIN_COLUMNS
+ * (60)보다 좁아야 가장 좁은 지원 터미널에서도 대화 컬럼에 남는 폭이 있다.
  */
-export const SIDEBAR_COLUMNS = 36;
+export const SIDEBAR_COLUMNS = 34;
 
 /**
  * 2컬럼 레이아웃에서 우측(스플래시/대화) 컬럼이 실제로 쓸 수 있는 폭(순수) — 전체 터미널 폭에서
@@ -342,7 +343,8 @@ export interface CardSkill {
  */
 export function formatWelcomeCard(specCount: number, deferCount: number, skills: CardSkill[]): TextSegment[][] {
   const rows: TextSegment[][] = [
-    [{ text: "🐢 게이트 활성 — 명세 없는 구현은 차단됩니다", tone: "accent" }],
+    [{ text: "🐢 게이트 활성", tone: "accent" }],
+    [{ text: "명세 없는 구현은 차단됩니다", tone: "accent" }],
     [
       { text: `spec ${specCount}케이스`, tone: "dim" },
       { text: `defer ${deferCount}`, tone: "dim" },
@@ -359,11 +361,13 @@ export function formatWelcomeCard(specCount: number, deferCount: number, skills:
     [
       { text: "⌃M 메트릭", tone: "dim" },
       { text: "⌃R repos", tone: "dim" },
+    ],
+    [
       { text: "⌃S skills", tone: "dim" },
+      { text: "esc 중단", tone: "dim" },
     ],
     [
       { text: "shift+↵ 개행", tone: "dim" },
-      { text: "esc 중단", tone: "dim" },
       { text: "⌃C 종료(2회)", tone: "dim" },
     ],
   );
@@ -398,8 +402,8 @@ export function abbreviateDir(dir: string, maxWidth: number): string {
   return `…/${tail.slice(-(Math.max(1, maxWidth - 2)))}`;
 }
 
-// ── 사이드바 repo 경로 축약 (0.10.0 tmux 캡처 실증 버그) ──
-// 사이드바 내부 가용폭 = SIDEBAR_COLUMNS(36) − 테두리2 − paddingX2 = 32. 각 repo 줄의 프리픽스
+// ── 사이드바 repo 경로 축약 (0.10.0 tmux 캡처 실증 버그, 0.10.1 동일폭 34 통일로 예산 재계산) ──
+// 사이드바 내부 가용폭 = SIDEBAR_COLUMNS(34) − 테두리2 − paddingX2 = 30. 각 repo 줄의 프리픽스
 // = 커서("❯ "/"  ")2 + "⌃N "3 + 상태글리프("▶ "/"· ")2 = 7. 시작 repo는 " (시작)" 접미 7열
 // (공백1+괄호2+한글2자×2)이 더 붙는다. 이 예산을 넘는 경로는 ink Text가 줄바꿈해 │ 테두리를
 // 뚫고 흘러넘쳤다(실측: /mnt/d/workspace/daily-news-dispatch 36자, 2026-07-17 캡처).

@@ -60,10 +60,12 @@ import { GBC_SKILL_NAMES } from "../install.js";
 // 0.9.3 D2 — 스플래시 카드용 짧은 blurb(⌃S 패널의 SkillInfo.description 전문과는 별개 — 54칸
 // 카드 폭엔 전문이 안 맞아 큐레이션 필요). 이름이 이 표에 없으면 실제 description을 짧게 잘라
 // fallback한다(향후 gbc 자체 스킬이 늘어도 조용히 blurb 없는 항목이 되지 않게).
+// 0.10.1 — 카드 폭 54→34 통일(내부 30열 예산)로 재큐레이션. 카피 무손실, 축약만(원문은 ⌃S skills
+// 패널의 SkillInfo.description에 그대로 남아있음).
 const SPLASH_SKILL_BLURBS: Record<string, string> = {
-  gate: "defer·spec·verify 게이트 관리",
-  "gbc-monitor": "운영 현황 조회(관측 전용)",
-  "gbc-mute": "defer 리마인드 on/off",
+  gate: "spec·verify 관리",
+  "gbc-monitor": "현황 조회",
+  "gbc-mute": "리마인드 on/off",
 };
 
 /** 스플래시 카드에 표시할 gbc 자체 스킬만(GBC_SKILL_NAMES 순서) — 실제 설치 확인은 scanSkills로. */
@@ -73,7 +75,10 @@ function resolveCardSkills(cwd: string): CardSkill[] {
   for (const name of GBC_SKILL_NAMES) {
     const found = installed.get(name);
     if (!found) continue; // 미설치(gbc init 안 함) — 조용히 생략
-    out.push({ name, blurb: SPLASH_SKILL_BLURBS[name] ?? found.description.slice(0, 40) });
+    // 폴백 슬라이스 40→12: 0.10.1 카드 내부폭 30 예산(이름 최장 "/gbc-monitor"=12+구분자3=15,
+    // 남는 15 표시폭 안에서 한글 혼입 시에도 넘치지 않도록 보수적으로 12자로 축소.
+    // GBC_SKILL_NAMES(gate/gbc-mute/gbc-monitor) 전부 위 SPLASH_SKILL_BLURBS에 있어 현재는 미도달.
+    out.push({ name, blurb: SPLASH_SKILL_BLURBS[name] ?? found.description.slice(0, 12) });
   }
   return out;
 }
