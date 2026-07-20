@@ -34,6 +34,7 @@ import {
   formatEngineAbort,
   formatResumeFallbackBanner,
   formatCrashDump,
+  formatSessionStartFailure,
   DeltaAssembler,
 } from "./bridge.js";
 import { createEngineSessionWithResumeFallback, buildSessionOptionsForRepo, mapSdkMessage, type EngineSession } from "../engine.js";
@@ -459,17 +460,12 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         commitStream(repoId);
         // agent-sdk는 engine.ts가 lazy dynamic import한다(첫 프롬프트 제출 시점) — ink/react와 달리
         // cli.ts의 cmdTui try/catch는 이 실패를 못 잡는다(ST6 scope-critic 발견). 여기서 별도로
-        // 친절 안내하지 않으면 사용자는 잘린 스택트레이스만 본다.
+        // 친절 안내하지 않으면 사용자는 잘린 스택트레이스만 본다. 분류는 bridge.ts
+        // formatSessionStartFailure(모듈미설치/spawn EPERM/폴백 3분기, formatEngineFailure와
+        // 동일 classifySpawnPermissionError 재사용)가 전담 — 0.10.1: spawn EPERM이 안내 없이
+        // 원문 노출되던 결함(2026-07-20 실기 재현)을 이 경로에도 배선.
         if (repoId === tabsRef.current.activeTabId) {
-          const msg = String(e);
-          if (/Cannot find (module|package)|ERR_MODULE_NOT_FOUND/.test(msg)) {
-            pushLine(
-              "🐢 A-mode 엔진(@anthropic-ai/claude-agent-sdk)이 설치되지 않았습니다. 설치: npm i @anthropic-ai/claude-agent-sdk",
-              "danger",
-            );
-          } else {
-            pushLine(`🐢 오류: ${msg.slice(0, 200)}`, "danger");
-          }
+          pushLine(formatSessionStartFailure(String(e)), "danger");
         }
       } finally {
         if (repoId === tabsRef.current.activeTabId) {
