@@ -15,6 +15,7 @@ import {
   formatEngineAbort,
   formatResumeFallbackBanner,
   formatCrashDump,
+  formatSessionStartFailure,
   DeltaAssembler,
 } from "../dist/tui/bridge.js";
 
@@ -281,6 +282,27 @@ test("formatEngineFailure: error가 spawn EPERM이면 원본 대신 GBC_CLAUDE_P
 test("formatEngineFailure: spawn과 무관한 오류는 기존 그대로(원본 오류 문구 보존)", () => {
   const msg = formatEngineFailure({ isError: true, error: "network timeout" });
   assert.equal(msg, "🐢 오류: network timeout");
+});
+
+// ── formatSessionStartFailure (0.10.1 — app.tsx submit()의 getOrCreateSession/session.submit이
+// throw로 실패할 때(세션 최초 spawn 단계). formatEngineFailure는 EngineResult.isError 반환값 경로만
+// 커버해 이 throw 경로는 GBC_CLAUDE_PATH 안내 없이 원문 노출되던 결함(2026-07-20 실기 재현). ──
+
+test("formatSessionStartFailure: 모듈 미설치 패턴 → A-mode 엔진 설치 안내", () => {
+  const msg = formatSessionStartFailure("Cannot find module '@anthropic-ai/claude-agent-sdk'");
+  assert.match(msg, /A-mode 엔진/);
+  assert.match(msg, /npm i @anthropic-ai\/claude-agent-sdk/);
+});
+
+test("formatSessionStartFailure: spawn EPERM → GBC_CLAUDE_PATH 진단 문구(원문 아님)", () => {
+  const msg = formatSessionStartFailure("Error: spawn EPERM");
+  assert.match(msg, /GBC_CLAUDE_PATH/);
+  assert.doesNotMatch(msg, /^🐢 오류: Error: spawn EPERM$/);
+});
+
+test("formatSessionStartFailure: 둘 다 무관한 오류 → 원본 오류 문구(200자 절단)", () => {
+  const msg = formatSessionStartFailure("boom");
+  assert.equal(msg, "🐢 오류: boom");
 });
 
 // ===== DeltaAssembler (0.9.4 ST3 — partial 스트리밍 델타 어셈블러) =====
