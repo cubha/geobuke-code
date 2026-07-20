@@ -6,16 +6,17 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { loadRepos } from "../../repos.js";
-import { selectMascot, renderMascot, formatTabStatusGlyph, formatSidebarRepoPath, SIDEBAR_COLUMNS } from "../format.js";
+import { MASCOT_S2, renderMascot, formatTabStatusGlyph, formatSidebarRepoPath, SIDEBAR_COLUMNS } from "../format.js";
 import { toneColor } from "./theme.js";
 import { Mascot } from "./Mascot.js";
 import type { TabRegistry } from "../tabs.js";
 
-// 사이드바 폭(36)은 SPLASH_WIDE_MIN_COLUMNS(60) 미만이라 항상 미니 마스코트(C4)를 쓴다(selectMascot이
-// 이미 60열 미만이면 C4를 고름). SIDEBAR_COLUMNS는 상수라 이 값은 절대 안 바뀐다 — 모듈 로드 시
-// 1회만 계산해 컴포넌트가 리렌더될 때마다(=매 키입력마다, App이 상태를 dispatch하므로) 다시
-// 계산하지 않는다.
-const SIDEBAR_MASCOT_LINES = renderMascot(selectMascot(SIDEBAR_COLUMNS));
+// 0.10.1 — selectMascot(SIDEBAR_COLUMNS)는 스플래시 히어로용 함수(60열 미만이면 항상 C4 미니를
+// 고름)라 SIDEBAR_COLUMNS(34 < 60)를 넣으면 항상 미니가 뜨는 결함이었다(사이드바는 스플래시 폭
+// 규칙과 무관 — 내부폭 30에 S2(30폭)가 그대로 들어간다). MASCOT_S2를 직접 지정. SIDEBAR_COLUMNS는
+// 상수라 이 값은 절대 안 바뀐다 — 모듈 로드 시 1회만 계산해 컴포넌트가 리렌더될 때마다(=매
+// 키입력마다, App이 상태를 dispatch하므로) 다시 계산하지 않는다.
+const SIDEBAR_MASCOT_LINES = renderMascot(MASCOT_S2);
 
 // repos.json은 'gbc repos add/remove' CLI로만 바뀌는 드문 이벤트라 실시간 반응이 필요 없다 —
 // 주기적 폴링으로 충분(과함).

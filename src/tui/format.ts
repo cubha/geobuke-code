@@ -227,13 +227,15 @@ export function computeContentColumns(totalColumns: number, sidebarColumns: numb
 }
 
 /**
- * 스트리밍 프리뷰 행수 예약분(0.10.0 A3b 실기검증 이슈③) — 사이드바(테두리2+헤더1+repo≤9+마스코트
- * 미니3)+우측 고정UI(스피너1+입력창테두리포함3+게이트줄1+상태줄1) 대략치. ink는 alt-screen에서
- * Static 밖 동적 영역 전체(사이드바 포함)를 매 프레임 재렌더하는데, 그 합이 터미널 행수를 넘으면
- * 이전 프레임을 못 지워 잔상이 쌓인다(tmux 실측: "안녕하세요! 👋" 8회 중복). 정밀 측정이 아닌
- * 보수적 여유값 — 터미널이 이보다 낮으면 여전히 초과 가능한 알려진 한계(완전 해소 아님).
+ * 스트리밍 프리뷰 행수 예약분(0.10.0 A3b 실기검증 이슈③, 0.10.1 사이드바 마스코트 S2 교체로 재산정)
+ * — 사이드바(테두리2+헤더1+repo≤9+마스코트 S2 8줄)+우측 고정UI(스피너1+입력창테두리포함3+게이트줄1
+ * +상태줄1) 대략치. 마스코트가 C4 미니(3줄)에서 S2 카와이(8줄, half-block 16행/2)로 바뀌며 +5 —
+ * 예산을 갱신하지 않으면 낮은 터미널에서 이슈③(잔상)이 재발한다. ink는 alt-screen에서 Static 밖
+ * 동적 영역 전체(사이드바 포함)를 매 프레임 재렌더하는데, 그 합이 터미널 행수를 넘으면 이전
+ * 프레임을 못 지워 잔상이 쌓인다(tmux 실측: "안녕하세요! 👋" 8회 중복). 정밀 측정이 아닌 보수적
+ * 여유값 — 터미널이 이보다 낮으면 여전히 초과 가능한 알려진 한계(완전 해소 아님).
  */
-export const PREVIEW_RESERVED_ROWS = 21;
+export const PREVIEW_RESERVED_ROWS = 26;
 
 /** 전체 터미널 행수에서 예약분을 뺀 스트리밍 프리뷰 행 상한(순수). 최소 3행 보장 — 0이면 프리뷰가 아예 안 보여 스트리밍 중임을 알 길이 없다. */
 export function computePreviewRowBudget(totalRows: number, reservedRows: number = PREVIEW_RESERVED_ROWS): number {
