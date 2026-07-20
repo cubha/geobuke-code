@@ -310,7 +310,8 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       skills: resolveCardSkills(cwd),
     };
     setScrollback((s) => [heroEntry, ...s]);
-    dispatch({ type: "SESSION_START" });
+    // splashDismissed는 이제 TURN_START(첫 제출)가 직접 설정한다(0.10.1) — 마운트 시점엔
+    // dispatch할 게 없다. 이 useEffect의 나머지(Static hero 커밋)는 SubTask10에서 걷어낸다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

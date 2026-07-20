@@ -31,7 +31,11 @@ export interface Statusline {
 }
 
 export interface TuiState {
-  splashShown: boolean;
+  /** 0.10.1 — 첫 메시지 제출(TURN_START)로 한 번 true가 되면 이후 어떤 이벤트에도 되돌지 않는다
+   *  (스플래시 일괄소멸 계약). SESSION_START/splashShown은 "마운트 시 1회 커밋"이라는 다른 계약을
+   *  표현했던 구 필드로, 스플래시가 Static 밖 조건부 렌더로 옮겨가며 폐기됐다(app.tsx가 splashDismissed
+   *  자체를 렌더 조건으로 직접 소비 — 더 이상 "커밋됐다"는 것만 기록하는 1회성 플래그가 아니다). */
+  splashDismissed: boolean;
   streaming: boolean;
   gateStatus: "idle" | "pass" | "block";
   specCount: number;
@@ -61,7 +65,7 @@ const DEFAULT_STATUSLINE: Statusline = {
 
 export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiState {
   return {
-    splashShown: false,
+    splashDismissed: false,
     streaming: false,
     gateStatus: "idle",
     specCount: 0,
@@ -75,7 +79,6 @@ export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiSta
 }
 
 export type TuiEvent =
-  | { type: "SESSION_START" }
   | { type: "TURN_START" }
   | { type: "TURN_END" }
   | { type: "GATE_RESULT"; status: "pass" | "block"; specCount: number; deferCount: number }
@@ -104,12 +107,10 @@ function cycleChoice(current: ApprovalChoice, direction: 1 | -1): ApprovalChoice
 
 export function reduce(state: TuiState, event: TuiEvent): TuiState {
   switch (event.type) {
-    case "SESSION_START":
-      return { ...state, splashShown: true };
-
     case "TURN_START":
       // streamingText도 함께 리셋 — 직전 턴이 STREAM_COMMIT 없이 끝났을 경우(중단 등)의 방어.
-      return { ...state, streaming: true, streamingText: "" };
+      // splashDismissed:true — 첫 제출 시 스플래시 일괄소멸(0.10.1). 이미 true여도 재대입은 멱등.
+      return { ...state, streaming: true, streamingText: "", splashDismissed: true };
 
     case "TURN_END":
       return { ...state, streaming: false };
@@ -169,7 +170,7 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
       // createInitialState를 그대로 재사용해 "새 탭 = 완전히 새 라이브 뷰" 계약을 한 곳에서만
       // 정의한다(App 마운트 시드 로직과 동일 조립 방식 — app.tsx가 중복 구현하지 않음).
       const base = createInitialState({ dir: event.dir, branch: event.branch, dirty: event.dirty, model: event.model });
-      return { ...base, specCount: event.specCount, deferCount: event.deferCount, splashShown: true };
+      return { ...base, specCount: event.specCount, deferCount: event.deferCount, splashDismissed: true };
     }
 
     default:
