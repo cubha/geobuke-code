@@ -629,3 +629,21 @@ test("computeFrameLayout: 활성이면 innerColumns = columns − 거터*2, band
 test("computeFrameLayout: 순수성 — 같은 입력엔 항상 같은 출력", () => {
   assert.deepEqual(computeFrameLayout(100, 35), computeFrameLayout(100, 35));
 });
+
+// ── innerRows (2026-07-21 정적 높이 전환) — Frame이 measureElement 없이 거터/콘텐츠 높이를
+// 정적으로 알 수 있게 프레임 내부 행 예산을 순수부가 직접 산출한다. 측정→stretch 자기충족
+// 고정점(하단 팬텀 공백 1행)의 근본 제거. ──
+
+test("computeFrameLayout: 활성이면 innerRows = rows − 밴드*2", () => {
+  const layout = computeFrameLayout(140, 44);
+  assert.equal(layout.innerRows, 44 - layout.bandRows * 2);
+});
+
+test("computeFrameLayout: 비활성이면 innerRows는 입력 rows 그대로(패스스루)", () => {
+  const layout = computeFrameLayout(70, 20);
+  assert.equal(layout.innerRows, 20);
+});
+
+test("computeFrameLayout: 경계(80×30)에서 innerRows = 28", () => {
+  assert.equal(computeFrameLayout(80, 30).innerRows, 28);
+});

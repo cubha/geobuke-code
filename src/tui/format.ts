@@ -3,6 +3,7 @@
 // Ink/React를 import하지 않는다 — 색은 시맨틱 Tone으로만 표현하고, 실제 렌더(ANSI/Ink <Text
 // color>)는 소비처(ST5) 책임이다. 단 마스코트는 픽셀아트 특성상 이 파일에서 ANSI 문자열까지 만든다.
 
+import stringWidth from "string-width";
 import type { TuiState, Statusline } from "./model.js";
 import type { TabStatus } from "./tabs.js";
 
@@ -258,6 +259,114 @@ export function joinTextSegments(segments: TextSegment[], sep = " · "): string 
   return segments.map((s) => s.text).join(sep);
 }
 
+// ── 대화창 박스 상주(0.10.1, 아티팩트 ff0eb0b1) — 시각행 윈도잉 순수 코어 ──
+// braintrust 선결조건 ⓑ: 논리줄(개행) 단순 자르기는 CJK 혼입 시 잔상이 재발한다(0.10.0 A3b
+// 실기검증 이슈③) — string-width 기준으로 사전 랩해 "화면에 실제로 몇 행을 차지하는가"를
+// 소비처(ChatBox)가 정확히 알 수 있게 한다.
+
+/** 대화 스크롤백에 유지할 최대 엔트리 수 — 무한 증식 방지(zero-dep 원칙상 상한만 두고 별도 압축은 안 함). */
+export const CHAT_SCROLLBACK_MAX_ENTRIES = 500;
+
+/**
+ * 한 논리줄(세그먼트 배열)을 표시폭(width) 기준 시각행 여러 개로 랩한다(순수).
+ * 계약: 문자 중간 절단 금지(코드포인트 단위 순회), CJK 2폭 문자는 폭 예산을 넘기면 다음 행으로,
+ * 세그먼트 경계를 가로질러도 각 조각은 원래 톤을 유지한다. width<=0이면 랩 자체가 무의미하므로
+ * 무한루프 없이 원본을 1행으로 그대로 반환한다(방어).
+ */
+export function wrapSegmentLine(segments: TextSegment[], width: number): TextSegment[][] {
+  if (width <= 0) return [segments];
+  const lines: TextSegment[][] = [];
+  let currentLine: TextSegment[] = [];
+  let currentWidth = 0;
+  for (const seg of segments) {
+    for (const ch of Array.from(seg.text)) {
+      const w = stringWidth(ch);
+      // currentLine이 비어있을 때는 절대 플러시하지 않는다 — 그러지 않으면 폭보다 넓은 단일 문자
+      // (예: width=1에 CJK 2폭)가 빈 행을 무한히 밀어내는 결함이 된다.
+      if (currentWidth + w > width && currentLine.length > 0) {
+        lines.push(currentLine);
+        currentLine = [];
+        currentWidth = 0;
+      }
+      const last = currentLine[currentLine.length - 1];
+      if (last && last.tone === seg.tone) last.text += ch;
+      else currentLine.push({ text: ch, tone: seg.tone });
+      currentWidth += w;
+    }
+  }
+  if (currentLine.length > 0) {
+    lines.push(currentLine);
+  } else if (lines.length === 0) {
+    // 전 세그먼트가 빈 텍스트(예: 공백 줄) — 톤 정보를 보존한 채 1개 빈 시각행으로 반환.
+    lines.push(segments.length > 0 ? segments.map((s) => ({ ...s })) : []);
+  }
+  return lines;
+}
+
+export interface ChatViewport {
+  /** 표시할 시각행 슬라이스의 시작 인덱스(포함). */
+  start: number;
+  /** 표시할 시각행 슬라이스의 끝 인덱스(미포함). */
+  end: number;
+  /** 창 위로 가려진 시각행 수(PgUp 여력). */
+  aboveCount: number;
+  /** 창 아래로 가려진 시각행 수(PgDn 여력 — 0이면 최하단). */
+  belowCount: number;
+}
+
+/**
+ * 전체 시각행 수(totalLines)에서 스크롤 오프셋(scrollOffset, 최하단=0)만큼 위로 올라간 지점을
+ * 기준으로 viewRows개짜리 창을 계산한다(순수). offset이 과대해도 최상단에서 클램프되고, 전체가
+ * viewRows보다 적으면 전량 표시(스크롤 무효)된다.
+ */
+export function computeChatViewport(totalLines: number, viewRows: number, scrollOffset: number): ChatViewport {
+  const offset = Math.max(0, scrollOffset);
+  const rows = Math.max(0, viewRows);
+  const end = Math.min(totalLines, Math.max(rows, totalLines - offset));
+  const start = Math.max(0, end - rows);
+  return { start, end, aboveCount: start, belowCount: totalLines - end };
+}
+
+/**
+ * 대화 박스가 실제로 쓸 수 있는 행수(순수) — 전체 터미널 행수에서 프레임 상하 밴드(bandRows×2)와
+ * 스플래시 등 헤더가 차지하는 행(headerRows), 안전 여유 1행을 뺀다. 저행 터미널에서도 박스 자체가
+ * 사라지지 않도록 최소 8행을 보장한다.
+ */
+export function computeChatRegionRows(totalRows: number, bandRows: number, headerRows: number): number {
+  return Math.max(8, totalRows - bandRows * 2 - headerRows - 1);
+}
+
+// ── 사이드바 repos 커서추종 윈도잉 (0.10.1 SubTask4) ──
+// computeChatViewport(대화창)와는 계약 축이 다르다 — 대화창은 "하단 고정+오프셋 스크롤", 사이드바는
+// "커서가 항상 창 안에 보이게" 축이라 억지로 통합하면 호출부가 cursor→offset 환산을 떠안게 된다.
+
+export interface SidebarWindow {
+  /** 표시할 repo 슬라이스의 시작 인덱스(포함, 전체 목록 기준). */
+  start: number;
+  /** 표시할 repo 슬라이스의 끝 인덱스(미포함). */
+  end: number;
+  /** 창 위로 가려진 항목 수. */
+  aboveCount: number;
+  /** 창 아래로 가려진 항목 수. */
+  belowCount: number;
+}
+
+/**
+ * 전체 repo 수(total)에서 커서(cursor)가 항상 보이도록 maxVisible개짜리 창을 계산한다(순수).
+ * 커서가 창 아래 경계를 넘으면 창이 커서를 하단 기준으로 따라 내려가고(스크롤), 다시 위로 가면
+ * 그만큼 따라 올라간다. total이 maxVisible 이하면 전량 표시(스크롤 무효). cursor는 [0,total-1]로,
+ * maxVisible<=0/total<=0은 빈 창으로 방어한다(크래시 없음).
+ */
+export function computeSidebarWindow(total: number, cursor: number, maxVisible: number): SidebarWindow {
+  if (total <= 0) return { start: 0, end: 0, aboveCount: 0, belowCount: 0 };
+  if (maxVisible <= 0) return { start: 0, end: 0, aboveCount: 0, belowCount: total };
+  if (total <= maxVisible) return { start: 0, end: total, aboveCount: 0, belowCount: 0 };
+  const clampedCursor = Math.max(0, Math.min(total - 1, cursor));
+  const start = Math.max(0, Math.min(total - maxVisible, clampedCursor - maxVisible + 1));
+  const end = start + maxVisible;
+  return { start, end, aboveCount: start, belowCount: total - end };
+}
+
 // ── 워드마크 + 안내카드 (0.9.2 ST13) ──
 // figlet "ANSI Shadow" 폰트로 생성한 정적 문자열을 그대로 임베드한다(zero-dep 원칙 — 런타임에
 // figlet을 설치·실행하지 않는다. 빌드타임에 한 번 생성한 상수).
@@ -431,6 +540,11 @@ export interface FrameLayout {
   enabled: boolean;
   /** 프레임 내부(사이드바+대화 컬럼)가 실제로 쓸 수 있는 폭 — 비활성이면 입력 columns 그대로. */
   innerColumns: number;
+  /** 프레임 내부 행 예산(rows − 상하 밴드) — 비활성이면 입력 rows 그대로. Frame이 거터/콘텐츠
+   * 높이를 이 값으로 정적 고정한다(2026-07-21 — measureElement 실측은 행 Box의 기본
+   * alignItems:stretch와 얽혀 "한 번 커진 측정값이 콘텐츠를 그 높이로 되늘려 영원히 유지되는"
+   * 자기충족 고정점을 만들었고, 하단 팬텀 공백 1행의 근본원인이었다). */
+  innerRows: number;
   /** 상/하 밴드 각각의 행 수. */
   bandRows: number;
   /** 좌/우 거터 각각의 열 수. */
@@ -441,11 +555,12 @@ export interface FrameLayout {
 export function computeFrameLayout(columns: number, rows: number): FrameLayout {
   const enabled = columns >= FRAME_MIN_COLUMNS && rows >= FRAME_MIN_ROWS;
   if (!enabled) {
-    return { enabled: false, innerColumns: columns, bandRows: 0, gutterColumns: 0 };
+    return { enabled: false, innerColumns: columns, innerRows: rows, bandRows: 0, gutterColumns: 0 };
   }
   return {
     enabled: true,
     innerColumns: Math.max(0, columns - FRAME_GUTTER_COLUMNS * 2),
+    innerRows: Math.max(0, rows - FRAME_BAND_ROWS * 2),
     bandRows: FRAME_BAND_ROWS,
     gutterColumns: FRAME_GUTTER_COLUMNS,
   };
