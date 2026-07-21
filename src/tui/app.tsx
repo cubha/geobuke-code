@@ -2,8 +2,8 @@
 // 한다 — 격리 경계는 cli.ts→app.tsx의 lazy dynamic import 쪽(ST6)에 있다(ST0 회귀락 대상은 cli.ts).
 // 이 파일은 얇은 오케스트레이션+렌더만 한다 — 상태전이는 model.ts/editor.ts, 표시문구는 format.ts,
 // 엔진↔TUI 변환은 bridge.ts가 전담(순수, TDD 커버). 여기서 새 판정 로직을 만들지 않는다.
-import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { Box, Static, Text, useInput, useWindowSize, type Key } from "ink";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Box, Text, useInput, useWindowSize, measureElement, type DOMElement, type Key } from "ink";
 import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,10 +20,12 @@ import {
   computeContentColumns,
   computePreviewRowBudget,
   computeFrameLayout,
+  computeChatRegionRows,
+  shouldShowWordmark,
   tailLines,
   SIDEBAR_COLUMNS,
   PREVIEW_RESERVED_ROWS,
-  WELCOME_LINE,
+  CHAT_SCROLLBACK_MAX_ENTRIES,
   type CardSkill,
   type TextSegment,
   type Tone,
@@ -58,7 +60,8 @@ import { SplashHeader } from "./ui/SplashHeader.js";
 import { WelcomeCard } from "./ui/WelcomeCard.js";
 import { Sidebar } from "./ui/Sidebar.js";
 import { Frame } from "./ui/Frame.js";
-import { toneColor } from "./ui/theme.js";
+import { FRAME_COLOR } from "./ui/theme.js";
+import { ChatBox, type ChatEntry } from "./ui/ChatBox.js";
 import { scanSkills } from "./skills.js";
 import { GBC_SKILL_NAMES } from "../install.js";
 
@@ -66,6 +69,26 @@ import { GBC_SKILL_NAMES } from "../install.js";
 // 여백·상단 여백 값 자체는 승인 시안과 동일하게 보존).
 const HERO_LEFT_MARGIN = 3;
 const HERO_TOP_MARGIN = 2;
+
+// 0.10.1 SubTask2 — 대화창 박스(ChatBox) 행 예산 산정 상수. computeChatRegionRows(순수, format.ts)가
+// 준 전체 예산에서 이 고정분을 빼면 메시지 뷰포트 행수(viewportRows)가 나온다.
+// ⓐ 헤더 행수(스플래시 표시 중일 때만) — SplashHeader를 감싸는 marginTop(HERO_TOP_MARGIN)까지
+// 포함한 실측치. 워드마크 노출(shouldShowWordmark) 시 마진2+워드마크6+마진1+태그라인1=10,
+// 미노출(좁은 터미널) 시 마진2+태그라인1=3 — 값이 바뀌면(SplashHeader 레이아웃 변경 시) 여기도
+// 같이 재실측해야 한다(단위테스트로 못 잡는 UI 레이아웃 상수라 코드 리뷰로만 잡힘, 알려진 한계).
+const CHAT_HEADER_ROWS_WIDE = 10;
+const CHAT_HEADER_ROWS_NARROW = 3;
+// ⓑ ChatBox 자체 테두리(상하 각 1) + 스크롤 인디케이터(항상 1행 예약).
+const CHAT_BOX_CHROME_ROWS = 3;
+// ⓒ 하단 고정 UI — 입력창(테두리 라운드, 3행) + 게이트줄(1) + statusline(1). 승인 중엔 ApprovalBox가
+// 입력창 자리를 대신하며 대체로 비슷한 최소 행수를 쓴다(완전 동일하진 않음 — reason 텍스트 길이에
+// 따라 늘어날 수 있어 "높이 불변"은 패널/스트리밍 쪽만큼 엄격히 보장되진 않는다, 알려진 한계).
+const CHAT_BOTTOM_FIXED_ROWS = 3 + 1 + 1;
+// 좌측 스택(카드+사이드바)과 ChatBox 사이 시각적 여백 — 시안(ff0eb0b1) `.cols{gap:10px}` 대응.
+const CHAT_COLUMN_GAP = 1;
+// PgUp/PgDn 1회당 스크롤 시각행 수 — 정확히 한 페이지일 필요는 없다(computeChatViewport가
+// 과대 offset을 항상 클램프하므로 의미 있게 스크롤되기만 하면 된다).
+const PGSCROLL_STEP = 10;
 
 // 0.9.3 D2 — 스플래시 카드용 짧은 blurb(⌃S 패널의 SkillInfo.description 전문과는 별개 — 54칸
 // 카드 폭엔 전문이 안 맞아 큐레이션 필요). 이름이 이 표에 없으면 실제 description을 짧게 잘라
@@ -157,8 +180,17 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 채널이라 두 확인이 동시에 뜨지 않게 opt-out 시작은 !state.approval일 때만 허용한다.
   const [optOutConfirmRepoId, setOptOutConfirmRepoId] = useState<string | null>(null);
 
+  // SubTask5(0.10.1) — 사이드바 repos 키보드 내비게이션. Tab으로 토글, 포커스 중엔 ↑/↓가 에디터가
+  // 아니라 이 커서를 움직인다(useInput 하단 배선). activateApproval이 승인 도착 시 자동 해제한다.
+  const [sidebarFocused, setSidebarFocused] = useState(false);
+  const [sidebarCursor, setSidebarCursor] = useState(0);
+
   const [scrollback, setScrollback] = useState<ScrollEntry[]>([]);
   const nextId = useRef(0);
+  // SubTask2(대화창 박스) — Static 폐기로 스크롤백이 이제 실제로 화면에 매 프레임 다시 그려지므로
+  // 상한이 없으면 장시간 세션에서 랩 비용(wrapSegmentLine)이 무한정 커진다. SubTask3 — PgUp/PgDn이
+  // 이 값을 조절(useInput 하단), 새 제출·탭 전환 시 0(최하단)으로 강제 복귀.
+  const [scrollOffset, setScrollOffset] = useState(0);
 
   // SubTask10 — 안내카드의 스킬 목록(skills.ts scanSkills 파일 I/O)만 마운트 시 1회 지연 계산한다.
   // spec/defer 카운트는 이미 state.specCount/deferCount(위 lazy initializer가 시드)가 있어 별도
@@ -237,7 +269,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     return () => clearInterval(id);
   }, [state.streaming]);
   const pushLine = useCallback((text: string, tone: Tone = "plain") => {
-    setScrollback((s) => [...s, { id: nextId.current++, kind: "text", text, tone }]);
+    setScrollback((s) => {
+      const next = [...s, { id: nextId.current++, kind: "text" as const, text, tone }];
+      // CHAT_SCROLLBACK_MAX_ENTRIES(SubTask1) — 무한 증식 방지. 오래된 항목부터 버린다.
+      return next.length > CHAT_SCROLLBACK_MAX_ENTRIES ? next.slice(next.length - CHAT_SCROLLBACK_MAX_ENTRIES) : next;
+    });
   }, []);
 
   // ST12(0.10.0 A3b) — 크래시 덤프 4경로. 알트스크린(ST10)은 teardown 프레임을 보존하지 않는다
@@ -304,6 +340,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     if (item.ctx.kind === "spec-add") {
       dispatch({ type: "APPROVAL_CASE_DERIVED", caseText: item.ctx.derivedCase });
     }
+    setSidebarFocused(false); // SubTask5 — 승인 프롬프트가 뜨면 사이드바 포커스를 자동 해제.
   }, []);
 
   // SubTask10 — 스플래시(워드마크+카드+웰컴)는 더 이상 Static에 커밋하지 않는다. splashDismissed는
@@ -423,6 +460,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       const repoId = tabsRef.current.activeTabId;
       pushLine(`❯ ${prompt}`, "code");
       dispatch({ type: "TURN_START" });
+      setScrollOffset(0); // SubTask3 — 새 제출 시 대화창 최하단으로 강제 복귀.
       // no-session/alive/dead → streaming(전부 유효 전이, tabs.ts TRANSITIONS) — opt-in 첫 제출·
       // 후속 제출·재접속(respawn) 전부 이 한 줄로 커버된다.
       setTabs((prev) => updateTabStatus(prev, repoId, { status: "streaming" }));
@@ -508,6 +546,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         deferCount: activeDeferItems(repoId).length,
       });
       setScrollback([{ id: nextId.current++, kind: "text", text: `🐢 ${repoId} 세션으로 전환`, tone: "dim" }]);
+      setScrollOffset(0); // SubTask3 — 탭 전환 시에도 대화창 최하단으로.
     },
     [model],
   );
@@ -547,6 +586,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
             deferCount: activeDeferItems(next.activeTabId).length,
           });
           setScrollback([{ id: nextId.current++, kind: "text", text: `🐢 ${next.activeTabId} 세션으로 전환`, tone: "dim" }]);
+          setScrollOffset(0); // SubTask3 — opt-out 후 활성 탭이 바뀔 때도 최하단으로.
         }
         return next;
       });
@@ -670,6 +710,49 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       if (key.escape) dispatch({ type: "CLOSE_PANEL" });
       return;
     }
+    // SubTask3(0.10.1) — 대화창 스크롤(ⓒ). 승인·패널 열림 중엔 위 두 early return이 이미 이
+    // 지점 도달 자체를 막는다(대화 뷰포트가 그 상태에선 안 보이므로 스크롤 대상이 없다는 게
+    // braintrust 권장 정책 — 실기 검증에서 어색하면 뒤집을 수 있는 결정, computeChatViewport가
+    // 과대 offset을 항상 안전하게 클램프하므로 여기서 상한을 알 필요는 없다).
+    if (key.pageUp) {
+      setScrollOffset((o) => o + PGSCROLL_STEP);
+      return;
+    }
+    if (key.pageDown) {
+      setScrollOffset((o) => Math.max(0, o - PGSCROLL_STEP));
+      return;
+    }
+    // SubTask5(0.10.1) — 사이드바 repos 키보드 내비게이션(Tab 포커스 토글). 승인·패널 열림 중엔
+    // 위 early return들이 이미 이 지점 도달을 막는다(PgUp/PgDn과 동일 근거) — 별도 가드 불필요.
+    if (key.tab) {
+      setSidebarFocused((f) => !f);
+      return;
+    }
+    if (sidebarFocused) {
+      // ⌃1..9 직행 단축키(위에서 이미 처리됨)와 달리 이 경로는 창이 스크롤돼 9번째 이후로 밀린
+      // repo도 커서로 닿을 수 있다 — Sidebar.tsx computeSidebarWindow가 같은 전역 인덱스를 쓴다.
+      const repos = loadRepos();
+      if (key.upArrow) {
+        setSidebarCursor((c) => Math.max(0, c - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setSidebarCursor((c) => Math.min(Math.max(0, repos.length - 1), c + 1));
+        return;
+      }
+      if (key.return) {
+        const target = repos[sidebarCursor];
+        if (target && target !== tabsRef.current.activeTabId) switchToTab(target);
+        setSidebarFocused(false);
+        return;
+      }
+      if (key.escape) {
+        setSidebarFocused(false);
+        return;
+      }
+      // 포커스 중엔 그 외 키(타이핑 등)가 에디터로 새지 않게 전부 여기서 삼킨다.
+      return;
+    }
     if (key.escape) {
       // ST3(0.9.2)→ST1(0.9.4 T1로 대체) — 스트리밍 중일 때만 중단. 유휴 상태에서 Esc는 여전히
       // no-op(전역 종료 단축키 아님 — Ctrl+C 2단 확인종료가 그 역할). AbortController.abort() 대신
@@ -691,6 +774,44 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     setEditorState((s) => applyEditorKey(input, key, s));
   });
 
+  // SubTask2(0.10.1) — ChatBox 높이를 좌측 스택(카드+사이드바)의 실제 렌더 높이에 정확히 맞춘다
+  // (시안 요구: "대화창은 좌측 컬럼과 동일한 세로 높이"). 좌측 스택 높이는 repo 개수 등 동적
+  // 요인에 좌우돼 정적 산술로는 못 맞춘다 — Frame.tsx와 동일한 measureElement 패턴을 재사용한다.
+  // leftStackHeight=0(마운트 직후 미측정)일 때만 computeChatRegionRows(순수, SubTask1)를 폴백으로
+  // 쓴다 — 첫 프레임이 0으로 찌그러지는 것을 막는 안전망일 뿐, 측정값이 나오는 즉시 대체된다.
+  const leftStackRef = useRef<DOMElement>(null);
+  const [leftStackHeight, setLeftStackHeight] = useState(0);
+  useLayoutEffect(() => {
+    if (!leftStackRef.current) return;
+    setLeftStackHeight(measureElement(leftStackRef.current).height);
+  });
+  const chatHeaderRows = state.splashDismissed
+    ? 0
+    : shouldShowWordmark(frameLayout.innerColumns)
+      ? CHAT_HEADER_ROWS_WIDE
+      : CHAT_HEADER_ROWS_NARROW;
+  const chatRegionRowsFallback = computeChatRegionRows(rows, frameLayout.bandRows, chatHeaderRows);
+  // 2026-07-21 — 예전엔 여기 "-1 실측 보정" 상수가 있었다. 원인은 행 Box의 기본 alignItems:stretch가
+  // leftStackRef 측정값에 ChatBox 자신의 렌더 결과를 순환 오염시킨 것(아래 alignItems="flex-start"
+  // 참조 — 특정 터미널 폭에서 무한루프 크래시까지 유발했던 그 버그와 동일 근본원인이었다). stretch를
+  // 걷어내자 이 오염도 함께 사라져 leftStackHeight가 실제 렌더 행수와 정확히 일치한다(재실측 확인,
+  // 보정 상수 폐기).
+  const chatTotalRows = leftStackHeight > 0 ? leftStackHeight : chatRegionRowsFallback;
+  const chatViewportRows = Math.max(1, chatTotalRows - CHAT_BOX_CHROME_ROWS - CHAT_BOTTOM_FIXED_ROWS);
+  const chatOuterColumns = Math.max(0, computeContentColumns(frameLayout.innerColumns, SIDEBAR_COLUMNS) - CHAT_COLUMN_GAP);
+  const chatInnerColumns = Math.max(1, chatOuterColumns - 4); // ChatBox 테두리2+paddingX(1×2)
+
+  // scrollback(ScrollEntry — text/segments 두 kind)을 ChatBox가 소비하는 단일 형태(ChatEntry:
+  // TextSegment[])로 변환. scrollback 참조가 안 바뀌면 재계산하지 않는다 — 타이핑마다(=매 렌더)
+  // 새 배열을 만들면 ChatBox 내부 useMemo(wrapSegmentLine)의 캐시가 매번 무효화된다.
+  const chatEntries = useMemo<ChatEntry[]>(
+    () =>
+      scrollback.map((e) =>
+        e.kind === "segments" ? { id: e.id, segments: e.segments } : { id: e.id, segments: [{ text: e.text, tone: e.tone }] },
+      ),
+    [scrollback],
+  );
+
   return (
     // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 화면 전체를 감싼다. Frame은 동적 영역(헤더+
     // 좌측 스택+대화 컬럼) 바깥쪽 장식만 담당한다.
@@ -698,60 +819,72 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       {/* SubTask10 — 워드마크는 사이드바까지 포함한 전체 화면 폭 기준으로 좌우 스택 위에 1회
           그린다(승인 시안). splashDismissed=true(첫 제출 이후)면 완전히 사라진다 — Static
           커밋이 아니라 일반 조건부 렌더라 소멸이 즉시 반영된다(SubTask7 splashDismissed 참조). */}
+      {/* 2026-07-21 — marginLeft/marginTop(빈 공백) 대신 leftMargin/topMarginRows prop으로
+          넘긴다: SplashHeader가 그 여백을 '+' 채움 행/열로 직접 그려야 프레임 텍스처가 Title
+          Area 안까지 이어진다(사용자 요청 — 외곽선뿐 아니라 내부 배경도 채움). */}
       {!state.splashDismissed && (
-        <Box marginLeft={HERO_LEFT_MARGIN} marginTop={HERO_TOP_MARGIN}>
-          <SplashHeader columns={frameLayout.innerColumns} version={version} />
-        </Box>
+        <SplashHeader
+          columns={frameLayout.innerColumns}
+          version={version}
+          leftMargin={HERO_LEFT_MARGIN}
+          topMarginRows={HERO_TOP_MARGIN}
+        />
       )}
       {/* ST10(0.10.0 A3b) — 터틀 덱 2컬럼: 좌측 상시 스택(카드+사이드바, 고정폭)+우측 대화 컬럼
           (가변폭, flexGrow). 사이드바는 토글 패널 시스템(state.panel)과 별개 축이라 ⌃M/⌃R/⌃S
           기존 동작은 무변경. SubTask10 — 카드가 사이드바와 동일폭 34로 이 스택에 합류한다. */}
-      <Box flexDirection="row">
-        <Box flexDirection="column">
+      {/* alignItems="flex-start" 필수(2026-07-21 실기검증 크래시 재현·수정) — ink Box 기본
+          alignItems는 Yoga 기본값 "stretch"를 물려받아, 이 행의 두 자식(leftStack·ChatBox)이
+          서로 상대방 높이에 맞춰 늘어난다. ChatBox의 viewportRows는 leftStackRef를 실측
+          (measureElement)해 계산하는데, stretch가 그 실측값에 ChatBox 자신의 렌더 결과를
+          섞어 넣어 특정 터미널 폭(실측 100~106열)에서 measureElement↔setState가 수렴하지
+          못하고 "Maximum update depth exceeded"로 크래시했다. flex-start로 각 컬럼이 순수
+          자기 콘텐츠 높이로만 결정되게 해 이 순환을 원천 차단한다. */}
+      <Box flexDirection="row" columnGap={CHAT_COLUMN_GAP} alignItems="flex-start">
+        {/* flexShrink=0 필수(2026-07-21 통합 실기검증 실측) — SkillsPanel처럼 폭 제약 없는 우측
+            콘텐츠(설명 최대 80자)가 있으면 Yoga 기본 flexShrink=1이 이 컨테이너 자체를 쪼그라뜨려
+            카드/사이드바 폭(34) 테두리가 겹쳐 깨진다. Sidebar.tsx 자체엔 이미 flexShrink=0이 있지만
+            그건 개별 자식만 보호할 뿐, 부모 컨테이너가 행 축에서 쪼그라드는 건 못 막는다. */}
+        <Box ref={leftStackRef} flexDirection="column" flexShrink={0}>
           {!state.splashDismissed && <WelcomeCard specCount={state.specCount} deferCount={state.deferCount} skills={cardSkills} />}
-          <Sidebar cwd={cwd} tabs={tabs} />
+          <Sidebar cwd={cwd} tabs={tabs} focused={sidebarFocused} cursor={sidebarCursor} />
         </Box>
-        <Box flexDirection="column" flexGrow={1}>
-          <Static items={scrollback}>
-            {(entry) =>
-              entry.kind === "segments" ? (
-                <Segments key={entry.id} segments={entry.segments} />
-              ) : (
-                <Text key={entry.id} color={toneColor(entry.tone)}>
-                  {entry.text}
+        {/* SubTask2(0.10.1) — 대화영역 박스 상주(시안 ff0eb0b1). Static을 완전히 걷어내고 ChatBox가
+            scrollback 전량을 시각행 윈도잉으로 그린다. 패널·승인은 대화 뷰포트/입력창 자리를
+            대체하되 ChatBox 자체 테두리·행 예산은 그대로다(ⓓ, 상세는 ChatBox.tsx 주석). */}
+        <ChatBox
+          innerWidth={chatInnerColumns}
+          viewportRows={chatViewportRows}
+          entries={chatEntries}
+          scrollOffset={scrollOffset}
+          showWelcome={!state.splashDismissed}
+          panelNode={
+            state.panel === "metrics" ? (
+              <MetricsPanel cwd={cwd} />
+            ) : state.panel === "repos" ? (
+              <ReposPanel cwd={cwd} contentColumns={computeContentColumns(frameLayout.innerColumns, SIDEBAR_COLUMNS)} />
+            ) : state.panel === "skills" ? (
+              <SkillsPanel cwd={cwd} />
+            ) : undefined
+          }
+          streamingNode={
+            <>
+              {/* ST5(0.9.4 T2) 계승 — 완성되면 commitStream()이 streamingText를 비우는 동시에 같은
+                  텍스트가 scrollback에 커밋된다(이중출력 방지). tailLines로 마지막 N줄만 렌더. */}
+              {state.streaming && !state.approval && state.streamingText && (
+                <Text>
+                  {tailLines(
+                    state.streamingText,
+                    computePreviewRowBudget(rows, PREVIEW_RESERVED_ROWS + frameLayout.bandRows * 2),
+                  )}
                 </Text>
-              )
-            }
-          </Static>
-          {state.panel === "metrics" && <MetricsPanel cwd={cwd} />}
-          {state.panel === "repos" && (
-            <ReposPanel cwd={cwd} contentColumns={computeContentColumns(frameLayout.innerColumns, SIDEBAR_COLUMNS)} />
-          )}
-          {state.panel === "skills" && <SkillsPanel cwd={cwd} />}
-          {/* ST5(0.9.4 T2) — Static 밖 동적 영역: partial 델타 진행 중 표시. 완성되면 commitStream()이
-              streamingText를 비우는 동시에 같은 텍스트가 위 Static 스크롤백에 커밋된다(이중출력 방지).
-              0.10.0 A3b 실기검증 이슈③ — 이 영역(사이드바 포함 동적 트리 전체)이 터미널 행수를
-              넘으면 ink가 이전 프레임을 못 지워 잔상이 쌓인다(tmux 실측: "안녕하세요" 8회 중복).
-              tailLines로 마지막 N줄만 렌더 — 완성 텍스트는 무변경으로 Static에 커밋되므로 정보
-              손실은 없다(프리뷰만 잘림). */}
-          {state.streaming && !state.approval && state.streamingText && (
-            <Text>
-              {tailLines(
-                state.streamingText,
-                computePreviewRowBudget(rows, PREVIEW_RESERVED_ROWS + frameLayout.bandRows * 2),
               )}
-            </Text>
-          )}
-          {state.streaming && !state.approval && (
-            <Text color="green">{formatSpinnerLine(spinnerTick, elapsedMs)}</Text>
-          )}
-          {/* SubTask10 — 웰컴 라인은 카드와 짝이던 자리(대화 컬럼, 입력창 바로 위)를 그대로
-              지킨다. 카드와 동일하게 splashDismissed로 소멸. */}
-          {!state.splashDismissed && (
-            <Box marginTop={1} marginBottom={1}>
-              <Text color="green">{WELCOME_LINE}</Text>
-            </Box>
-          )}
+              {state.streaming && !state.approval && (
+                <Text color="green">{formatSpinnerLine(spinnerTick, elapsedMs)}</Text>
+              )}
+            </>
+          }
+        >
           {state.approval ? (
             <ApprovalBox
               approval={state.approval}
@@ -768,8 +901,36 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           )}
           <Segments segments={formatGateLine(state)} />
           <Segments segments={formatStatusline(state.statusline)} />
-        </Box>
+        </ChatBox>
       </Box>
+      {/* 2026-07-21(사용자 지시 "최하단 밴드 1행만 잔여") — 2컬럼 섹션 아래 남는 세로 공간
+          전부를 '+'로 채워 하단 밴드가 항상 최하단 1행에 바로 이어지게 한다. Frame 콘텐츠
+          Box가 innerRows로 높이 고정(정적 전환)이라, flexGrow=1 Box가 잔여 행수를 정확히
+          받고 overflow=hidden이 초과분 '+' 행을 클립한다 — 잔여 행수를 산술로 맞출 필요가
+          없어(leftStack 높이·헤더 유무에 따라 가변) 채움 개수 계산 결함 클래스가 원천 차단된다.
+          frameLayout.enabled 가드 필수(실기검증으로 발견) — Frame이 비활성(80열/30행 미만)이면
+          <Frame>은 children을 그대로 통과시킬 뿐 밴드·거터를 전혀 그리지 않는데, 이 가드가
+          없으면 프레임 없는 좁은/저행 터미널 하단에 '+' 채움 덩어리가 통째로 남는 회귀가 있다
+          (79×29에서 1행짜리로도 실측 재현됐던 회귀의 확장판). */}
+      {/* flexBasis=0 필수(실측) — 기본 flexBasis:auto면 내부 '+' 행 innerRows개가 그대로 기본
+          크기가 돼(예: 42행) 콘텐츠 총합이 부모 고정 높이를 초과, Yoga가 위 2컬럼 섹션까지
+          쥐어짜 카드가 중간에서 잘리고 전체가 위로 밀렸다. 기본 크기 0 + flexGrow로 "잔여
+          공간만" 받고, 초과분 '+' 행은 overflow=hidden이 클립한다. */}
+      {frameLayout.enabled && (
+        <Box flexGrow={1} flexBasis={0} flexDirection="column" overflow="hidden">
+          {/* flexShrink=0 내부 래퍼 필수(최소재현 실측) — '+' Text들이 overflow Box의 직접
+              자식이면 기본 flexShrink=1이 클립 대신 "수축"을 일으켜 42행이 잔여 2행에 쥐어짜이며
+              임의 행만 남는다(FILL20·FILL41처럼 비연속 렌더 → 실기에선 빈 행으로 보임). 수축
+              불가 래퍼가 자연 높이를 유지해야 overflow=hidden이 위에서부터 순서대로 클립한다. */}
+          <Box flexDirection="column" flexShrink={0}>
+            {Array.from({ length: frameLayout.innerRows }, (_, i) => (
+              <Text key={i} color={FRAME_COLOR}>
+                {"+".repeat(frameLayout.innerColumns)}
+              </Text>
+            ))}
+          </Box>
+        </Box>
+      )}
     </Frame>
   );
 }
