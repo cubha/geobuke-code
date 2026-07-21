@@ -5,9 +5,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createInitialState, reduce, APPROVAL_CHOICES } from "../dist/tui/model.js";
 
-test("createInitialState: splashShown=false·gateStatus=idle·panel=none·approval=null", () => {
+test("createInitialState: splashDismissed=false·gateStatus=idle·panel=none·approval=null", () => {
   const s = createInitialState();
-  assert.equal(s.splashShown, false);
+  assert.equal(s.splashDismissed, false);
   assert.equal(s.streaming, false);
   assert.equal(s.gateStatus, "idle");
   assert.equal(s.panel, "none");
@@ -43,17 +43,25 @@ test("STATUSLINE_UPDATE: lastTtftMs(0.9.4 ST7)도 다른 필드와 동일하게 
   assert.equal(s.statusline.lastTurnMs, 0, "무관 필드 보존");
 });
 
-test("SESSION_START: splashShown을 true로(스플래시 1회 커밋 계약)", () => {
-  const s = reduce(createInitialState(), { type: "SESSION_START" });
-  assert.equal(s.splashShown, true);
-});
-
 test("TURN_START/TURN_END: streaming 토글", () => {
   let s = createInitialState();
   s = reduce(s, { type: "TURN_START" });
   assert.equal(s.streaming, true);
   s = reduce(s, { type: "TURN_END" });
   assert.equal(s.streaming, false);
+});
+
+test("TURN_START: splashDismissed를 true로(첫 제출 시 스플래시 일괄소멸 계약)", () => {
+  const s = reduce(createInitialState(), { type: "TURN_START" });
+  assert.equal(s.splashDismissed, true);
+});
+
+test("TURN_START: splashDismissed=true 상태에서 재발화해도 그대로 true(멱등)", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TURN_START" });
+  s = reduce(s, { type: "TURN_END" });
+  s = reduce(s, { type: "TURN_START" });
+  assert.equal(s.splashDismissed, true);
 });
 
 test("GATE_RESULT: gateStatus·spec/defer 카운트 갱신, streaming은 무변경", () => {
@@ -237,11 +245,11 @@ test("TAB_SWITCHED: 이전 탭의 streaming·approval·gateStatus·streamingText
   assert.equal(s.gateStatus, "idle");
 });
 
-test("TAB_SWITCHED: splashShown은 true로 유지(전환마다 스플래시 재노출 방지)", () => {
+test("TAB_SWITCHED: splashDismissed는 true로 유지(전환마다 스플래시 재노출 방지)", () => {
   let s = createInitialState();
-  s = reduce(s, { type: "SESSION_START" });
+  s = reduce(s, { type: "TURN_START" });
   s = reduce(s, { type: "TAB_SWITCHED", dir: "/repo/b", branch: "", dirty: false, model: "", specCount: 0, deferCount: 0 });
-  assert.equal(s.splashShown, true);
+  assert.equal(s.splashDismissed, true);
 });
 
 test("TURN_START: streamingText도 함께 리셋(직전 턴의 잔여 델타가 다음 턴에 안 섞이도록 방어)", () => {

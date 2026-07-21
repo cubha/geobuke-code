@@ -2,6 +2,20 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.10.1] - 2026-07-21
+
+**최종시안(ff0eb0b1) 정합 마무리** — 박스형 대화창 상주, 사이드바 repos 키보드 내비게이션, 외부 '+' 프레임을 Title Area 내부까지 확장, 프레임 레이아웃 정적 높이 전환(팬텀 공백행 근본 제거).
+
+### Added
+- **대화창 박스 상주** — ink `<Static>`을 완전 폐기하고 `ChatBox.tsx`가 scrollback 전량을 시각행(표시폭) 기준 윈도잉으로 렌더한다. `wrapSegmentLine`(string-width 기반 사전 랩)로 CJK 혼입 시 잔상 재발을 차단. PgUp/PgDn 스크롤+위치 인디케이터+새 제출 시 최하단 자동 복귀, 스크롤백 상한(`CHAT_SCROLLBACK_MAX_ENTRIES`)으로 무한 증식 방지. 패널(metrics/repos/skills)·승인 박스는 박스 내용만 대체하고 박스 높이·좌측 스택과의 높이 동기화는 유지.
+- **사이드바 repos 키보드 내비게이션** — `Tab`으로 입력창↔사이드바 포커스 토글, 포커스 중 ↑/↓로 커서 이동·Enter로 전환/opt-in·Esc/Tab으로 복귀. repo 10개 이상일 때 커서추종 윈도잉(`computeSidebarWindow`)+"▲ 위 N개 / ▼ 아래 N개" 인디케이터로 기존 침묵 잘림(10번째부터 무표시 truncate)을 해소. ⌃1..9 직행 단축키는 포커스 상태와 무관하게 그대로 유지.
+- **Title Area '+' 배경 확장** — 외곽 프레임 텍스처가 테두리뿐 아니라 Title Area 내부(좌측 여백·상단 여백·태그라인 잔여폭)까지 이어지도록 `SplashHeader.tsx`가 명시적으로 채운다. 워드마크-등껍질 배지 사이 간격은 로고 lockup 의도 보존을 위해 공백 유지.
+
+### Fixed
+- **프레임 하단 팬텀 공백행(근본 원인 해결)** — `Frame.tsx`가 `measureElement` 실측으로 거터 높이를 정하던 구조가, 행 Box의 Yoga 기본 `alignItems:stretch`와 얽혀 "한 번 커진 측정값이 콘텐츠를 되늘려 영원히 유지"되는 자기충족 고정점을 만들어 밴드 바로 위 1행이 항상 비었다. `computeFrameLayout`에 `innerRows`(rows−밴드×2)를 신설해 거터·콘텐츠 높이를 정적으로 고정하고, 측정 루프 자체를 제거 — 팬텀 행과 특정 폭(100~106열)에서의 무한 리렌더 위험 클래스를 원천 차단했다. 하단 잔여 공간은 `flexGrow+flexBasis=0+overflow=hidden` '+' 채움 Box가 자동 흡수한다.
+- **좌측 스택↔대화창 높이 순환 크래시** — leftStack+ChatBox를 감싼 행 Box의 기본 `alignItems:stretch`가 ChatBox 높이 산출(leftStack 실측 기반)을 순환 오염시켜 터미널 100~106열 구간에서 "Maximum update depth exceeded" 크래시가 발생했다. `alignItems="flex-start"`로 순환을 차단.
+- **SkillsPanel 표시 시 좌측 스택 테두리 붕괴** — 폭 무제약 콘텐츠(SkillsPanel)가 ChatBox에 뜨면 `leftStackRef`에 flexShrink 방어가 없어 컨테이너 자체가 쪼그라들었다. `flexShrink={0}` 추가로 카드/사이드바 폭(34) 보존.
+
 ## [0.10.0] - 2026-07-17
 
 **A3b 다중탭 스위처** — 좌측 상시 사이드바에서 `gbc repos` 등록 repo를 opt-in 탭(⌃1..9 전환, ⌃W opt-out)으로 병행 운용한다(여러 repo 세션 동시 상주, resume 보존, 알트스크린 2컬럼). 이후 tmux 실기검증에서 발견된 이슈들을 braintrust 4렌즈(UX·격리/신뢰·공수/회귀·선례) 만장일치 권고안대로 수정해 함께 발행.

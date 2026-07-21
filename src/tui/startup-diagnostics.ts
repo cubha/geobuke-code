@@ -17,7 +17,7 @@ export interface TuiDepsVersions {
   agentSdk: string;
 }
 
-const NOT_INSTALLED_RE = /Cannot find (module|package)|ERR_MODULE_NOT_FOUND/;
+export const NOT_INSTALLED_RE = /Cannot find (module|package)|ERR_MODULE_NOT_FOUND/;
 // 모듈명 앵커 필수 — ink/react의 전이 의존성(yoga-layout·cli-cursor 등)에서 같은 문법의
 // export-mismatch가 나면 앵커 없이는 "ink/react 재설치"라는 확정적이지만 틀린 처방을 낸다
 // (scope-critic 발견).

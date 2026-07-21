@@ -14,7 +14,7 @@ import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import type { TuiEvent, ApprovalChoice } from "./model.js";
 import type { GateDecision } from "../gate-core.js";
 import type { EngineResult } from "../engine.js";
-import { classifySpawnPermissionError } from "./startup-diagnostics.js";
+import { classifySpawnPermissionError, NOT_INSTALLED_RE } from "./startup-diagnostics.js";
 
 // ── SDK 메시지 → TuiEvent ──
 
@@ -168,6 +168,22 @@ export function formatEngineFailure(
     return `🐢 인증 오류: ${result.auth.error}`;
   }
   return null;
+}
+
+/**
+ * 0.10.1 — app.tsx submit()의 세션 최초 spawn 단계(getOrCreateSession/session.submit 호출) 실패는
+ * runEngine 계약(rethrow 안 함) 밖이라 EngineResult로 안 오고 throw로 온다. 이 catch가 지금까지
+ * "모듈 미설치"만 분류하고 spawn EPERM/EACCES는 raw 문자열을 그대로 노출해왔다(2026-07-20 실기
+ * 재현) — formatEngineFailure와 같은 classifySpawnPermissionError를 여기서도 재사용해 GBC_CLAUDE_PATH
+ * 안내가 이 경로에서도 뜨게 한다.
+ */
+export function formatSessionStartFailure(msg: string): string {
+  if (NOT_INSTALLED_RE.test(msg)) {
+    return "🐢 A-mode 엔진(@anthropic-ai/claude-agent-sdk)이 설치되지 않았습니다. 설치: npm i @anthropic-ai/claude-agent-sdk";
+  }
+  const diag = classifySpawnPermissionError(msg);
+  if (diag) return diag;
+  return `🐢 오류: ${msg.slice(0, 200)}`;
 }
 
 /**
