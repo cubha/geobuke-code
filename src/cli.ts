@@ -1151,9 +1151,13 @@ async function cmdTui(args: string[]): Promise<void> {
     // alternateScreen(0.10.0 A3b ST10) — 터틀 덱 2컬럼 레이아웃 확정과 함께 승인된 전환(0.9.0
     // "인라인+Static, alt-screen 기각" 결정의 공식 번복 — project_0_9_0_tui_stack_decision.md History).
     // teardown 프레임은 보존되지 않는다(ink 공식 동작) — 그 보완이 ST12 크래시 덤프.
+    // kittyKeyboard:auto(0.10.3) — CSI ? u 쿼리로 터미널의 kitty keyboard protocol 지원을 자동
+    // 감지해 활성화한다(미지원 터미널은 200ms 무응답 → 레거시 유지, ink 7.1 내장). 활성 시에만
+    // Ctrl+1..9(레거시 인코딩엔 코드 자체가 없음)·Ctrl+M(레거시에선 Enter와 동일 바이트) 구분이
+    // 가능해진다 — 레거시 터미널용 1차 바인딩은 Alt(meta) 폴백(app.tsx useInput).
     const { waitUntilExit } = render(
       React.createElement(App, { cwd, version: PKG_VERSION, ...(model ? { model } : {}) }),
-      { exitOnCtrlC: false, alternateScreen: true },
+      { exitOnCtrlC: false, alternateScreen: true, kittyKeyboard: { mode: "auto" } },
     );
     await waitUntilExit();
   } catch (e) {

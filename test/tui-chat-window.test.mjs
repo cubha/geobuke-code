@@ -8,6 +8,7 @@ import {
   wrapSegmentLine,
   computeChatViewport,
   computeChatRegionRows,
+  computeInputLayout,
   CHAT_SCROLLBACK_MAX_ENTRIES,
 } from "../dist/tui/format.js";
 
@@ -116,4 +117,102 @@ test("computeChatRegionRows: 저행 터미널 바닥 클램프(최소 8)", () =>
 
 test("CHAT_SCROLLBACK_MAX_ENTRIES: 양의 유한 상한(무한 증식 방지 계약)", () => {
   assert.ok(Number.isInteger(CHAT_SCROLLBACK_MAX_ENTRIES) && CHAT_SCROLLBACK_MAX_ENTRIES > 0);
+});
+
+// ── wrapSegmentLine \n 하드브레이크 (0.10.3 — 현장 이슈②: 멀티라인 pushLine 행수 계산 붕괴) ──
+// EPERM 안내(startup-diagnostics.ts) 같은 \n 포함 문자열이 한 엔트리로 들어오면, 기존엔 \n이 폭 0
+// 일반문자로 텍스트에 남아 Ink가 실제 개행으로 렌더 — "시각행 1개"로 계산된 항목이 화면에선 여러
+// 행을 차지해 박스가 예산을 초과했다(타이틀 잘림·잔상). 이제 \n은 행 분리자다(출력에 안 남음).
+
+test("wrapSegmentLine: \\n은 하드브레이크 — 행이 분리되고 개행 문자는 출력에 남지 않는다", () => {
+  const out = wrapSegmentLine([{ text: "가로줄1\n가로줄2\n셋", tone: "plain" }], 40);
+  assert.equal(out.length, 3);
+  assert.equal(out[0][0].text, "가로줄1");
+  assert.equal(out[1][0].text, "가로줄2");
+  assert.equal(out[2][0].text, "셋");
+  for (const line of out) for (const seg of line) assert.ok(!seg.text.includes("\n"));
+});
+
+test("wrapSegmentLine: 연속 \\n\\n은 빈 시각행 1개를 보존한다(단락 구분)", () => {
+  const out = wrapSegmentLine([{ text: "a\n\nb", tone: "plain" }], 10);
+  assert.equal(out.length, 3);
+  assert.equal(out[0][0].text, "a");
+  assert.deepEqual(out[1], []);
+  assert.equal(out[2][0].text, "b");
+});
+
+test("wrapSegmentLine: \\n 분리 후 각 행도 표시폭 랩을 따른다(하드브레이크+소프트랩 조합)", () => {
+  const out = wrapSegmentLine([{ text: `${"a".repeat(15)}\nbb`, tone: "plain" }], 10);
+  assert.equal(out.length, 3);
+  assert.equal(out[0][0].text, "a".repeat(10));
+  assert.equal(out[1][0].text, "a".repeat(5));
+  assert.equal(out[2][0].text, "bb");
+});
+
+test("wrapSegmentLine: 후행 \\n은 빈 꼬리 행을 만들지 않는다(행 종결자 의미)", () => {
+  const out = wrapSegmentLine([{ text: "abc\n", tone: "plain" }], 10);
+  assert.equal(out.length, 1);
+  assert.equal(out[0][0].text, "abc");
+});
+
+test("wrapSegmentLine: \\n 하드브레이크에서도 세그먼트 톤이 보존된다", () => {
+  const out = wrapSegmentLine(
+    [
+      { text: "빨강\n", tone: "danger" },
+      { text: "회색", tone: "dim" },
+    ],
+    20,
+  );
+  assert.equal(out.length, 2);
+  assert.equal(out[0][0].tone, "danger");
+  assert.equal(out[1][0].tone, "dim");
+});
+
+// ── computeInputLayout (0.10.3 — 한글 IME: 실커서를 캐럿 위치에 노출하기 위한 단일 소스) ──
+
+test("computeInputLayout: 빈 입력 — 프롬프트 1행, 캐럿은 프롬프트 뒤(폭 2)", () => {
+  const out = computeInputLayout([""], 0, 0, 30);
+  assert.deepEqual(out.lines, ["❯ "]);
+  assert.equal(out.caretRow, 0);
+  assert.equal(out.caretCol, 2);
+});
+
+test("computeInputLayout: 커서 끝 — 캐럿이 텍스트 표시폭 끝(한글 2폭 반영)", () => {
+  const out = computeInputLayout(["한글ab"], 0, 4, 30);
+  assert.equal(out.lines.length, 1);
+  assert.equal(out.caretRow, 0);
+  assert.equal(out.caretCol, 2 + 2 + 2 + 2); // 프롬프트2 + 한2 + 글2 + a1+b1
+});
+
+test("computeInputLayout: 커서 중간 — slice 기준 표시폭 오프셋", () => {
+  const out = computeInputLayout(["한글ab"], 0, 1, 30); // '한' 뒤
+  assert.equal(out.caretCol, 2 + 2);
+});
+
+test("computeInputLayout: 랩 경계 — 캐럿이 랩된 다음 시각행으로 따라간다", () => {
+  // 폭 10: "❯ "(2) + a×8 = 10 → 9번째 a부터 다음 행
+  const out = computeInputLayout(["a".repeat(12)], 0, 12, 10);
+  assert.equal(out.lines.length, 2);
+  assert.equal(out.lines[0], "❯ " + "a".repeat(8));
+  assert.equal(out.lines[1], "a".repeat(4));
+  assert.equal(out.caretRow, 1);
+  assert.equal(out.caretCol, 4);
+});
+
+test("computeInputLayout: 멀티라인 — 둘째 논리행은 들여쓰기 프리픽스, 캐럿 행 오프셋 누적", () => {
+  const out = computeInputLayout(["ab", "cd"], 1, 2, 30);
+  assert.deepEqual(out.lines, ["❯ ab", "  cd"]);
+  assert.equal(out.caretRow, 1);
+  assert.equal(out.caretCol, 2 + 2);
+});
+
+test("computeInputLayout: 시각행 수 = 렌더 행수 계약(행수예산과 단일 소스)", () => {
+  const out = computeInputLayout(["가".repeat(20)], 0, 0, 10);
+  // "❯ "+가20(40폭)=42폭, 폭 10 → 행당 한글 4~5자 → 총 5행 이상, 각 행 표시폭 ≤10
+  for (const ln of out.lines) {
+    const w = Array.from(ln).reduce((acc, ch) => acc + stringWidth(ch), 0);
+    assert.ok(w <= 10, `행 폭 ${w} > 10`);
+  }
+  assert.equal(out.caretRow, 0);
+  assert.equal(out.caretCol, 2);
 });

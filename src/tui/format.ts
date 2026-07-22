@@ -288,6 +288,11 @@ export const CHAT_SCROLLBACK_MAX_ENTRIES = 500;
  * 계약: 문자 중간 절단 금지(코드포인트 단위 순회), CJK 2폭 문자는 폭 예산을 넘기면 다음 행으로,
  * 세그먼트 경계를 가로질러도 각 조각은 원래 톤을 유지한다. width<=0이면 랩 자체가 무의미하므로
  * 무한루프 없이 원본을 1행으로 그대로 반환한다(방어).
+ * 0.10.3 — "\n"은 하드브레이크로 처리한다(개행 문자 자체는 출력에 남기지 않음). 기존엔 \n을
+ * 폭 0 일반문자로 취급해 텍스트에 그대로 남겼고, Ink <Text>가 그걸 실제 개행으로 렌더해 "시각행
+ * 1개"로 계산된 항목이 화면에선 여러 행을 차지했다 — ChatBox 행수 계산이 어긋나 박스가 예산을
+ * 초과하고 타이틀이 밀려 잘리던 현장 결함(EPERM 안내 등 멀티라인 pushLine, 2026-07-22 스크린샷)의
+ * 근본원인. 연속 \n\n은 빈 시각행 1개를 보존한다(단락 구분 유지).
  */
 export function wrapSegmentLine(segments: TextSegment[], width: number): TextSegment[][] {
   if (width <= 0) return [segments];
@@ -296,6 +301,12 @@ export function wrapSegmentLine(segments: TextSegment[], width: number): TextSeg
   let currentWidth = 0;
   for (const seg of segments) {
     for (const ch of Array.from(seg.text)) {
+      if (ch === "\n") {
+        lines.push(currentLine); // 빈 행이어도 그대로 — "a\n\nb"의 가운데 빈 줄을 보존한다.
+        currentLine = [];
+        currentWidth = 0;
+        continue;
+      }
       const w = stringWidth(ch);
       // currentLine이 비어있을 때는 절대 플러시하지 않는다 — 그러지 않으면 폭보다 넓은 단일 문자
       // (예: width=1에 CJK 2폭)가 빈 행을 무한히 밀어내는 결함이 된다.
@@ -317,6 +328,75 @@ export function wrapSegmentLine(segments: TextSegment[], width: number): TextSeg
     lines.push(segments.length > 0 ? segments.map((s) => ({ ...s })) : []);
   }
   return lines;
+}
+
+// ── 입력창 캐럿 레이아웃 (0.10.3 — 한글 IME 조합 표시) ──
+// 실터미널 커서를 입력 캐럿 위치에 노출해야 IME(한글 등) 조합 중 글자가 그 자리에서 바로 보인다
+// (ink 7.1 useCursor의 공식 용도 — 사외 실사용 보고: 한글이 다음 키입력에서야 나타남, 2026-07-22).
+// 기존 렌더는 실커서를 숨기고 가짜 '█'를 문자열로 그려 조합 프리뷰가 표시될 곳이 없었다.
+
+/** 입력창 첫 시각행 프롬프트 — 표시폭 2("❯ "). 이후 시각행(랩·개행 연속)은 동일폭 들여쓰기. */
+export const INPUT_PROMPT_PREFIX = "❯ ";
+export const INPUT_CONTINUATION_PREFIX = "  ";
+
+export interface InputLayout {
+  /** 프리픽스 포함 시각행들 — 렌더는 이 배열을 그대로 한 행씩 그린다(별도 랩 금지 = 계산·렌더 단일화). */
+  lines: string[];
+  /** 캐럿이 위치한 시각행 인덱스(0-base). */
+  caretRow: number;
+  /** 캐럿의 시각행 내 표시폭 오프셋(string-width 기준, 프리픽스 포함). */
+  caretCol: number;
+}
+
+/**
+ * 에디터 논리행들을 입력창 표시폭(width)으로 랩한 시각행 배열과, 커서(cursorRow/cursorCol —
+ * editor.ts의 JS 문자열 인덱스 단위)의 시각 좌표를 함께 계산한다(순수). 랩 규칙은
+ * wrapSegmentLine과 동일(코드포인트 순회·CJK 2폭·빈 행 미플러시) — 시각행 수와 캐럿 좌표가
+ * 한 함수에서 나와야 렌더·커서·행수예산 삼자가 절대 어긋나지 않는다.
+ */
+export function computeInputLayout(
+  logicalLines: string[],
+  cursorRow: number,
+  cursorCol: number,
+  width: number,
+): InputLayout {
+  const safeWidth = Math.max(1, width);
+  const lines: string[] = [];
+  let caretRowOut = 0;
+  let caretColOut = INPUT_PROMPT_PREFIX.length;
+  for (let li = 0; li < logicalLines.length; li++) {
+    const prefix = li === 0 ? INPUT_PROMPT_PREFIX : INPUT_CONTINUATION_PREFIX;
+    const chars = Array.from(prefix + logicalLines[li]);
+    // 캐럿의 코드포인트 인덱스 — editor.ts cursorCol은 UTF-16 단위라 slice 후 재계산해야
+    // 서로게이트 쌍(이모지)에서 어긋나지 않는다. 프리픽스도 코드포인트로 합산.
+    const caretCp =
+      li === cursorRow ? Array.from(prefix).length + Array.from(logicalLines[li].slice(0, cursorCol)).length : -1;
+    let current = "";
+    let currentWidth = 0;
+    for (let k = 0; k < chars.length; k++) {
+      const ch = chars[k];
+      const w = stringWidth(ch);
+      if (currentWidth + w > safeWidth && current.length > 0) {
+        lines.push(current);
+        current = "";
+        currentWidth = 0;
+      }
+      if (k === caretCp) {
+        caretRowOut = lines.length;
+        caretColOut = currentWidth;
+      }
+      current += ch;
+      currentWidth += w;
+    }
+    if (caretCp === chars.length) {
+      // 캐럿이 논리행 끝(마지막 문자 뒤) — 랩 경계에 정확히 걸치면 다음 행 0열이 아니라 현 행
+      // 끝에 둔다(다음 입력이 그 행에 이어지는 시각적 기대와 일치).
+      caretRowOut = lines.length;
+      caretColOut = currentWidth;
+    }
+    lines.push(current); // 빈 논리행도 시각행 1개(프리픽스만)로 유지 — 개행 직후 캐럿이 설 자리.
+  }
+  return { lines, caretRow: caretRowOut, caretCol: caretColOut };
 }
 
 export interface ChatViewport {
@@ -475,20 +555,23 @@ export function formatWelcomeCard(specCount: number, deferCount: number, skills:
       { text: s.blurb, tone: "dim" },
     ]);
   }
+  // 0.10.3 — 키맵 표기를 Alt+ 기준으로 교체(현장 이슈③④): 레거시 터미널 인코딩엔 Ctrl+숫자
+  // 코드가 없고 Ctrl+M은 Enter와 동일 바이트라, ⌃ 표기가 대부분의 실터미널(특히 Windows)에서
+  // 거짓 안내였다. Ctrl 바인딩은 kitty protocol 활성 터미널용으로 코드에 병존한다(app.tsx).
   rows.push(
     [
-      { text: "⌃M 메트릭", tone: "dim" },
-      { text: "⌃R repos", tone: "dim" },
+      { text: "Alt+M 메트릭", tone: "dim" },
+      { text: "Alt+R repos", tone: "dim" },
     ],
     [
-      { text: "⌃S skills", tone: "dim" },
+      { text: "Alt+S skills", tone: "dim" },
       { text: "esc 중단", tone: "dim" },
     ],
     [
       { text: "shift+↵ 개행", tone: "dim" },
       { text: "⌃C 종료(2회)", tone: "dim" },
     ],
-    [{ text: "⌃T 타이틀 전환", tone: "dim" }], // 0.11.0 — full/mini 타이틀 토글(사용자 확정 2026-07-22).
+    [{ text: "Alt+T 타이틀 전환", tone: "dim" }], // 0.11.0 — full/mini 타이틀 토글(사용자 확정 2026-07-22).
   );
   return rows;
 }
@@ -671,9 +754,9 @@ export function formatGateLine(state: TuiState): TextSegment[] {
   ];
   if (state.streaming) segments.push({ text: "esc 중단", tone: "dim" });
   segments.push(
-    { text: state.panel === "metrics" ? "⌃M 닫기" : "⌃M 메트릭", tone: "dim" },
-    { text: state.panel === "repos" ? "⌃R 닫기" : "⌃R repos", tone: "dim" },
-    { text: state.panel === "skills" ? "⌃S 닫기" : "⌃S skills", tone: "dim" },
+    { text: state.panel === "metrics" ? "Alt+M 닫기" : "Alt+M 메트릭", tone: "dim" },
+    { text: state.panel === "repos" ? "Alt+R 닫기" : "Alt+R repos", tone: "dim" },
+    { text: state.panel === "skills" ? "Alt+S 닫기" : "Alt+S skills", tone: "dim" },
   );
   return [...armedSeg, ...segments];
 }

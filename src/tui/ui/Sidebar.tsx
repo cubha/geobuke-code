@@ -72,8 +72,9 @@ export function Sidebar({
       borderColor={focused ? "cyan" : BORDER_COLOR}
       paddingX={1}
     >
+      {/* 0.10.3 — Alt+ 표기로 교체(레거시 터미널은 Ctrl+숫자 미전송, 이슈③). */}
       <Text color={PANEL_TITLE_COLOR} bold>
-        📁 repos <Text color="gray">— ⌃1..9 전환/opt-in · ⌃W opt-out · ⌃T 타이틀</Text>
+        📁 repos <Text color="gray">— Alt+1..9 전환/opt-in · Alt+W opt-out · Alt+T 타이틀</Text>
       </Text>
       {repos.length === 0 ? (
         <Text color="gray">등록된 repo 없음 — 'gbc repos add'로 추가</Text>
@@ -93,7 +94,9 @@ export function Sidebar({
             return (
               <Text key={r} color={rowColor}>
                 {prefix}
-                <Text color="gray">{i < 9 ? `⌃${i + 1} ` : "   "}</Text>
+                {/* 숫자만 표시(폭 3 유지) — 수식키는 헤더의 "Alt+1..9"가 안내한다(구 ⌃N 표기는
+                    레거시 터미널에서 동작하지 않는 거짓 안내였다, 0.10.3 이슈③). */}
+                <Text color="gray">{i < 9 ? ` ${i + 1} ` : "   "}</Text>
                 {glyph ? <Text color={toneColor(glyph.tone)}>{glyph.icon} </Text> : <Text color="gray">· </Text>}
                 {formatSidebarRepoPath(r, r === cwd)}
                 {r === cwd ? <Text color="gray"> (시작)</Text> : null}

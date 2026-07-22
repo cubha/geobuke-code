@@ -167,19 +167,19 @@ test("formatGateLine: block(승인 대기) — BLOCK danger 세그먼트, canUse
 test("formatGateLine: 패널 토글 힌트가 열림 상태에 따라 '메트릭'↔'닫기' 전환", () => {
   let s = createInitialState();
   const closedText = joinTextSegments(formatGateLine(s));
-  assert.match(closedText, /⌃M 메트릭/);
-  assert.match(closedText, /⌃R repos/);
-  assert.match(closedText, /⌃S skills/);
+  assert.match(closedText, /Alt\+M 메트릭/); // 0.10.3 — Alt+ 표기(레거시 터미널에서 ⌃M=Enter라 거짓 안내였음)
+  assert.match(closedText, /Alt\+R repos/);
+  assert.match(closedText, /Alt\+S skills/);
   s = reduce(s, { type: "TOGGLE_PANEL", panel: "metrics" });
   const openText = joinTextSegments(formatGateLine(s));
-  assert.match(openText, /⌃M 닫기/);
-  assert.match(openText, /⌃R repos/, "다른 패널 힌트는 그대로");
+  assert.match(openText, /Alt\+M 닫기/);
+  assert.match(openText, /Alt\+R repos/, "다른 패널 힌트는 그대로");
 });
 
 test("formatGateLine: skills 패널 열림 — '⌃S 닫기'로 전환", () => {
   let s = createInitialState();
   s = reduce(s, { type: "TOGGLE_PANEL", panel: "skills" });
-  assert.match(joinTextSegments(formatGateLine(s)), /⌃S 닫기/);
+  assert.match(joinTextSegments(formatGateLine(s)), /Alt\+S 닫기/);
 });
 
 // exitConfirmArmed(0.9.2 ST10/scope-critic 발견) — pushLine 스크롤백은 후속 출력에 밀려나 사라지므로,
@@ -321,16 +321,16 @@ test("formatWelcomeCard: 게이트 요약 2줄 + spec/defer 1줄 + 기본 스킬
   assert.match(joinTextSegments(rows[5]), /\/gbc-monitor/);
   assert.match(joinTextSegments(rows[6]), /\/gbc-mute/);
   const keymap1 = joinTextSegments(rows[7]);
-  assert.match(keymap1, /⌃M/);
-  assert.match(keymap1, /⌃R/);
+  assert.match(keymap1, /Alt\+M/);
+  assert.match(keymap1, /Alt\+R/);
   const keymap2 = joinTextSegments(rows[8]);
-  assert.match(keymap2, /⌃S/);
+  assert.match(keymap2, /Alt\+S/);
   assert.match(keymap2, /esc 중단/);
   const keymap3 = joinTextSegments(rows[9]);
   assert.match(keymap3, /shift\+↵/);
   assert.match(keymap3, /⌃C 종료\(2회\)/);
   const keymap4 = joinTextSegments(rows[10]);
-  assert.match(keymap4, /⌃T 타이틀/);
+  assert.match(keymap4, /Alt\+T 타이틀/);
 });
 
 test("formatWelcomeCard: 스킬 이름 세그먼트는 accent 톤(패널 강조와 일관)", () => {
