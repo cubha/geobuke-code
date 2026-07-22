@@ -12,7 +12,7 @@ import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { loadRepos } from "../../repos.js";
 import { MASCOT_S2, renderMascot, formatTabStatusGlyph, formatSidebarRepoPath, computeSidebarWindow, SIDEBAR_COLUMNS } from "../format.js";
-import { toneColor } from "./theme.js";
+import { toneColor, BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
 import { Mascot } from "./Mascot.js";
 import type { TabRegistry } from "../tabs.js";
 
@@ -59,16 +59,21 @@ export function Sidebar({
     // flexShrink=0 필수(2026-07-17 tmux 80열 실측) — ink Box 기본 flexShrink=1이라 우측 컬럼
     // 콘텐츠가 넓으면 이 "고정폭" 36이 27로 쪼그라들어, 36 기준으로 예산 계산한
     // formatSidebarRepoPath 축약이 무력화되고 사이드바 내부 줄바꿈이 재발한다.
+    // flexGrow=1(0.11.0) — 부모 leftStack 컬럼이 이제 정적 height(app.tsx chatTotalRows)를 갖는다.
+    // Sidebar가 그 잔여 세로공간을 전부 차지해야 하단의 flexGrow 스페이서(마스코트 앞)가 실제로
+    // 뭔가를 흡수할 공간이 생긴다 — flexGrow 없으면 Sidebar 자체가 콘텐츠 자연높이로 쪼그라들어
+    // 스페이서가 무력화된다.
     <Box
       flexDirection="column"
       width={SIDEBAR_COLUMNS}
       flexShrink={0}
+      flexGrow={1}
       borderStyle="round"
-      borderColor={focused ? "cyan" : "green"}
+      borderColor={focused ? "cyan" : BORDER_COLOR}
       paddingX={1}
     >
-      <Text color="green" bold>
-        📁 repos <Text color="gray">— ⌃1..9 전환/opt-in · ⌃W opt-out</Text>
+      <Text color={PANEL_TITLE_COLOR} bold>
+        📁 repos <Text color="gray">— ⌃1..9 전환/opt-in · ⌃W opt-out · ⌃T 타이틀</Text>
       </Text>
       {repos.length === 0 ? (
         <Text color="gray">등록된 repo 없음 — 'gbc repos add'로 추가</Text>

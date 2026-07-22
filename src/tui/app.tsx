@@ -2,8 +2,8 @@
 // 한다 — 격리 경계는 cli.ts→app.tsx의 lazy dynamic import 쪽(ST6)에 있다(ST0 회귀락 대상은 cli.ts).
 // 이 파일은 얇은 오케스트레이션+렌더만 한다 — 상태전이는 model.ts/editor.ts, 표시문구는 format.ts,
 // 엔진↔TUI 변환은 bridge.ts가 전담(순수, TDD 커버). 여기서 새 판정 로직을 만들지 않는다.
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
-import { Box, Text, useInput, useWindowSize, measureElement, type DOMElement, type Key } from "ink";
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Box, Text, useInput, useWindowSize, type Key } from "ink";
 import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -21,7 +21,7 @@ import {
   computePreviewRowBudget,
   computeFrameLayout,
   computeChatRegionRows,
-  shouldShowWordmark,
+  computeHeaderRows,
   tailLines,
   SIDEBAR_COLUMNS,
   PREVIEW_RESERVED_ROWS,
@@ -66,18 +66,15 @@ import { scanSkills } from "./skills.js";
 import { GBC_SKILL_NAMES } from "../install.js";
 
 // 구 SplashHero.tsx의 여백 사양 그대로 유지(SubTask10 — 전체폭 헤더로 위치가 바뀌어도 좌측
-// 여백·상단 여백 값 자체는 승인 시안과 동일하게 보존).
+// 여백 값 자체는 승인 시안과 동일하게 보존). 0.11.0 — 상단 여백(구 HERO_TOP_MARGIN)은 헤더 압축
+// (10→7/1행)으로 제거됐다(SplashHeader.tsx 주석 참조).
 const HERO_LEFT_MARGIN = 3;
-const HERO_TOP_MARGIN = 2;
 
 // 0.10.1 SubTask2 — 대화창 박스(ChatBox) 행 예산 산정 상수. computeChatRegionRows(순수, format.ts)가
 // 준 전체 예산에서 이 고정분을 빼면 메시지 뷰포트 행수(viewportRows)가 나온다.
-// ⓐ 헤더 행수(스플래시 표시 중일 때만) — SplashHeader를 감싸는 marginTop(HERO_TOP_MARGIN)까지
-// 포함한 실측치. 워드마크 노출(shouldShowWordmark) 시 마진2+워드마크6+마진1+태그라인1=10,
-// 미노출(좁은 터미널) 시 마진2+태그라인1=3 — 값이 바뀌면(SplashHeader 레이아웃 변경 시) 여기도
-// 같이 재실측해야 한다(단위테스트로 못 잡는 UI 레이아웃 상수라 코드 리뷰로만 잡힘, 알려진 한계).
-const CHAT_HEADER_ROWS_WIDE = 10;
-const CHAT_HEADER_ROWS_NARROW = 3;
+// ⓐ 헤더 행수 — 0.11.0부터 computeHeaderRows(format.ts)가 단일 소스(타이틀이 상시 렌더되며
+// full/mini 두 모드를 가지므로 상수가 아니라 함수). 구 CHAT_HEADER_ROWS_WIDE/NARROW(스플래시
+// 소멸 전제·측정 상수)는 폐기.
 // ⓑ ChatBox 자체 테두리(상하 각 1) + 스크롤 인디케이터(항상 1행 예약).
 const CHAT_BOX_CHROME_ROWS = 3;
 // ⓒ 하단 고정 UI — 입력창(테두리 라운드, 3행) + 게이트줄(1) + statusline(1). 승인 중엔 ApprovalBox가
@@ -194,8 +191,8 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
 
   // SubTask10 — 안내카드의 스킬 목록(skills.ts scanSkills 파일 I/O)만 마운트 시 1회 지연 계산한다.
   // spec/defer 카운트는 이미 state.specCount/deferCount(위 lazy initializer가 시드)가 있어 별도
-  // 계산이 불필요 — 카드는 splashDismissed=false인 동안(첫 턴 전)만 보이므로 GATE_RESULT로 갱신될
-  // 일도 없다(첫 턴이 시작돼야 GATE_RESULT가 온다).
+  // 계산이 불필요. 0.11.0 — 카드는 이제 고정 레이아웃으로 상시 표시된다(구 splashDismissed 조건부
+  // 소멸 폐기, 스트리밍 중에도 GATE_RESULT로 카운트만 갱신되며 카드 자체는 계속 보인다).
   const [cardSkills] = useState(() => resolveCardSkills(cwd));
 
   // ST11(0.10.0 A3b) — 탭 레지스트리(tabs.ts, ST1). cwd(App 시작 repo)가 항상 첫 탭 — tabs.ts
@@ -343,8 +340,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     setSidebarFocused(false); // SubTask5 — 승인 프롬프트가 뜨면 사이드바 포커스를 자동 해제.
   }, []);
 
-  // SubTask10 — 스플래시(워드마크+카드+웰컴)는 더 이상 Static에 커밋하지 않는다. splashDismissed는
-  // TURN_START(첫 제출)가 직접 설정하고, 아래 root JSX가 그 값을 조건부 렌더로 직접 소비한다.
+  // SubTask10 — 스플래시(워드마크+카드+웰컴)는 더 이상 Static에 커밋하지 않는다. 0.11.0부터는
+  // splashDismissed 조건부 소멸 자체가 폐기되고 타이틀(SplashHeader)·카드가 항상 렌더된다 —
+  // state.titleMode(full/mini)만 ⌃T로 바뀌며, 웰컴 라인은 여전히 첫 턴 전에만 보인다(showWelcome).
 
   // repoId(0.10.0 A3b ST3): 이 canUseTool 인스턴스가 어느 repo의 세션에 배선됐는지. getOrCreateSession이
   // 세션 생성 시점에 그 세션의 repoId를 넘긴다 — 지금은 단일 세션(App의 cwd)뿐이라 항상 cwd와 같지만,
@@ -706,6 +704,12 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       dispatch({ type: "TOGGLE_PANEL", panel: "skills" });
       return;
     }
+    if (key.ctrl && input === "t") {
+      // 0.11.0(사용자 확정) — 타이틀 헤더 full(압축 워드마크 7행)↔mini(1행) 토글. 시안
+      // 아티팩트 a9ee1e59 — A안(full) 기본, B안(mini)은 이 단축키로만 진입.
+      dispatch({ type: "TOGGLE_TITLE" });
+      return;
+    }
     if (state.panel !== "none") {
       if (key.escape) dispatch({ type: "CLOSE_PANEL" });
       return;
@@ -774,29 +778,16 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     setEditorState((s) => applyEditorKey(input, key, s));
   });
 
-  // SubTask2(0.10.1) — ChatBox 높이를 좌측 스택(카드+사이드바)의 실제 렌더 높이에 정확히 맞춘다
-  // (시안 요구: "대화창은 좌측 컬럼과 동일한 세로 높이"). 좌측 스택 높이는 repo 개수 등 동적
-  // 요인에 좌우돼 정적 산술로는 못 맞춘다 — Frame.tsx와 동일한 measureElement 패턴을 재사용한다.
-  // leftStackHeight=0(마운트 직후 미측정)일 때만 computeChatRegionRows(순수, SubTask1)를 폴백으로
-  // 쓴다 — 첫 프레임이 0으로 찌그러지는 것을 막는 안전망일 뿐, 측정값이 나오는 즉시 대체된다.
-  const leftStackRef = useRef<DOMElement>(null);
-  const [leftStackHeight, setLeftStackHeight] = useState(0);
-  useLayoutEffect(() => {
-    if (!leftStackRef.current) return;
-    setLeftStackHeight(measureElement(leftStackRef.current).height);
-  });
-  const chatHeaderRows = state.splashDismissed
-    ? 0
-    : shouldShowWordmark(frameLayout.innerColumns)
-      ? CHAT_HEADER_ROWS_WIDE
-      : CHAT_HEADER_ROWS_NARROW;
-  const chatRegionRowsFallback = computeChatRegionRows(rows, frameLayout.bandRows, chatHeaderRows);
-  // 2026-07-21 — 예전엔 여기 "-1 실측 보정" 상수가 있었다. 원인은 행 Box의 기본 alignItems:stretch가
-  // leftStackRef 측정값에 ChatBox 자신의 렌더 결과를 순환 오염시킨 것(아래 alignItems="flex-start"
-  // 참조 — 특정 터미널 폭에서 무한루프 크래시까지 유발했던 그 버그와 동일 근본원인이었다). stretch를
-  // 걷어내자 이 오염도 함께 사라져 leftStackHeight가 실제 렌더 행수와 정확히 일치한다(재실측 확인,
-  // 보정 상수 폐기).
-  const chatTotalRows = leftStackHeight > 0 ? leftStackHeight : chatRegionRowsFallback;
+  // SubTask2(0.10.1)→0.11.0 — ChatBox와 좌측 스택(카드+사이드바)이 같은 세로 높이를 공유한다
+  // (시안 요구: "대화창은 좌측 컬럼과 동일한 세로 높이"). 구현은 leftStackRef를 measureElement로
+  // 실측해 ChatBox 높이를 역산하는 순환 구조였으나, 이 실측↔렌더 순환 자체가 Frame.tsx와 동일한
+  // 결함 클래스(alignItems:stretch 자기충족 고정점 — 특정 터미널 폭에서 무한 리렌더 크래시까지
+  // 유발)의 마지막 잔여 인스턴스였다. 헤더가 상시 렌더로 바뀌며 chatHeaderRows도 정적값이 됐으니
+  // (구 splashDismissed 조건 분기 폐기) 이제 두 컬럼 모두 정적 산술로 확정할 수 있다 — 측정을
+  // 완전히 제거한다. leftStack Box에 이 값을 height로 명시하면, Sidebar 내부 flexGrow 스페이서가
+  // 남는 여백을 흡수해 마스코트가 항상 컬럼 하단에 붙는다(레퍼런스: Sidebar.tsx 최하단 스페이서).
+  const chatHeaderRows = computeHeaderRows(frameLayout.innerColumns, state.titleMode);
+  const chatTotalRows = computeChatRegionRows(rows, frameLayout.bandRows, chatHeaderRows);
   const chatViewportRows = Math.max(1, chatTotalRows - CHAT_BOX_CHROME_ROWS - CHAT_BOTTOM_FIXED_ROWS);
   const chatOuterColumns = Math.max(0, computeContentColumns(frameLayout.innerColumns, SIDEBAR_COLUMNS) - CHAT_COLUMN_GAP);
   const chatInnerColumns = Math.max(1, chatOuterColumns - 4); // ChatBox 테두리2+paddingX(1×2)
@@ -817,36 +808,31 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // 좌측 스택+대화 컬럼) 바깥쪽 장식만 담당한다.
     <Frame columns={columns} rows={rows}>
       {/* SubTask10 — 워드마크는 사이드바까지 포함한 전체 화면 폭 기준으로 좌우 스택 위에 1회
-          그린다(승인 시안). splashDismissed=true(첫 제출 이후)면 완전히 사라진다 — Static
-          커밋이 아니라 일반 조건부 렌더라 소멸이 즉시 반영된다(SubTask7 splashDismissed 참조). */}
-      {/* 2026-07-21 — marginLeft/marginTop(빈 공백) 대신 leftMargin/topMarginRows prop으로
-          넘긴다: SplashHeader가 그 여백을 '+' 채움 행/열로 직접 그려야 프레임 텍스처가 Title
-          Area 안까지 이어진다(사용자 요청 — 외곽선뿐 아니라 내부 배경도 채움). */}
-      {!state.splashDismissed && (
-        <SplashHeader
-          columns={frameLayout.innerColumns}
-          version={version}
-          leftMargin={HERO_LEFT_MARGIN}
-          topMarginRows={HERO_TOP_MARGIN}
-        />
-      )}
+          그린다(승인 시안). 0.11.0(사용자 확정) — 더 이상 첫 제출로 소멸하지 않고 항상 렌더된다.
+          state.titleMode(full/mini)만 ⌃T로 바뀐다(useInput 배선 참조). */}
+      {/* 2026-07-21 — marginLeft(빈 공백) 대신 leftMargin prop으로 넘긴다: SplashHeader가 그
+          여백을 '+' 채움 열로 직접 그려야 프레임 텍스처가 Title Area 안까지 이어진다(사용자
+          요청 — 외곽선뿐 아니라 내부 배경도 채움). 상단 여백행(구 topMarginRows)은 0.11.0 헤더
+          압축으로 제거됐다. */}
+      <SplashHeader columns={frameLayout.innerColumns} version={version} mode={state.titleMode} leftMargin={HERO_LEFT_MARGIN} />
       {/* ST10(0.10.0 A3b) — 터틀 덱 2컬럼: 좌측 상시 스택(카드+사이드바, 고정폭)+우측 대화 컬럼
           (가변폭, flexGrow). 사이드바는 토글 패널 시스템(state.panel)과 별개 축이라 ⌃M/⌃R/⌃S
           기존 동작은 무변경. SubTask10 — 카드가 사이드바와 동일폭 34로 이 스택에 합류한다. */}
-      {/* alignItems="flex-start" 필수(2026-07-21 실기검증 크래시 재현·수정) — ink Box 기본
-          alignItems는 Yoga 기본값 "stretch"를 물려받아, 이 행의 두 자식(leftStack·ChatBox)이
-          서로 상대방 높이에 맞춰 늘어난다. ChatBox의 viewportRows는 leftStackRef를 실측
-          (measureElement)해 계산하는데, stretch가 그 실측값에 ChatBox 자신의 렌더 결과를
-          섞어 넣어 특정 터미널 폭(실측 100~106열)에서 measureElement↔setState가 수렴하지
-          못하고 "Maximum update depth exceeded"로 크래시했다. flex-start로 각 컬럼이 순수
-          자기 콘텐츠 높이로만 결정되게 해 이 순환을 원천 차단한다. */}
+      {/* alignItems="flex-start" — 0.11.0부터 두 컬럼 높이가 measureElement 없이 정적 산술
+          (chatTotalRows)로만 결정되므로 stretch로 인한 순환 크래시(2026-07-21 실측, 특정 폭에서
+          "Maximum update depth exceeded")는 이제 구조적으로 불가능하다. 그래도 stretch 기본값을
+          그대로 두면 두 컬럼이 서로의 자연높이로 늘어나려 해 불필요한 재계산이 생기므로 명시
+          유지한다(방어적 관례, 필수는 아님). */}
       <Box flexDirection="row" columnGap={CHAT_COLUMN_GAP} alignItems="flex-start">
         {/* flexShrink=0 필수(2026-07-21 통합 실기검증 실측) — SkillsPanel처럼 폭 제약 없는 우측
             콘텐츠(설명 최대 80자)가 있으면 Yoga 기본 flexShrink=1이 이 컨테이너 자체를 쪼그라뜨려
             카드/사이드바 폭(34) 테두리가 겹쳐 깨진다. Sidebar.tsx 자체엔 이미 flexShrink=0이 있지만
             그건 개별 자식만 보호할 뿐, 부모 컨테이너가 행 축에서 쪼그라드는 건 못 막는다. */}
-        <Box ref={leftStackRef} flexDirection="column" flexShrink={0}>
-          {!state.splashDismissed && <WelcomeCard specCount={state.specCount} deferCount={state.deferCount} skills={cardSkills} />}
+        {/* height=chatTotalRows(0.11.0 정적 전환) — 이 컬럼과 ChatBox가 같은 높이를 갖도록 명시
+            고정한다. WelcomeCard·Sidebar 실콘텐츠가 이보다 짧으면 Sidebar 내부 flexGrow
+            스페이서가 남는 세로공간을 흡수해 마스코트를 컬럼 하단에 붙인다. */}
+        <Box flexDirection="column" flexShrink={0} height={chatTotalRows}>
+          <WelcomeCard specCount={state.specCount} deferCount={state.deferCount} skills={cardSkills} />
           <Sidebar cwd={cwd} tabs={tabs} focused={sidebarFocused} cursor={sidebarCursor} />
         </Box>
         {/* SubTask2(0.10.1) — 대화영역 박스 상주(시안 ff0eb0b1). Static을 완전히 걷어내고 ChatBox가
@@ -857,7 +843,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           viewportRows={chatViewportRows}
           entries={chatEntries}
           scrollOffset={scrollOffset}
-          showWelcome={!state.splashDismissed}
+          showWelcome={scrollback.length === 0}
           panelNode={
             state.panel === "metrics" ? (
               <MetricsPanel cwd={cwd} />

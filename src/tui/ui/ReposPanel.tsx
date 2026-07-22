@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { loadRepos } from "../../repos.js";
 import { loadDefers, isClosedStatus } from "../../defer.js";
 import { formatReposPanelPath } from "../format.js";
+import { BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
 
 // contentColumns — 이 패널이 놓이는 우측 컬럼(터미널−사이드바) 가용폭. 긴 repo 경로가 ink Text
 // 줄바꿈으로 │ 테두리를 뚫는 오버플로(사이드바와 동일 계열, 2026-07-17 scope-critic 지적) 방지용.
@@ -15,8 +16,8 @@ export function ReposPanel({ cwd, contentColumns = 80 }: { cwd: string; contentC
   const repos = loadRepos();
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="green" paddingX={1}>
-      <Text color="green" bold>
+    <Box flexDirection="column" borderStyle="round" borderColor={BORDER_COLOR} paddingX={1}>
+      <Text color={PANEL_TITLE_COLOR} bold>
         📁 repos <Text color="gray">— ~/.gbc/repos.json · 읽기전용</Text>
       </Text>
       {repos.length === 0 ? (

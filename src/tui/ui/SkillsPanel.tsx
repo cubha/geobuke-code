@@ -3,13 +3,14 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { scanSkills } from "../skills.js";
+import { BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
 
 export function SkillsPanel({ cwd }: { cwd: string }) {
   const skills = scanSkills(cwd);
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="green" paddingX={1}>
-      <Text color="green" bold>
+    <Box flexDirection="column" borderStyle="round" borderColor={BORDER_COLOR} paddingX={1}>
+      <Text color={PANEL_TITLE_COLOR} bold>
         🧩 skills <Text color="gray">— .claude/skills · 읽기전용</Text>
       </Text>
       {skills.length === 0 ? (

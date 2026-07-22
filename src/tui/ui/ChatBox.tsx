@@ -14,7 +14,7 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
 import { wrapSegmentLine, computeChatViewport, WELCOME_LINE, type TextSegment } from "../format.js";
-import { toneColor } from "./theme.js";
+import { toneColor, BORDER_COLOR } from "./theme.js";
 
 export interface ChatEntry {
   id: number;
@@ -63,7 +63,7 @@ export function ChatBox({
   const indicatorText = indicatorParts.join(" · ");
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="green" paddingX={1} flexGrow={1}>
+    <Box flexDirection="column" borderStyle="round" borderColor={BORDER_COLOR} paddingX={1} flexGrow={1}>
       {/* 인디케이터는 항상 1행 예약(내용 없어도 공백) — 스크롤 시작/종료로 이 행이 나타났다 사라지면
           그 아래 전체가 한 줄씩 밀려 보이는 깜빡임이 생긴다. */}
       <Text color="gray">{indicatorText || " "}</Text>
