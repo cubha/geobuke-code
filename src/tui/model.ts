@@ -31,11 +31,11 @@ export interface Statusline {
 }
 
 export interface TuiState {
-  /** 0.10.1 — 첫 메시지 제출(TURN_START)로 한 번 true가 되면 이후 어떤 이벤트에도 되돌지 않는다
-   *  (스플래시 일괄소멸 계약). SESSION_START/splashShown은 "마운트 시 1회 커밋"이라는 다른 계약을
-   *  표현했던 구 필드로, 스플래시가 Static 밖 조건부 렌더로 옮겨가며 폐기됐다(app.tsx가 splashDismissed
-   *  자체를 렌더 조건으로 직접 소비 — 더 이상 "커밋됐다"는 것만 기록하는 1회성 플래그가 아니다). */
-  splashDismissed: boolean;
+  /** 0.11.0 — 구 splashDismissed(첫 제출 시 타이틀 일괄소멸)를 대체한다. 고정 레이아웃 전환(사용자
+   *  확정 2026-07-22)으로 타이틀 헤더는 스트리밍 여부와 무관하게 항상 렌더되고, 대신 표시 형태만
+   *  full(압축 워드마크 7행)↔mini(1행)로 사용자가 ⌃T(TOGGLE_TITLE)로 직접 고른다. 세션 한정 —
+   *  영속화하지 않는다(재실행 시 항상 full로 시작). */
+  titleMode: "full" | "mini";
   streaming: boolean;
   gateStatus: "idle" | "pass" | "block";
   specCount: number;
@@ -65,7 +65,7 @@ const DEFAULT_STATUSLINE: Statusline = {
 
 export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiState {
   return {
-    splashDismissed: false,
+    titleMode: "full",
     streaming: false,
     gateStatus: "idle",
     specCount: 0,
@@ -93,6 +93,7 @@ export type TuiEvent =
   | { type: "CTRL_C_RESET" }
   | { type: "STREAM_DELTA"; text: string }
   | { type: "STREAM_COMMIT" }
+  | { type: "TOGGLE_TITLE" }
   // 0.10.0 A3b ST11 — 활성 탭 전환. TuiState는 "지금 포커스된 탭의 라이브 뷰"만 표현하므로(tabs.ts
   // 설계 주석 참조), 다른 repo로 전환하면 그 뷰 전체를 새 탭 기준으로 다시 시드한다(스트리밍·승인·
   // 게이트 상태는 절대 이어받지 않는다 — 다른 세션의 진행 상태를 여기 남기면 그 자체가 교차오염
@@ -109,8 +110,8 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
   switch (event.type) {
     case "TURN_START":
       // streamingText도 함께 리셋 — 직전 턴이 STREAM_COMMIT 없이 끝났을 경우(중단 등)의 방어.
-      // splashDismissed:true — 첫 제출 시 스플래시 일괄소멸(0.10.1). 이미 true여도 재대입은 멱등.
-      return { ...state, streaming: true, streamingText: "", splashDismissed: true };
+      // titleMode는 건드리지 않는다(0.11.0) — 고정 레이아웃이라 타이틀은 스트리밍과 무관하게 상시.
+      return { ...state, streaming: true, streamingText: "" };
 
     case "TURN_END":
       return { ...state, streaming: false };
@@ -166,11 +167,16 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
     case "STREAM_COMMIT":
       return state.streamingText === "" ? state : { ...state, streamingText: "" };
 
+    case "TOGGLE_TITLE":
+      return { ...state, titleMode: state.titleMode === "full" ? "mini" : "full" };
+
     case "TAB_SWITCHED": {
       // createInitialState를 그대로 재사용해 "새 탭 = 완전히 새 라이브 뷰" 계약을 한 곳에서만
       // 정의한다(App 마운트 시드 로직과 동일 조립 방식 — app.tsx가 중복 구현하지 않음).
       const base = createInitialState({ dir: event.dir, branch: event.branch, dirty: event.dirty, model: event.model });
-      return { ...base, specCount: event.specCount, deferCount: event.deferCount, splashDismissed: true };
+      // titleMode는 세션 라이브 뷰가 아니라 사용자의 표시 형태 선택이라 탭 전환으로 되돌지 않는다
+      // (specCount/deferCount 등 다른 필드와 달리 "새 탭 = 새 뷰" 계약 밖 — 위 클래스 주석 참조).
+      return { ...base, specCount: event.specCount, deferCount: event.deferCount, titleMode: state.titleMode };
     }
 
     default:
