@@ -3,7 +3,7 @@
 // 이 파일은 얇은 오케스트레이션+렌더만 한다 — 상태전이는 model.ts/editor.ts, 표시문구는 format.ts,
 // 엔진↔TUI 변환은 bridge.ts가 전담(순수, TDD 커버). 여기서 새 판정 로직을 만들지 않는다.
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { Box, Text, useInput, useWindowSize, type Key } from "ink";
+import { Box, Text, useCursor, useInput, useWindowSize, type Key } from "ink";
 import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,7 +22,10 @@ import {
   computeFrameLayout,
   computeChatRegionRows,
   computeHeaderRows,
+  wrapSegmentLine,
   tailLines,
+  computeInputLayout,
+  INPUT_PROMPT_PREFIX,
   SIDEBAR_COLUMNS,
   PREVIEW_RESERVED_ROWS,
   CHAT_SCROLLBACK_MAX_ENTRIES,
@@ -77,10 +80,12 @@ const HERO_LEFT_MARGIN = 3;
 // 소멸 전제·측정 상수)는 폐기.
 // ⓑ ChatBox 자체 테두리(상하 각 1) + 스크롤 인디케이터(항상 1행 예약).
 const CHAT_BOX_CHROME_ROWS = 3;
-// ⓒ 하단 고정 UI — 입력창(테두리 라운드, 3행) + 게이트줄(1) + statusline(1). 승인 중엔 ApprovalBox가
-// 입력창 자리를 대신하며 대체로 비슷한 최소 행수를 쓴다(완전 동일하진 않음 — reason 텍스트 길이에
-// 따라 늘어날 수 있어 "높이 불변"은 패널/스트리밍 쪽만큼 엄격히 보장되진 않는다, 알려진 한계).
-const CHAT_BOTTOM_FIXED_ROWS = 3 + 1 + 1;
+// ⓒ 하단 고정 UI 중 입력창을 뺀 고정분 — 입력창 테두리(상하 2) + 게이트줄(1) + statusline(1).
+// 입력창 내용 행수는 0.10.3부터 에디터 실제 텍스트를 랩해 동적으로 계산한다(멀티라인/랩 성장분을
+// 뷰포트 예산에서 차감하지 않으면 박스가 예산을 초과해 프레임 전체가 밀린다 — 2026-07-22 현장
+// 이슈②의 한 갈래). 승인 중엔 ApprovalBox가 입력창 자리를 대신하며 대체로 비슷한 최소 행수를
+// 쓴다(reason 길이에 따라 늘 수 있는 알려진 한계 — ChatBox 외곽 overflow hidden이 최종 방어).
+const CHAT_BOTTOM_CHROME_ROWS = 2 + 1 + 1;
 // 좌측 스택(카드+사이드바)과 ChatBox 사이 시각적 여백 — 시안(ff0eb0b1) `.cols{gap:10px}` 대응.
 const CHAT_COLUMN_GAP = 1;
 // PgUp/PgDn 1회당 스크롤 시각행 수 — 정확히 한 페이지일 필요는 없다(computeChatViewport가
@@ -609,10 +614,14 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       return;
     }
 
-    // ST11 — 탭 전환 전역키(Ctrl+1..9). 승인 블록보다 먼저 확인한다(critic 지적: 승인이 모든 입력을
-    // 삼켜 다른 탭으로 못 넘어가는 문제 차단) — 이 repo 목록의 N번째로 opt-in/전환(switchToTab이
-    // ensureTab을 경유해 둘 다 처리). 이미 그 탭이면 no-op.
-    if (key.ctrl && /^[1-9]$/.test(input)) {
+    // ST11 — 탭 전환 전역키(Alt+1..9, kitty 지원 터미널은 Ctrl+1..9도). 승인 블록보다 먼저 확인한다
+    // (critic 지적: 승인이 모든 입력을 삼켜 다른 탭으로 못 넘어가는 문제 차단) — 이 repo 목록의
+    // N번째로 opt-in/전환(switchToTab이 ensureTab을 경유해 둘 다 처리). 이미 그 탭이면 no-op.
+    // 0.10.3 — 레거시 터미널 인코딩엔 Ctrl+숫자 코드 자체가 없어(C-1은 그냥 '1', C-3은 ESC로 도착)
+    // key.ctrl 분기가 실기에서 절대 발화하지 않았다(2026-07-22 현장보고 이슈③). Alt+숫자는 ESC 접두
+    // (레거시)·CSI ;3u(kitty) 양쪽에서 key.meta로 안정 도착하므로 meta를 1차 바인딩으로 추가한다.
+    // Ctrl 분기는 kitty keyboard protocol 활성 터미널(cli.ts kittyKeyboard:auto)용으로 유지.
+    if ((key.ctrl || key.meta) && /^[1-9]$/.test(input)) {
       const idx = Number.parseInt(input, 10) - 1;
       const repos = loadRepos();
       const target = repos[idx];
@@ -632,7 +641,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       }
       return;
     }
-    if (key.ctrl && input === "w" && !state.approval) {
+    if ((key.ctrl || key.meta) && input === "w" && !state.approval) {
       const repoId = tabsRef.current.activeTabId;
       if (repoId === cwd) {
         pushLine("🐢 시작 repo 탭은 닫을 수 없습니다(항상 최소 1탭 유지)", "warn");
@@ -692,19 +701,22 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       return;
     }
 
-    if (key.ctrl && input === "m") {
+    // 0.10.3 — 패널 토글도 Alt(meta) 폴백 병행. 특히 Ctrl+M은 터미널 레거시 인코딩에서 CR(Enter)과
+    // 동일 바이트라 구분 자체가 불가능했다(이슈④ — 메트릭 패널이 레거시 터미널에선 아예 안 열리고
+    // Enter 제출로 처리됐다). kitty 활성 터미널에서만 Ctrl+M이 CSI 109;5u로 구분 도착한다.
+    if ((key.ctrl || key.meta) && input === "m") {
       dispatch({ type: "TOGGLE_PANEL", panel: "metrics" });
       return;
     }
-    if (key.ctrl && input === "r") {
+    if ((key.ctrl || key.meta) && input === "r") {
       dispatch({ type: "TOGGLE_PANEL", panel: "repos" });
       return;
     }
-    if (key.ctrl && input === "s") {
+    if ((key.ctrl || key.meta) && input === "s") {
       dispatch({ type: "TOGGLE_PANEL", panel: "skills" });
       return;
     }
-    if (key.ctrl && input === "t") {
+    if ((key.ctrl || key.meta) && input === "t") {
       // 0.11.0(사용자 확정) — 타이틀 헤더 full(압축 워드마크 7행)↔mini(1행) 토글. 시안
       // 아티팩트 a9ee1e59 — A안(full) 기본, B안(mini)은 이 단축키로만 진입.
       dispatch({ type: "TOGGLE_TITLE" });
@@ -788,9 +800,57 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 남는 여백을 흡수해 마스코트가 항상 컬럼 하단에 붙는다(레퍼런스: Sidebar.tsx 최하단 스페이서).
   const chatHeaderRows = computeHeaderRows(frameLayout.innerColumns, state.titleMode);
   const chatTotalRows = computeChatRegionRows(rows, frameLayout.bandRows, chatHeaderRows);
-  const chatViewportRows = Math.max(1, chatTotalRows - CHAT_BOX_CHROME_ROWS - CHAT_BOTTOM_FIXED_ROWS);
   const chatOuterColumns = Math.max(0, computeContentColumns(frameLayout.innerColumns, SIDEBAR_COLUMNS) - CHAT_COLUMN_GAP);
   const chatInnerColumns = Math.max(1, chatOuterColumns - 4); // ChatBox 테두리2+paddingX(1×2)
+  // 입력창(또는 승인박스)이 실제로 차지할 행수 — 프롬프트("❯ ")·커서(█)까지 포함해 에디터 텍스트를
+  // 표시폭으로 랩한 결과다. shift+↵ 개행·긴 입력 랩·승인박스 프리뷰로 하단부가 늘어나는 만큼 대화
+  // 뷰포트를 줄여 박스 총높이(chatTotalRows)를 불변으로 유지한다(0.10.3 — 이슈② 성장 갈래 근본수정).
+  const approvalPreviewRows = computePreviewRowBudget(rows, PREVIEW_RESERVED_ROWS + frameLayout.bandRows * 2);
+  let inputContentRows: number;
+  if (state.approval) {
+    // ApprovalBox 레이아웃 근사: 제목1 + 본문(tailLines 프리뷰를 표시폭 랩한 실행수) + 근거/안내1
+    // + 여백1 + 선택지1(편집 중엔 안내 1줄뿐). 접두어("gbc spec add " 등) 폭 오차 ±1행은 ChatBox
+    // 외곽 overflow hidden이 방어한다(게이트줄이 잠시 잘리는 게 프레임 전체가 밀리는 것보다 낫다).
+    const a = state.approval;
+    const previewSource = a.kind === "generic" ? a.reason : approvalEditing ? Editor.getText(approvalEditor) : a.derivedCase ?? "";
+    const previewVisual = wrapSegmentLine(
+      [{ text: tailLines(previewSource ?? "", approvalPreviewRows), tone: "plain" }],
+      chatInnerColumns,
+    ).length;
+    inputContentRows = 1 + previewVisual + (approvalEditing ? 1 : 3);
+  } else {
+    inputContentRows = 0; // 아래 inputLayout.lines.length로 확정 — 선언 순서상 임시값.
+  }
+  // 입력창 시각행+캐럿 좌표(0.10.3 IME) — 렌더·행수예산·실커서 위치가 전부 이 한 계산에서 나온다
+  // (computeInputLayout 주석 참조). 입력창 내부폭 = 대화 콘텐츠폭 − 입력박스 테두리2 − paddingX2.
+  const inputInnerColumns = Math.max(1, chatInnerColumns - 4);
+  const inputLayout = state.approval
+    ? null
+    : computeInputLayout(editorState.lines, editorState.cursorRow, editorState.cursorCol, inputInnerColumns);
+  if (inputLayout) inputContentRows = inputLayout.lines.length;
+  const chatViewportRows = Math.max(
+    1,
+    chatTotalRows - CHAT_BOX_CHROME_ROWS - CHAT_BOTTOM_CHROME_ROWS - inputContentRows,
+  );
+
+  // 실터미널 커서를 캐럿 위치에 노출(0.10.3) — IME(한글) 조합 중 글자는 터미널이 커서 위치에
+  // 그려준다(ink useCursor 공식 용도). 가짜 '█' 문자 커서를 걷어낸 이유: 실커서가 숨겨져 있으면
+  // 조합 프리뷰가 표시될 곳이 없어 글자가 다음 키입력(커밋 시점)에야 나타난다(사외 실사용 보고).
+  // 좌표는 전부 정적 산술 — x: 거터+사이드바34+갭1+대화박스(테두리1+패딩1)+입력박스(테두리1+패딩1),
+  // y: 상단밴드+헤더+대화박스(테두리1+인디케이터1)+뷰포트+입력박스 테두리1.
+  const { setCursorPosition } = useCursor();
+  const caretVisible = inputLayout !== null && state.panel === "none" && !sidebarFocused;
+  if (caretVisible && inputLayout) {
+    // +1 보정(2026-07-22 tmux 실측): ink buildCursorSuffix는 "커서가 마지막 출력행 다음 줄에
+    // 있다"를 전제로 위로 이동량을 계산하는데, 우리 레이아웃은 출력이 터미널 행수를 정확히 채우는
+    // 정적 설계라 커서가 최하단 행에서 클램프돼 전제가 1행 깨진다 — 실측 y=33 vs 실제 입력행 34.
+    setCursorPosition({
+      x: frameLayout.gutterColumns + SIDEBAR_COLUMNS + CHAT_COLUMN_GAP + 2 + 2 + inputLayout.caretCol,
+      y: frameLayout.bandRows + chatHeaderRows + 2 + chatViewportRows + 1 + inputLayout.caretRow + 1,
+    });
+  } else {
+    setCursorPosition(undefined);
+  }
 
   // scrollback(ScrollEntry — text/segments 두 kind)을 ChatBox가 소비하는 단일 형태(ChatEntry:
   // TextSegment[])로 변환. scrollback 참조가 안 바뀌면 재계산하지 않는다 — 타이핑마다(=매 렌더)
@@ -841,6 +901,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         <ChatBox
           innerWidth={chatInnerColumns}
           viewportRows={chatViewportRows}
+          totalRows={chatTotalRows}
           entries={chatEntries}
           scrollOffset={scrollOffset}
           showWelcome={scrollback.length === 0}
@@ -853,40 +914,47 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
               <SkillsPanel cwd={cwd} />
             ) : undefined
           }
-          streamingNode={
-            <>
-              {/* ST5(0.9.4 T2) 계승 — 완성되면 commitStream()이 streamingText를 비우는 동시에 같은
-                  텍스트가 scrollback에 커밋된다(이중출력 방지). tailLines로 마지막 N줄만 렌더. */}
-              {state.streaming && !state.approval && state.streamingText && (
-                <Text>
-                  {tailLines(
-                    state.streamingText,
-                    computePreviewRowBudget(rows, PREVIEW_RESERVED_ROWS + frameLayout.bandRows * 2),
-                  )}
-                </Text>
-              )}
-              {state.streaming && !state.approval && (
-                <Text color="green">{formatSpinnerLine(spinnerTick, elapsedMs)}</Text>
-              )}
-            </>
-          }
+          // ST5(0.9.4 T2)→0.10.3 — 프리뷰가 별도 노드가 아니라 대화 시각행 윈도우 안에서 스크롤백
+          // 뒤에 이어 렌더된다(ChatBox 주석 참조 — 예산 외 추가 행이 프레임을 밀던 이슈② 근본수정).
+          // 완성되면 commitStream()이 streamingText를 비우는 동시에 같은 텍스트가 scrollback에
+          // 커밋된다(이중출력 방지). 스피너는 인디케이터 행에 병합된다.
+          streamingText={state.streaming && !state.approval ? state.streamingText : undefined}
+          spinnerText={state.streaming && !state.approval ? formatSpinnerLine(spinnerTick, elapsedMs) : undefined}
         >
           {state.approval ? (
             <ApprovalBox
               approval={state.approval}
               editing={approvalEditing}
               editText={Editor.getText(approvalEditor)}
-              previewRows={computePreviewRowBudget(rows, PREVIEW_RESERVED_ROWS + frameLayout.bandRows * 2)}
+              previewRows={approvalPreviewRows}
             />
           ) : (
-            <Box borderStyle="round" borderColor="gray" paddingX={1}>
-              <Text color="cyan">❯ </Text>
-              <Text>{Editor.getText(editorState)}</Text>
-              <Text>█</Text>
+            // 0.10.3 — computeInputLayout의 시각행을 그대로 한 행씩 렌더(ink 자체 랩 미사용 —
+            // 계산과 렌더가 다른 랩 규칙을 쓰면 캐럿 좌표·행수예산이 어긋난다). 가짜 '█' 폐기,
+            // 캐럿은 실터미널 커서(useCursor 배선)가 표시한다.
+            <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column">
+              {(inputLayout?.lines ?? [INPUT_PROMPT_PREFIX]).map((ln, i) => (
+                <Text key={i} wrap="truncate">
+                  {i === 0 ? (
+                    <>
+                      <Text color="cyan">{INPUT_PROMPT_PREFIX}</Text>
+                      <Text>{ln.slice(INPUT_PROMPT_PREFIX.length) || " "}</Text>
+                    </>
+                  ) : (
+                    <Text>{ln || " "}</Text>
+                  )}
+                </Text>
+              ))}
             </Box>
           )}
-          <Segments segments={formatGateLine(state)} />
-          <Segments segments={formatStatusline(state.statusline)} />
+          {/* 게이트줄·상태줄 1행 클램프(0.10.3) — 좁은 대화 컬럼에서 세그먼트가 랩되며 +1행씩 자라
+              박스 총높이 계약을 깨던 갈래 차단. 넘치는 꼬리는 잘리는 게 프레임 밀림보다 낫다. */}
+          <Box height={1} overflow="hidden" flexShrink={0}>
+            <Segments segments={formatGateLine(state)} />
+          </Box>
+          <Box height={1} overflow="hidden" flexShrink={0}>
+            <Segments segments={formatStatusline(state.statusline)} />
+          </Box>
         </ChatBox>
       </Box>
       {/* 2026-07-21(사용자 지시 "최하단 밴드 1행만 잔여") — 2컬럼 섹션 아래 남는 세로 공간

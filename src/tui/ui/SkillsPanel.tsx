@@ -1,24 +1,29 @@
-// 0.9.2 ST12 — A-⑤ skills 패널(⌃S). ReposPanel과 동일하게 읽기전용 1회 로드(SKILL.md는 세션
+// 0.9.2 ST12 — A-⑤ skills 패널(⌃S/Alt+S). ReposPanel과 동일하게 읽기전용 1회 로드(SKILL.md는 세션
 // 도중 바뀌지 않는 정적 설치물이라 MetricsPanel의 fs.watch 갱신은 불필요 — 재오픈 시 다시 스캔).
+// 0.10.3 — 프로젝트 스킬만 보여주던 것을 프로젝트+전역(~/.claude/skills) 합산으로 확장(현장 이슈①
+// "연동된 AI의 스킬 목록이 표시 안 됨"). 이름 충돌 시 프로젝트 우선(claude 로드 순서와 동일).
 import React from "react";
 import { Box, Text } from "ink";
-import { scanSkills } from "../skills.js";
+import { scanSkillsWithOrigin } from "../skills.js";
 import { BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
 
 export function SkillsPanel({ cwd }: { cwd: string }) {
-  const skills = scanSkills(cwd);
+  const skills = scanSkillsWithOrigin(cwd);
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={BORDER_COLOR} paddingX={1}>
       <Text color={PANEL_TITLE_COLOR} bold>
-        🧩 skills <Text color="gray">— .claude/skills · 읽기전용</Text>
+        🧩 skills <Text color="gray">— 프로젝트+전역 .claude/skills · 읽기전용</Text>
       </Text>
       {skills.length === 0 ? (
-        <Text color="gray">설치된 skill 없음 — 'gbc init'으로 설치</Text>
+        <Text color="gray">설치된 skill 없음 — 'gbc init'으로 gbc 스킬 설치</Text>
       ) : (
         skills.map((s) => (
-          <Text key={s.name}>
+          // wrap=truncate(0.10.3) — 설명이 랩되면 항목당 2행+중간절단으로 고정 뷰포트가 금방 차고
+          // 클리핑 단면이 지저분해진다(실기검증). 항목당 정확히 1행 — 더 많은 스킬이 한 화면에 든다.
+          <Text key={`${s.origin}:${s.name}`} wrap="truncate">
             <Text color="green">/{s.name}</Text>
+            <Text color="gray"> [{s.origin === "project" ? "프로젝트" : "전역"}]</Text>
             {s.description ? <Text color="gray"> — {s.description.slice(0, 80)}</Text> : null}
           </Text>
         ))

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSkillFrontmatter, scanSkills } from "../dist/tui/skills.js";
+import { parseSkillFrontmatter, scanSkills, scanSkillsWithOrigin } from "../dist/tui/skills.js";
 
 function tmp() {
   return mkdtempSync(join(tmpdir(), "gbc-skills-test-"));
@@ -109,4 +109,70 @@ test("scanSkills: 심링크 '디렉토리'(SKILL.md 자체는 일반 파일)도 
     rmSync(dir, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
   }
+});
+
+// ── scanSkillsWithOrigin (0.10.3 — 현장 이슈①: 전역 스킬 미표시) ──
+
+test("scanSkillsWithOrigin: 프로젝트+전역 합산, origin 태깅, 이름순 정렬", () => {
+  const proj = tmp();
+  const home = tmp();
+  try {
+    mkdirSync(join(proj, ".claude", "skills", "gate"), { recursive: true });
+    writeFileSync(join(proj, ".claude", "skills", "gate", "SKILL.md"), "---\nname: gate\ndescription: P\n---\n");
+    mkdirSync(join(home, ".claude", "skills", "analyze"), { recursive: true });
+    writeFileSync(join(home, ".claude", "skills", "analyze", "SKILL.md"), "---\nname: analyze\ndescription: G\n---\n");
+    const out = scanSkillsWithOrigin(proj, home);
+    assert.deepEqual(
+      out.map((s) => [s.name, s.origin]),
+      [["analyze", "global"], ["gate", "project"]],
+    );
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("scanSkillsWithOrigin: 이름 충돌 시 프로젝트가 전역을 가린다(claude 로드 우선순위와 동일)", () => {
+  const proj = tmp();
+  const home = tmp();
+  try {
+    mkdirSync(join(proj, ".claude", "skills", "gate"), { recursive: true });
+    writeFileSync(join(proj, ".claude", "skills", "gate", "SKILL.md"), "---\nname: gate\ndescription: 프로젝트판\n---\n");
+    mkdirSync(join(home, ".claude", "skills", "gate"), { recursive: true });
+    writeFileSync(join(home, ".claude", "skills", "gate", "SKILL.md"), "---\nname: gate\ndescription: 전역판\n---\n");
+    const out = scanSkillsWithOrigin(proj, home);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].origin, "project");
+    assert.equal(out[0].description, "프로젝트판");
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("scanSkillsWithOrigin: 전역 디렉토리 없음 → 프로젝트만(에러 아님)", () => {
+  const proj = tmp();
+  try {
+    mkdirSync(join(proj, ".claude", "skills", "gate"), { recursive: true });
+    writeFileSync(join(proj, ".claude", "skills", "gate", "SKILL.md"), "---\nname: gate\ndescription: P\n---\n");
+    const out = scanSkillsWithOrigin(proj, join(proj, "no-such-home"));
+    assert.deepEqual(out.map((s) => [s.name, s.origin]), [["gate", "project"]]);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("parseSkillFrontmatter: YAML 블록 스칼라(>-) description — 지시자가 아니라 연속행 텍스트를 취한다", () => {
+  const content = `---
+name: braintrust
+description: >-
+  적대검토 인-세션 패널.
+  중대한 결정 전 교차검증.
+allowed-tools: all
+---
+본문
+`;
+  const out = parseSkillFrontmatter(content);
+  assert.equal(out.name, "braintrust");
+  assert.equal(out.description, "적대검토 인-세션 패널. 중대한 결정 전 교차검증.");
 });
