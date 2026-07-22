@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { parseEvents, computeMetrics, type Metrics } from "../../metrics.js";
 import { extractionPath, parseExtraction } from "../../extraction.js";
 import { computeRealM1, classifyBlockOutcome, joinBySession, loadScores, type RealM1 } from "../../scoring.js";
+import { BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
 
 function load(cwd: string): { m: Metrics; real: RealM1 } {
   const eventsPath = join(cwd, ".gbc", "events.jsonl");
@@ -37,8 +38,8 @@ export function MetricsPanel({ cwd }: { cwd: string }) {
   const pct = (r: number | null) => (r === null ? "—" : `${(r * 100).toFixed(1)}%`);
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="green" paddingX={1}>
-      <Text color="green" bold>
+    <Box flexDirection="column" borderStyle="round" borderColor={BORDER_COLOR} paddingX={1}>
+      <Text color={PANEL_TITLE_COLOR} bold>
         📊 라이브 메트릭 <Text color="gray">— .gbc/events.jsonl</Text>
       </Text>
       <Text>

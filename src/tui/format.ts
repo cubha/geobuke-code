@@ -190,6 +190,22 @@ export function shouldShowWordmark(columns: number): boolean {
   return columns >= SPLASH_WORDMARK_MIN_COLUMNS;
 }
 
+/** 타이틀 표시 모드(0.11.0) — full=압축 워드마크(6행+태그라인 1행), mini=1행 텍스트 타이틀.
+ * ⌃T로 토글(사용자 확정 2026-07-22, 시안 아티팩트 a9ee1e59 — A안 기본·B안 토글). */
+export type TitleMode = "full" | "mini";
+
+/**
+ * 상시 타이틀 헤더가 차지하는 행수(순수, 0.11.0 고정 레이아웃) — 구 스플래시(상단여백 2+워드마크
+ * 6+구분행 1+태그라인 1=10행, 첫 제출 시 소멸)를 압축 상시 헤더로 대체하며 여백·구분행을 제거했다.
+ * full: 워드마크 6+태그라인 1=7행, 워드마크 임계폭 미만이면 태그라인 1행만(구 NARROW 3행도 여백
+ * 제거로 1행). mini: 폭 무관 1행. 대화 박스 높이가 이 값으로 정적 확정되므로(innerRows−headerRows)
+ * 여기 행수와 SplashHeader 실렌더 행수가 어긋나면 하단 밴드가 밀린다 — 둘은 같은 상수를 공유한다.
+ */
+export function computeHeaderRows(columns: number, titleMode: TitleMode): number {
+  if (titleMode === "mini") return 1;
+  return shouldShowWordmark(columns) ? WORDMARK_GEOBUKE.length + 1 : 1;
+}
+
 /**
  * 좌측 상시 사이드바 고정폭 — 0.10.1(braintrust 2026-07-20 확정)에서 WelcomeCard(카드)와 **동일폭
  * 34**로 통일했다. 34 = S2 카와이 마스코트(30폭, MASCOT_S2 실측 — 사이드바에도 이 폭으로 배치,
@@ -329,11 +345,13 @@ export function computeChatViewport(totalLines: number, viewRows: number, scroll
 
 /**
  * 대화 박스가 실제로 쓸 수 있는 행수(순수) — 전체 터미널 행수에서 프레임 상하 밴드(bandRows×2)와
- * 스플래시 등 헤더가 차지하는 행(headerRows), 안전 여유 1행을 뺀다. 저행 터미널에서도 박스 자체가
- * 사라지지 않도록 최소 8행을 보장한다.
+ * 상시 타이틀 헤더 행(headerRows)을 뺀다. 0.11.0 정적 레이아웃 계약: 박스 하단이 프레임 하단
+ * 밴드에 정확히 붙는다 — 구 "안전여유 1행"은 measureElement 추종 시절 오차 흡수용이었고 정적
+ * 산술에선 오차가 없어 제거(사용자 확정 고정 레이아웃, 대화영역 최대 확보). 저행 터미널에서도
+ * 박스 자체가 사라지지 않도록 최소 8행을 보장한다.
  */
 export function computeChatRegionRows(totalRows: number, bandRows: number, headerRows: number): number {
-  return Math.max(8, totalRows - bandRows * 2 - headerRows - 1);
+  return Math.max(8, totalRows - bandRows * 2 - headerRows);
 }
 
 // ── 사이드바 repos 커서추종 윈도잉 (0.10.1 SubTask4) ──
@@ -418,6 +436,12 @@ export function formatTagline(version: string): string {
   return `거북이코드 v${version} · 계획↔구현↔검증 게이트`;
 }
 
+/** mini 타이틀(0.11.0) 좌측 라벨 — 픽셀 워드마크 대신 1행에 들어가는 텍스트. 이모지+버전만 담고
+ * 태그라인 배지(formatTagline)는 SplashHeader가 이어붙인다(레이아웃 관심사 분리, 순수부는 문자열만). */
+export function formatMiniTitleLabel(version: string): string {
+  return `🐢 GEOBUKE v${version}`;
+}
+
 /** 스플래시 웰컴 라인 — 카드 아래, 입력창 위. "무엇을 입력하면 되는지"를 1줄로 안내(구현 갭 복원). */
 export const WELCOME_LINE = "🐢 무엇이든 입력하세요 — 게이트가 계획 없는 구현을 지켜줍니다.";
 
@@ -464,6 +488,7 @@ export function formatWelcomeCard(specCount: number, deferCount: number, skills:
       { text: "shift+↵ 개행", tone: "dim" },
       { text: "⌃C 종료(2회)", tone: "dim" },
     ],
+    [{ text: "⌃T 타이틀 전환", tone: "dim" }], // 0.11.0 — full/mini 타이틀 토글(사용자 확정 2026-07-22).
   );
   return rows;
 }

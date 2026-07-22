@@ -100,9 +100,12 @@ test("computeChatViewport: 전체가 viewport보다 적으면 전량 표시·스
 
 // ── computeChatRegionRows ──
 
-test("computeChatRegionRows: rows−밴드2−헤더−안전여유1", () => {
-  // 44행·밴드1·헤더10(스플래시) → 44-2-10-1=31
-  assert.equal(computeChatRegionRows(44, 1, 10), 31);
+// 0.11.0 계약 교체(명세 변경): 정적 고정 레이아웃에서 대화 박스는 하단 밴드에 정확히 붙는다 —
+// 기존 "안전여유 1행"은 measureElement 추종 시절 오차 흡수용이었고, 정적 산술에선 오차 자체가
+// 없어 1행을 낭비하지 않는다. rows−밴드2−헤더 그대로.
+test("computeChatRegionRows: rows−밴드2−헤더 (정적 레이아웃, 안전여유 없음)", () => {
+  // 44행·밴드1·헤더7(압축 워드마크) → 44-2-7=35
+  assert.equal(computeChatRegionRows(44, 1, 7), 35);
 });
 
 test("computeChatRegionRows: 저행 터미널 바닥 클램프(최소 8)", () => {
