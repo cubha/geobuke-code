@@ -22,6 +22,7 @@ import {
   formatTagline,
   SPLASH_WORDMARK_MIN_COLUMNS,
   shouldShowWordmark,
+  computeHeaderRows,
   WELCOME_LINE,
   formatTabStatusGlyph,
   computeContentColumns,
@@ -646,4 +647,19 @@ test("computeFrameLayout: 비활성이면 innerRows는 입력 rows 그대로(패
 
 test("computeFrameLayout: 경계(80×30)에서 innerRows = 28", () => {
   assert.equal(computeFrameLayout(80, 30).innerRows, 28);
+});
+
+// ── computeHeaderRows (0.11.0 고정 레이아웃 — 타이틀 상시+⌃T 토글) ──
+
+test("computeHeaderRows: full+워드마크 폭이면 7행(워드마크6+태그라인1, 압축 — 여백행 없음)", () => {
+  assert.equal(computeHeaderRows(136, "full"), 7);
+});
+
+test("computeHeaderRows: full+좁은폭이면 태그라인 1행 폴백", () => {
+  assert.equal(computeHeaderRows(SPLASH_WORDMARK_MIN_COLUMNS - 1, "full"), 1);
+});
+
+test("computeHeaderRows: mini는 폭 무관 1행", () => {
+  assert.equal(computeHeaderRows(136, "mini"), 1);
+  assert.equal(computeHeaderRows(60, "mini"), 1);
 });
