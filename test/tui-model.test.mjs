@@ -5,9 +5,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createInitialState, reduce, APPROVAL_CHOICES } from "../dist/tui/model.js";
 
-test("createInitialState: splashDismissed=false·gateStatus=idle·panel=none·approval=null", () => {
+test("createInitialState: titleMode=full·gateStatus=idle·panel=none·approval=null", () => {
   const s = createInitialState();
-  assert.equal(s.splashDismissed, false);
+  assert.equal(s.titleMode, "full");
   assert.equal(s.streaming, false);
   assert.equal(s.gateStatus, "idle");
   assert.equal(s.panel, "none");
@@ -51,17 +51,28 @@ test("TURN_START/TURN_END: streaming 토글", () => {
   assert.equal(s.streaming, false);
 });
 
-test("TURN_START: splashDismissed를 true로(첫 제출 시 스플래시 일괄소멸 계약)", () => {
+// 0.11.0 계약 교체(명세 변경, 사용자 확정 2026-07-22): 고정 레이아웃 전환으로 스플래시
+// 일괄소멸(splashDismissed) 개념 자체가 폐기됐다 — 타이틀 헤더는 스트리밍 여부와 무관하게
+// 항상 렌더되고, 표시 형태(full/mini)만 사용자가 ⌃T로 직접 토글한다.
+test("TURN_START: titleMode는 무변경(스트리밍 여부와 무관하게 타이틀 항상 상시)", () => {
   const s = reduce(createInitialState(), { type: "TURN_START" });
-  assert.equal(s.splashDismissed, true);
+  assert.equal(s.titleMode, "full");
 });
 
-test("TURN_START: splashDismissed=true 상태에서 재발화해도 그대로 true(멱등)", () => {
+test("TOGGLE_TITLE: full↔mini 토글", () => {
   let s = createInitialState();
+  s = reduce(s, { type: "TOGGLE_TITLE" });
+  assert.equal(s.titleMode, "mini");
+  s = reduce(s, { type: "TOGGLE_TITLE" });
+  assert.equal(s.titleMode, "full");
+});
+
+test("TOGGLE_TITLE: TURN_START·TURN_END 등 무관 이벤트로 되돌지 않는다", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TOGGLE_TITLE" });
   s = reduce(s, { type: "TURN_START" });
   s = reduce(s, { type: "TURN_END" });
-  s = reduce(s, { type: "TURN_START" });
-  assert.equal(s.splashDismissed, true);
+  assert.equal(s.titleMode, "mini");
 });
 
 test("GATE_RESULT: gateStatus·spec/defer 카운트 갱신, streaming은 무변경", () => {
@@ -245,11 +256,11 @@ test("TAB_SWITCHED: 이전 탭의 streaming·approval·gateStatus·streamingText
   assert.equal(s.gateStatus, "idle");
 });
 
-test("TAB_SWITCHED: splashDismissed는 true로 유지(전환마다 스플래시 재노출 방지)", () => {
+test("TAB_SWITCHED: titleMode는 전환 전 값을 그대로 보존(탭 전환으로 사용자 토글 선택이 되돌지 않음)", () => {
   let s = createInitialState();
-  s = reduce(s, { type: "TURN_START" });
+  s = reduce(s, { type: "TOGGLE_TITLE" }); // mini로 전환
   s = reduce(s, { type: "TAB_SWITCHED", dir: "/repo/b", branch: "", dirty: false, model: "", specCount: 0, deferCount: 0 });
-  assert.equal(s.splashDismissed, true);
+  assert.equal(s.titleMode, "mini");
 });
 
 test("TURN_START: streamingText도 함께 리셋(직전 턴의 잔여 델타가 다음 턴에 안 섞이도록 방어)", () => {
