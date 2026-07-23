@@ -4,6 +4,7 @@ import { Box, Text } from "ink";
 import type { ApprovalState, ApprovalChoice } from "../model.js";
 import { APPROVAL_CHOICES } from "../model.js";
 import { tailLines } from "../format.js";
+import { toneColor } from "./theme.js";
 
 const LABEL: Record<ApprovalChoice, string> = {
   y: "승인 (y)",
@@ -58,7 +59,10 @@ export function ApprovalBox({
       ) : (
         <>
           <Text>
-            gbc spec add <Text color="cyan">&quot;{tailLines(approval.derivedCase, previewRows)}&quot;</Text>
+            {/* 0.10.4 ST3 — 하드코딩 cyan → toneColor("code") 토큰 경유(theme.ts 단일 소스 원칙).
+                톤 자체는 유지: 이건 accent 마커가 아니라 실행될 명령 리터럴(gbc spec add "...") 인용이라
+                코드/리터럴 시맨틱(cyan)이 맞다 — 입력프롬프트·사용자에코의 "❯" 마커 문제와는 다른 사례. */}
+            gbc spec add <Text color={toneColor("code")}>&quot;{tailLines(approval.derivedCase, previewRows)}&quot;</Text>
           </Text>
           <Text color="gray">근거: gate BLOCK 해소용 도출 시나리오 — 승인 시 재시도</Text>
         </>

@@ -25,6 +25,7 @@ import {
   wrapSegmentLine,
   tailLines,
   computeInputLayout,
+  computeSidebarWindow,
   INPUT_PROMPT_PREFIX,
   SIDEBAR_COLUMNS,
   PREVIEW_RESERVED_ROWS,
@@ -52,6 +53,7 @@ import { readSpecCases } from "../spec.js";
 import { activeDeferItems, addDefer } from "../defer.js";
 import { loadRepos } from "../repos.js";
 import { createTabRegistry, ensureTab, removeTab, setActiveTab, updateTabStatus } from "./tabs.js";
+import { appendText, appendSegments, getBuffer, type ScrollBuffers } from "./scrollback.js";
 import { gbcDir } from "../store.js";
 import { nowIso } from "../time.js";
 import { Segments } from "./ui/Segments.js";
@@ -63,9 +65,12 @@ import { SplashHeader } from "./ui/SplashHeader.js";
 import { WelcomeCard } from "./ui/WelcomeCard.js";
 import { Sidebar } from "./ui/Sidebar.js";
 import { Frame } from "./ui/Frame.js";
-import { FRAME_COLOR } from "./ui/theme.js";
+import { FRAME_COLOR, toneColor } from "./ui/theme.js";
 import { ChatBox, type ChatEntry } from "./ui/ChatBox.js";
-import { scanSkills } from "./skills.js";
+import { SlashDropdown } from "./ui/SlashDropdown.js";
+import { HelpPanel } from "./ui/HelpPanel.js";
+import { scanSkills, scanSkillsWithOrigin, loadSkillBody } from "./skills.js";
+import { computeSlashQuery, filterSkills, completeSlashText, composeSkillPrompt } from "./slash.js";
 import { GBC_SKILL_NAMES } from "../install.js";
 
 // 구 SplashHero.tsx의 여백 사양 그대로 유지(SubTask10 — 전체폭 헤더로 위치가 바뀌어도 좌측
@@ -118,16 +123,9 @@ function resolveCardSkills(cwd: string): CardSkill[] {
   return out;
 }
 
-type ScrollEntry =
-  | { id: number; kind: "text"; text: string; tone: Tone }
-  // ST13-14(0.9.2) — formatWelcomeCard가 한 줄에 여러 톤을 섞을 수 있는 TextSegment[][]를 반환하는데,
-  // "text" variant(단일 tone)로 욱여넣으면 조용히 정보가 손실된다(scope-critic 발견, 2026-07-13
-  // ST13-14 판정 DECISION_CHANGED:yes). 기존 <Segments> 렌더 관례(formatGateLine/formatStatusline과
-  // 동일)를 그대로 재사용해 세그먼트별 톤을 보존한다.
-  | { id: number; kind: "segments"; segments: TextSegment[] };
-// SubTask10(0.10.1) — "hero" variant 폐기. 워드마크+카드+웰컴은 더 이상 대화 스크롤백(Static)의
-// 1회성 커밋 항목이 아니라, splashDismissed 조건부의 일반 JSX로 화면 최상단/좌측 스택에 그린다
-// (Static은 commit-once라 조건부 소멸을 표현할 수 없었다 — SubTask7 scope-critic 판정에서 확인).
+// ScrollEntry(text/segments 두 kind)는 0.10.4 ST2부터 src/tui/scrollback.ts가 소유한다 — repoId로
+// 격리된 버퍼(ScrollBuffers)로 전환하며 이 앱 파일에 로컬로 두던 타입을 그 순수 모듈로 이전했다
+// (결함1: repo 전환 시 대화 소실 근본수정, scrollback.ts 모듈 주석 참조).
 
 function detectGit(cwd: string): { branch: string; dirty: boolean } {
   try {
@@ -186,8 +184,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 아니라 이 커서를 움직인다(useInput 하단 배선). activateApproval이 승인 도착 시 자동 해제한다.
   const [sidebarFocused, setSidebarFocused] = useState(false);
   const [sidebarCursor, setSidebarCursor] = useState(0);
+  // 0.10.4 ST6(개선2) — Alt+R repos 패널 키보드 커서(전역 인덱스, Sidebar와 동일 관례).
+  const [reposPanelCursor, setReposPanelCursor] = useState(0);
 
-  const [scrollback, setScrollback] = useState<ScrollEntry[]>([]);
+  // 0.10.4 ST2(결함1 근본수정) — 단일 배열 대신 repoId로 격리된 버퍼(scrollback.ts). 비활성 탭에
+  // append해도 다른 탭 버퍼를 건드리지 않으므로, repo 전환 시 화면 이력이 사라지지 않고 백그라운드
+  // 탭에 도착한 메시지도 유실 없이 보존된다(구 setScrollback([...전환 안내 1줄]) 전면 리셋 폐기).
+  const [scrollBuffers, setScrollBuffers] = useState<ScrollBuffers>({});
   const nextId = useRef(0);
   // SubTask2(대화창 박스) — Static 폐기로 스크롤백이 이제 실제로 화면에 매 프레임 다시 그려지므로
   // 상한이 없으면 장시간 세션에서 랩 비용(wrapSegmentLine)이 무한정 커진다. SubTask3 — PgUp/PgDn이
@@ -199,6 +202,14 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 계산이 불필요. 0.11.0 — 카드는 이제 고정 레이아웃으로 상시 표시된다(구 splashDismissed 조건부
   // 소멸 폐기, 스트리밍 중에도 GATE_RESULT로 카운트만 갱신되며 카드 자체는 계속 보인다).
   const [cardSkills] = useState(() => resolveCardSkills(cwd));
+
+  // 0.10.4 ST5(개선1) — 슬래시 드롭다운용 전체 스킬 목록(프로젝트+전역). cardSkills와 동일하게
+  // 마운트 시 1회 지연 계산(SKILL.md 파일 I/O를 매 렌더·매 키입력마다 반복하지 않는다).
+  const [slashSkills] = useState(() => scanSkillsWithOrigin(cwd));
+  const [slashCursor, setSlashCursor] = useState(0);
+  // Esc로 드롭다운을 닫으면 그 시점의 첫 줄 텍스트를 기억해두고, 텍스트가 바뀌기 전까진 다시 열지
+  // 않는다(별도 open 플래그 없이 파생 상태로만 열림/닫힘을 표현 — 에디터·드롭다운 상태 desync 차단).
+  const [slashSuppressedFor, setSlashSuppressedFor] = useState<string | null>(null);
 
   // ST11(0.10.0 A3b) — 탭 레지스트리(tabs.ts, ST1). cwd(App 시작 repo)가 항상 첫 탭 — tabs.ts
   // "최소 1탭 유지" 불변식과 대칭. activeTabId가 바뀌면 TuiState 전체를 TAB_SWITCHED로 재시드한다
@@ -270,19 +281,23 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     }, 120);
     return () => clearInterval(id);
   }, [state.streaming]);
-  const pushLine = useCallback((text: string, tone: Tone = "plain") => {
-    setScrollback((s) => {
-      const next = [...s, { id: nextId.current++, kind: "text" as const, text, tone }];
-      // CHAT_SCROLLBACK_MAX_ENTRIES(SubTask1) — 무한 증식 방지. 오래된 항목부터 버린다.
-      return next.length > CHAT_SCROLLBACK_MAX_ENTRIES ? next.slice(next.length - CHAT_SCROLLBACK_MAX_ENTRIES) : next;
-    });
+  // repoId 필수 인자화(0.10.4 ST2) — 어느 탭의 버퍼에 쌓을지 호출부가 항상 명시한다. CHAT_SCROLLBACK_
+  // MAX_ENTRIES(SubTask1, 무한증식 방지)는 scrollback.ts appendText가 repo별 독립 적용한다.
+  const pushLine = useCallback((repoId: string, text: string, tone: Tone = "plain") => {
+    setScrollBuffers((buffers) => appendText(buffers, repoId, nextId.current++, text, tone, CHAT_SCROLLBACK_MAX_ENTRIES));
+  }, []);
+
+  // 0.10.4 ST3 — 사용자 메시지 에코 전용(다중 톤 세그먼트). "❯ "만 accent, 본문은 plain — 예전엔
+  // 통째로 tone:"code"(cyan)라 표준 팔레트("녹색은 마커에만", theme.ts 원칙) 이탈이었다.
+  const pushSegments = useCallback((repoId: string, segments: TextSegment[]) => {
+    setScrollBuffers((buffers) => appendSegments(buffers, repoId, nextId.current++, segments, CHAT_SCROLLBACK_MAX_ENTRIES));
   }, []);
 
   // ST12(0.10.0 A3b) — 크래시 덤프 4경로. 알트스크린(ST10)은 teardown 프레임을 보존하지 않는다
   // (ink 공식 동작) — 종료 사유 불문 화면이 그냥 사라지므로, 마지막으로 보이던 scrollback을 파일로
   // 남겨야 복구 가능하다. scrollbackRef는 stateRef/tabsRef와 동일한 "항상 최신값" 미러 패턴.
-  const scrollbackRef = useRef(scrollback);
-  scrollbackRef.current = scrollback;
+  const scrollBuffersRef = useRef(scrollBuffers);
+  scrollBuffersRef.current = scrollBuffers;
   useEffect(() => {
     // 4경로 중 하나라도 먼저 dump를 쓰면 그 이후는 덮어쓰지 않는다 — uncaughtException→process.exit(1)이
     // 다시 'exit' 이벤트를 발화시키는 것처럼 한 종료가 여러 이벤트를 연쇄시킬 수 있어, 가장 구체적인
@@ -294,7 +309,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       try {
         // scope-critic 지적 — 크래시 시점에 보이던 scrollback은 "지금 활성 탭"의 것이므로, App
         // 시작 repo(cwd, 불변)가 아니라 그 탭의 repo에 저장해야 실제로 크래시가 난 repo에 남는다.
-        const text = formatCrashDump(scrollbackRef.current, reason, nowIso());
+        const text = formatCrashDump(
+          getBuffer(scrollBuffersRef.current, tabsRef.current.activeTabId),
+          reason,
+          nowIso(),
+        );
         writeFileSync(join(gbcDir(tabsRef.current.activeTabId), "crash-dump.txt"), text, "utf8");
       } catch {
         // 크래시 와중의 부가 기능 — 실패해도 원래 종료·에러 흐름을 절대 막지 않는다.
@@ -407,15 +426,20 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         );
         if (accum !== null) scheduleStreamDelta(repoId, accum);
 
-        if (repoId !== tabsRef.current.activeTabId) return;
-        for (const ev of mapEngineMessageToTuiEvents(msg)) dispatch(ev);
+        // 0.10.4 ST2(결함1 핵심 수정) — TuiState(단일 라이브 뷰) dispatch는 여전히 활성 탭에만
+        // 국한한다(교차오염 차단, 기존 설계 유지). 그러나 scrollback append는 활성 여부와 무관하게
+        // 항상 실행해야 한다 — 예전엔 여기서 그냥 return해 배경 탭에 도착한 메시지가 어디에도
+        // 기록되지 않고 영구 유실됐다(사외 실사용 보고 근본원인).
+        if (repoId === tabsRef.current.activeTabId) {
+          for (const ev of mapEngineMessageToTuiEvents(msg)) dispatch(ev);
+        }
         for (const rec of mapSdkMessage(msg)) {
           if (!rec.text) continue;
           if (rec.kind === "assistant") {
             commitStream(repoId);
-            for (const seg of formatMarkdownLite(rec.text)) pushLine(seg.text, seg.tone);
+            for (const seg of formatMarkdownLite(rec.text)) pushLine(repoId, seg.text, seg.tone);
           } else {
-            pushLine(rec.text, "dim");
+            pushLine(repoId, rec.text, "dim");
           }
         }
       },
@@ -446,9 +470,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           onEnded: (info) => {
             sessionsRef.current.delete(repoId);
             setTabs((prev) => updateTabStatus(prev, repoId, { status: "dead" }));
-            if (repoId === tabsRef.current.activeTabId) {
-              pushLine(`🐢 세션이 종료되어 다음 메시지부터 새 세션으로 다시 시작합니다. (${info.reason.slice(0, 80)})`, "warn");
-            }
+            // 0.10.4 ST2 — activeTabId 가드 제거: per-repo 버퍼라 배경 탭 배너도 그 탭에 안전히
+            // 쌓이고, 사용자가 나중에 그 탭으로 돌아오면 확인할 수 있다(사이드바 ✖ 아이콘과 상보).
+            pushLine(repoId, `🐢 세션이 종료되어 다음 메시지부터 새 세션으로 다시 시작합니다. (${info.reason.slice(0, 80)})`, "warn");
           },
         }),
       );
@@ -461,7 +485,10 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   const submit = useCallback(
     async (prompt: string) => {
       const repoId = tabsRef.current.activeTabId;
-      pushLine(`❯ ${prompt}`, "code");
+      pushSegments(repoId, [
+        { text: INPUT_PROMPT_PREFIX, tone: "accent" },
+        { text: prompt, tone: "plain" },
+      ]);
       dispatch({ type: "TURN_START" });
       setScrollOffset(0); // SubTask3 — 새 제출 시 대화창 최하단으로 강제 복귀.
       // no-session/alive/dead → streaming(전부 유효 전이, tabs.ts TRANSITIONS) — opt-in 첫 제출·
@@ -470,7 +497,16 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       const turnStartedAt = Date.now(); // ST15(0.9.2) — statusline lastTurnMs 계산용
       try {
         const session = await getOrCreateSession(repoId);
-        const result = await session.submit(prompt);
+        // 0.10.4 ST5(개선1) — "/name [args]" 형태고 name이 스캔된 스킬과 일치하면, 그 SKILL.md
+        // 본문을 클라이언트측에서 읽어 프롬프트에 합성 주입한다(engine.ts settingSources:[] 불변식
+        // 때문에 SDK가 스킬을 자체 로드하지 않으므로 이게 유일한 발동 경로 — slash.ts 모듈 주석
+        // 참조). 스크롤백 에코(위 pushSegments)는 이미 원문 prompt로 끝났으므로 주입 본문은
+        // 화면에 노출되지 않는다.
+        const slashMatch = prompt.match(/^\/([A-Za-z0-9_-]+)(?:\s|$)/);
+        const matchedSkill = slashMatch ? slashSkills.find((s) => s.name === slashMatch[1]) : undefined;
+        const skillBody = matchedSkill ? loadSkillBody(matchedSkill.path) : null;
+        const effectivePrompt = skillBody ? composeSkillPrompt(skillBody, prompt) : prompt;
+        const result = await session.submit(effectivePrompt);
         // EngineSession.submit()도 runEngine과 동일 계약(rethrow하지 않음, engine.ts) — 인증/네트워크
         // 실패·중단 어느 쪽도 반환값으로만 알 수 있다(0.9.1 실사용자 보고 교훈 승계).
         commitStream(repoId); // 턴 종료 — 동적 영역에 델타 잔여가 남아있으면 정리(중단된 턴 방어)
@@ -480,23 +516,20 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           // 중이던 도중 죽은" 레이스만 남는다.
           sessionsRef.current.delete(repoId);
           setTabs((prev) => updateTabStatus(prev, repoId, { status: "dead" }));
-          if (repoId === tabsRef.current.activeTabId) {
-            pushLine("🐢 세션이 종료되어 다음 메시지부터 새 세션으로 다시 시작합니다.", "warn");
-          }
+          // 0.10.4 ST2 — activeTabId 가드 제거(pushLine이 repoId 버퍼에 직접 적재, 결함1 근본수정).
+          pushLine(repoId, "🐢 세션이 종료되어 다음 메시지부터 새 세션으로 다시 시작합니다.", "warn");
         } else {
           setTabs((prev) => updateTabStatus(prev, repoId, { status: "alive", sessionId: session.sessionId }));
-          if (repoId === tabsRef.current.activeTabId) {
-            // 중단(aborted)은 사용자가 의도한 취소라 실패(danger)와 다른 톤(warn)으로 먼저 본다.
-            const abortMsg = formatEngineAbort(result);
-            const fallbackMsg = formatResumeFallbackBanner(result); // 0.10.0 ST5 — resume 실패→새 세션 재시도 고지
-            if (abortMsg) {
-              pushLine(abortMsg, "warn");
-            } else {
-              const failureMsg = formatEngineFailure(result);
-              if (failureMsg) pushLine(failureMsg, "danger");
-            }
-            if (fallbackMsg) pushLine(fallbackMsg, "warn");
+          // 중단(aborted)은 사용자가 의도한 취소라 실패(danger)와 다른 톤(warn)으로 먼저 본다.
+          const abortMsg = formatEngineAbort(result);
+          const fallbackMsg = formatResumeFallbackBanner(result); // 0.10.0 ST5 — resume 실패→새 세션 재시도 고지
+          if (abortMsg) {
+            pushLine(repoId, abortMsg, "warn");
+          } else {
+            const failureMsg = formatEngineFailure(result);
+            if (failureMsg) pushLine(repoId, failureMsg, "danger");
           }
+          if (fallbackMsg) pushLine(repoId, fallbackMsg, "warn");
           if (!result.isError && result.sessionId) {
             // 0.10.0 ST7 — 이 repo의 마지막 session_id를 영속(다음 gbc tui 재시작 시 resume 후보).
             try {
@@ -513,10 +546,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         // 친절 안내하지 않으면 사용자는 잘린 스택트레이스만 본다. 분류는 bridge.ts
         // formatSessionStartFailure(모듈미설치/spawn EPERM/폴백 3분기, formatEngineFailure와
         // 동일 classifySpawnPermissionError 재사용)가 전담 — 0.10.1: spawn EPERM이 안내 없이
-        // 원문 노출되던 결함(2026-07-20 실기 재현)을 이 경로에도 배선.
-        if (repoId === tabsRef.current.activeTabId) {
-          pushLine(formatSessionStartFailure(String(e)), "danger");
-        }
+        // 원문 노출되던 결함(2026-07-20 실기 재현)을 이 경로에도 배선. 0.10.4 ST2 — activeTabId
+        // 가드 제거(pushLine이 repoId 버퍼에 직접 적재).
+        pushLine(repoId, formatSessionStartFailure(String(e)), "danger");
       } finally {
         if (repoId === tabsRef.current.activeTabId) {
           dispatch({ type: "TURN_END" });
@@ -528,13 +560,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         }
       }
     },
-    [getOrCreateSession, pushLine, commitStream],
+    [getOrCreateSession, pushLine, pushSegments, commitStream, slashSkills],
   );
 
-  // ST11 — 탭 전환/opt-in. TuiState를 새 탭 기준으로 완전히 재시드하고(model.ts TAB_SWITCHED),
-  // scrollback을 초기화한다(per-tab scrollback은 이번 스코프에 없음 — 전환 시 화면 이력이 안 이어지는
-  // 건 의도된 단순화다: 실제 대화 맥락은 서버측 resume이 보존하므로 사용자 체감 손실은 "화면
-  // 스크롤백만" 이다). ensureTab이 이미 등록된 탭이면 no-op이라 기존 세션은 그대로 살아있다.
+  // ST11 — 탭 전환/opt-in. TuiState를 새 탭 기준으로 완전히 재시드한다(model.ts TAB_SWITCHED).
+  // 0.10.4 ST2 — scrollback은 더 이상 초기화하지 않는다(결함1 근본수정): per-repo 버퍼(scrollback.ts)
+  // 덕분에 화면 이력이 repoId별로 그대로 보존되고, 렌더가 activeTabId 버퍼로 자동 전환된다.
+  // ensureTab이 이미 등록된 탭이면 no-op이라 기존 세션은 그대로 살아있다.
   const switchToTab = useCallback(
     (repoId: string) => {
       setTabs((prev) => setActiveTab(ensureTab(prev, repoId), repoId));
@@ -548,7 +580,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         specCount: readSpecCases(repoId).length,
         deferCount: activeDeferItems(repoId).length,
       });
-      setScrollback([{ id: nextId.current++, kind: "text", text: `🐢 ${repoId} 세션으로 전환`, tone: "dim" }]);
+      // 0.10.4 ST2(결함1) — 전환 안내 리셋 폐기(사용자 확정). per-repo 버퍼(scrollback.ts)가 그
+      // 탭의 이력을 그대로 보존하므로 지울 이유가 없다 — 지금 어느 repo에 있는지는 사이드바 ❯·
+      // statusline이 이미 표시한다.
       setScrollOffset(0); // SubTask3 — 탭 전환 시에도 대화창 최하단으로.
     },
     [model],
@@ -588,7 +622,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
             specCount: readSpecCases(next.activeTabId).length,
             deferCount: activeDeferItems(next.activeTabId).length,
           });
-          setScrollback([{ id: nextId.current++, kind: "text", text: `🐢 ${next.activeTabId} 세션으로 전환`, tone: "dim" }]);
+          // 0.10.4 ST2 — 전환 안내 리셋 폐기(switchToTab과 동일 근거).
           setScrollOffset(0); // SubTask3 — opt-out 후 활성 탭이 바뀔 때도 최하단으로.
         }
         return next;
@@ -596,6 +630,24 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     },
     [model],
   );
+
+  // 0.10.4 ST5(개선1) — 슬래시 드롭다운 판정(파생 상태, editorState 첫 줄에서 매 렌더 재계산).
+  // 별도 open useState가 없으므로 백스페이스로 "/"가 지워지는 등 에디터-드롭다운 desync 클래스가
+  // 구조적으로 불가능하다(computeSlashQuery가 그 렌더의 실제 텍스트를 보고 매번 새로 판정).
+  const rawSlashQuery = editorState.lines.length === 1 ? computeSlashQuery(editorState.lines[0]) : null;
+  const slashOpen = rawSlashQuery !== null && slashSuppressedFor !== editorState.lines[0];
+  const slashCandidates = slashOpen ? filterSkills(slashSkills, rawSlashQuery ?? "") : [];
+  const slashCursorClamped = Math.min(slashCursor, Math.max(0, slashCandidates.length - 1));
+  const slashWindow = slashOpen ? computeSidebarWindow(slashCandidates.length, slashCursorClamped, 5) : { start: 0, end: 0, aboveCount: 0, belowCount: 0 };
+  const slashVisibleItems = slashCandidates.slice(slashWindow.start, slashWindow.end);
+  // 테두리(2) + (위/아래 인디케이터 각 0~1) + 최소 1행(후보 0개여도 "일치 없음" 안내가 1행 필요).
+  const dropdownRows = slashOpen
+    ? 2 + (slashWindow.aboveCount > 0 ? 1 : 0) + (slashWindow.belowCount > 0 ? 1 : 0) + Math.max(1, slashVisibleItems.length)
+    : 0;
+
+  useEffect(() => {
+    setSlashCursor(0);
+  }, [editorState.lines[0]]);
 
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
@@ -606,7 +658,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         process.exit(0);
       }
       dispatch({ type: "CTRL_C_PRESSED" });
-      pushLine("🐢 종료하려면 Ctrl+C를 한 번 더 누르세요(2초 내)", "warn");
+      pushLine(tabsRef.current.activeTabId, "🐢 종료하려면 Ctrl+C를 한 번 더 누르세요(2초 내)", "warn");
       if (exitConfirmTimerRef.current) clearTimeout(exitConfirmTimerRef.current);
       exitConfirmTimerRef.current = setTimeout(() => {
         dispatch({ type: "CTRL_C_RESET" });
@@ -637,18 +689,18 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         void optOutTab(repoId);
       } else {
         setOptOutConfirmRepoId(null);
-        pushLine("🐢 opt-out 취소됨", "dim");
+        pushLine(tabsRef.current.activeTabId, "🐢 opt-out 취소됨", "dim");
       }
       return;
     }
     if ((key.ctrl || key.meta) && input === "w" && !state.approval) {
       const repoId = tabsRef.current.activeTabId;
       if (repoId === cwd) {
-        pushLine("🐢 시작 repo 탭은 닫을 수 없습니다(항상 최소 1탭 유지)", "warn");
+        pushLine(repoId, "🐢 시작 repo 탭은 닫을 수 없습니다(항상 최소 1탭 유지)", "warn");
         return;
       }
       setOptOutConfirmRepoId(repoId);
-      pushLine(`🐢 '${repoId}' 세션을 닫을까요? (y/N — 대기 중인 승인은 거부로 처리됩니다)`, "warn");
+      pushLine(repoId, `🐢 '${repoId}' 세션을 닫을까요? (y/N — 대기 중인 승인은 거부로 처리됩니다)`, "warn");
       return;
     }
 
@@ -722,8 +774,33 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       dispatch({ type: "TOGGLE_TITLE" });
       return;
     }
+    // 0.10.4 ST7(개선3-a) — '?' 도움말 패널. 입력창이 비어있을 때만 발동(아니면 물음표 자체를
+    // 타이핑할 수 없어진다 — "이 코드가 맞나요?" 같은 일반 문장에 물음표를 못 쓰는 회귀 방지).
+    if (input === "?" && Editor.isEmpty(editorState)) {
+      dispatch({ type: "TOGGLE_PANEL", panel: "help" });
+      return;
+    }
     if (state.panel !== "none") {
       if (key.escape) dispatch({ type: "CLOSE_PANEL" });
+      // 0.10.4 ST6(개선2) — repos 패널 키보드 선택. Sidebar 내비게이션(SubTask5, 0.10.1)과 동일
+      // 전역 인덱스 관례 — computeSidebarWindow가 스크롤 시에도 같은 인덱스 기준을 쓴다.
+      if (state.panel === "repos") {
+        const repos = loadRepos();
+        if (key.upArrow) {
+          setReposPanelCursor((c) => Math.max(0, c - 1));
+          return;
+        }
+        if (key.downArrow) {
+          setReposPanelCursor((c) => Math.min(Math.max(0, repos.length - 1), c + 1));
+          return;
+        }
+        if (key.return) {
+          const target = repos[reposPanelCursor];
+          if (target && target !== tabsRef.current.activeTabId) switchToTab(target);
+          dispatch({ type: "CLOSE_PANEL" });
+          return;
+        }
+      }
       return;
     }
     // SubTask3(0.10.1) — 대화창 스크롤(ⓒ). 승인·패널 열림 중엔 위 두 early return이 이미 이
@@ -737,6 +814,30 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     if (key.pageDown) {
       setScrollOffset((o) => Math.max(0, o - PGSCROLL_STEP));
       return;
+    }
+    // 0.10.4 ST5(개선1) — 슬래시 드롭다운 키 라우팅. Tab(사이드바 포커스 토글) 앞에 둬야 드롭다운이
+    // 열려 있을 때 Tab이 완성 선택으로 먼저 소비된다(계획 명시 순서). ↑/↓/Esc는 후보 유무와 무관하게
+    // 항상 드롭다운이 처리하고, Enter/Tab은 후보가 있을 때만 완성으로 소비한다 — 후보 0개(예: 오타)면
+    // 여기서 return하지 않고 아래로 흘려보내 사용자가 리터럴 텍스트를 그대로 제출할 수 있게 한다.
+    if (slashOpen) {
+      if (key.upArrow) {
+        setSlashCursor((c) => Math.max(0, c - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setSlashCursor((c) => Math.min(Math.max(0, slashCandidates.length - 1), c + 1));
+        return;
+      }
+      if (key.escape) {
+        setSlashSuppressedFor(editorState.lines[0] ?? "");
+        return;
+      }
+      if ((key.return || key.tab) && slashCandidates.length > 0) {
+        const target = slashCandidates[slashCursorClamped];
+        const completed = completeSlashText(target.name);
+        setEditorState((s) => ({ ...s, lines: [completed], cursorRow: 0, cursorCol: completed.length }));
+        return;
+      }
     }
     // SubTask5(0.10.1) — 사이드바 repos 키보드 내비게이션(Tab 포커스 토글). 승인·패널 열림 중엔
     // 위 early return들이 이미 이 지점 도달을 막는다(PgUp/PgDn과 동일 근거) — 별도 가드 불필요.
@@ -828,9 +929,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     ? null
     : computeInputLayout(editorState.lines, editorState.cursorRow, editorState.cursorCol, inputInnerColumns);
   if (inputLayout) inputContentRows = inputLayout.lines.length;
+  // dropdownRows(0.10.4 ST5) — 슬래시 드롭다운이 열려 있으면 그만큼 뷰포트에서 차감해 박스 총높이
+  // 계약(chatTotalRows)을 불변으로 유지한다(이슈② 재발 방지 원칙 그대로 적용).
   const chatViewportRows = Math.max(
     1,
-    chatTotalRows - CHAT_BOX_CHROME_ROWS - CHAT_BOTTOM_CHROME_ROWS - inputContentRows,
+    chatTotalRows - CHAT_BOX_CHROME_ROWS - CHAT_BOTTOM_CHROME_ROWS - inputContentRows - dropdownRows,
   );
 
   // 실터미널 커서를 캐럿 위치에 노출(0.10.3) — IME(한글) 조합 중 글자는 터미널이 커서 위치에
@@ -846,21 +949,23 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // 정적 설계라 커서가 최하단 행에서 클램프돼 전제가 1행 깨진다 — 실측 y=33 vs 실제 입력행 34.
     setCursorPosition({
       x: frameLayout.gutterColumns + SIDEBAR_COLUMNS + CHAT_COLUMN_GAP + 2 + 2 + inputLayout.caretCol,
-      y: frameLayout.bandRows + chatHeaderRows + 2 + chatViewportRows + 1 + inputLayout.caretRow + 1,
+      y: frameLayout.bandRows + chatHeaderRows + 2 + chatViewportRows + 1 + dropdownRows + inputLayout.caretRow + 1,
     });
   } else {
     setCursorPosition(undefined);
   }
 
-  // scrollback(ScrollEntry — text/segments 두 kind)을 ChatBox가 소비하는 단일 형태(ChatEntry:
-  // TextSegment[])로 변환. scrollback 참조가 안 바뀌면 재계산하지 않는다 — 타이핑마다(=매 렌더)
-  // 새 배열을 만들면 ChatBox 내부 useMemo(wrapSegmentLine)의 캐시가 매번 무효화된다.
+  // 0.10.4 ST2 — 렌더는 항상 "지금 활성 탭"의 버퍼만 그린다. getBuffer는 해당 repoId 배열의
+  // 참조를 그대로 반환하므로(scrollback.ts appendEntry가 건드린 repoId 키만 새 배열이 됨), 다른
+  // repo에 append가 일어나도 activeScrollBuffer 참조는 안 바뀌어 이 useMemo가 불필요하게
+  // 무효화되지 않는다.
+  const activeScrollBuffer = getBuffer(scrollBuffers, tabs.activeTabId);
   const chatEntries = useMemo<ChatEntry[]>(
     () =>
-      scrollback.map((e) =>
+      activeScrollBuffer.map((e) =>
         e.kind === "segments" ? { id: e.id, segments: e.segments } : { id: e.id, segments: [{ text: e.text, tone: e.tone }] },
       ),
-    [scrollback],
+    [activeScrollBuffer],
   );
 
   return (
@@ -904,14 +1009,21 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           totalRows={chatTotalRows}
           entries={chatEntries}
           scrollOffset={scrollOffset}
-          showWelcome={scrollback.length === 0}
+          showWelcome={activeScrollBuffer.length === 0}
           panelNode={
             state.panel === "metrics" ? (
               <MetricsPanel cwd={cwd} />
             ) : state.panel === "repos" ? (
-              <ReposPanel cwd={cwd} contentColumns={computeContentColumns(frameLayout.innerColumns, SIDEBAR_COLUMNS)} />
+              // 0.10.4 ST6 — contentColumns는 ChatBox 자체의 테두리+패딩(4)·컬럼갭(1)까지 뺀
+              // chatInnerColumns여야 한다. 기존엔 computeContentColumns(...) 원값(그 5컬럼을 포함한
+              // 값)을 그대로 넘겨 REPOS_PANEL_ROW_OVERHEAD 예산이 실제보다 5컬럼 더 넓다고 착각—
+              // 긴 경로가 실제 렌더 폭에서 줄바꿈돼 패널 행수가 예산을 초과하고 알트스크린 잔상이
+              // 발생했다(백로그 "ReposPanel 세로 오버플로"의 실체, tmux 실기 검증으로 확인).
+              <ReposPanel cwd={cwd} contentColumns={chatInnerColumns} cursor={reposPanelCursor} />
             ) : state.panel === "skills" ? (
               <SkillsPanel cwd={cwd} />
+            ) : state.panel === "help" ? (
+              <HelpPanel />
             ) : undefined
           }
           // ST5(0.9.4 T2)→0.10.3 — 프리뷰가 별도 노드가 아니라 대화 시각행 윈도우 안에서 스크롤백
@@ -929,23 +1041,36 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
               previewRows={approvalPreviewRows}
             />
           ) : (
-            // 0.10.3 — computeInputLayout의 시각행을 그대로 한 행씩 렌더(ink 자체 랩 미사용 —
-            // 계산과 렌더가 다른 랩 규칙을 쓰면 캐럿 좌표·행수예산이 어긋난다). 가짜 '█' 폐기,
-            // 캐럿은 실터미널 커서(useCursor 배선)가 표시한다.
-            <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column">
-              {(inputLayout?.lines ?? [INPUT_PROMPT_PREFIX]).map((ln, i) => (
-                <Text key={i} wrap="truncate">
-                  {i === 0 ? (
-                    <>
-                      <Text color="cyan">{INPUT_PROMPT_PREFIX}</Text>
-                      <Text>{ln.slice(INPUT_PROMPT_PREFIX.length) || " "}</Text>
-                    </>
-                  ) : (
-                    <Text>{ln || " "}</Text>
-                  )}
-                </Text>
-              ))}
-            </Box>
+            <>
+              {/* 0.10.4 ST5(개선1) — 슬래시 드롭다운은 입력창 바로 위에 뜬다. dropdownRows가 이미
+                  뷰포트에서 차감·캐럿 y에 가산됐으므로(위 계산 참조) 여기 추가로 그려도 프레임
+                  총높이가 늘지 않는다. */}
+              {slashOpen && (
+                <SlashDropdown
+                  items={slashVisibleItems}
+                  aboveCount={slashWindow.aboveCount}
+                  belowCount={slashWindow.belowCount}
+                  cursorIndexInWindow={slashCursorClamped - slashWindow.start}
+                />
+              )}
+              {/* 0.10.3 — computeInputLayout의 시각행을 그대로 한 행씩 렌더(ink 자체 랩 미사용 —
+                  계산과 렌더가 다른 랩 규칙을 쓰면 캐럿 좌표·행수예산이 어긋난다). 가짜 '█' 폐기,
+                  캐럿은 실터미널 커서(useCursor 배선)가 표시한다. */}
+              <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column">
+                {(inputLayout?.lines ?? [INPUT_PROMPT_PREFIX]).map((ln, i) => (
+                  <Text key={i} wrap="truncate">
+                    {i === 0 ? (
+                      <>
+                        <Text color={toneColor("accent")}>{INPUT_PROMPT_PREFIX}</Text>
+                        <Text>{ln.slice(INPUT_PROMPT_PREFIX.length) || " "}</Text>
+                      </>
+                    ) : (
+                      <Text>{ln || " "}</Text>
+                    )}
+                  </Text>
+                ))}
+              </Box>
+            </>
           )}
           {/* 게이트줄·상태줄 1행 클램프(0.10.3) — 좁은 대화 컬럼에서 세그먼트가 랩되며 +1행씩 자라
               박스 총높이 계약을 깨던 갈래 차단. 넘치는 꼬리는 잘리는 게 프레임 밀림보다 낫다. */}
