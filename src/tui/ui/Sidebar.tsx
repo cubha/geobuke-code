@@ -69,7 +69,7 @@ export function Sidebar({
       flexShrink={0}
       flexGrow={1}
       borderStyle="round"
-      borderColor={focused ? "cyan" : BORDER_COLOR}
+      borderColor={focused ? toneColor("accent") : BORDER_COLOR}
       paddingX={1}
     >
       {/* 0.10.3 — Alt+ 표기로 교체(레거시 터미널은 Ctrl+숫자 미전송, 이슈③). */}
@@ -90,7 +90,9 @@ export function Sidebar({
             const isCursor = focused && i === cursor;
             const glyph = tab ? formatTabStatusGlyph(tab.status) : null;
             const prefix = isCursor ? "▸ " : isActive ? "❯ " : "  ";
-            const rowColor = isCursor ? "cyan" : isActive ? "green" : undefined;
+            // 0.10.4 ST3 — cyan 폐기: 커서·활성 둘 다 accent(green)로 통일(theme.ts 원칙 준수).
+            // 시각 구분은 prefix(▸ 커서 vs ❯ 활성)가 이미 맡고 있어 색상 통일로 정보 손실 없음.
+            const rowColor = isCursor || isActive ? toneColor("accent") : undefined;
             return (
               <Text key={r} color={rowColor}>
                 {prefix}

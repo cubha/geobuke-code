@@ -2,7 +2,9 @@
 // Ground Truth: gbc-tui-design.html 시안 A(A-⓪~A-④) + statusline 표 + 키맵 표.
 // Ink/React를 import하지 않는다 — TUI 컴포넌트(ST5)가 이 reducer를 소비한다.
 
-export type Panel = "none" | "metrics" | "repos" | "skills";
+// 0.10.4 ST7(개선3-a) — "help"는 기존 3종과 동일하게 TOGGLE_PANEL/CLOSE_PANEL이 그대로 다룬다
+// (reduce 케이스 무변경 — 이미 범용이라 새 이벤트 타입이 필요 없다).
+export type Panel = "none" | "metrics" | "repos" | "skills" | "help";
 export type ApprovalChoice = "y" | "n" | "e" | "d";
 
 export const APPROVAL_CHOICES: readonly ApprovalChoice[] = ["y", "n", "e", "d"];

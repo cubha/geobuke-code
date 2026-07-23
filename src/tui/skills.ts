@@ -4,7 +4,7 @@
 // 라인 매칭으로 뽑는다.
 import { existsSync, readdirSync, readFileSync, lstatSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export interface SkillInfo {
   name: string;
@@ -16,6 +16,10 @@ export type SkillOrigin = "project" | "global";
 
 export interface SkillInfoWithOrigin extends SkillInfo {
   origin: SkillOrigin;
+  /** SKILL.md 절대경로(0.10.4 개선1) — 드롭다운에서 선택된 스킬의 본문을 loadSkillBody로 다시 읽어
+   * 프롬프트에 주입하기 위함(engine.ts settingSources:[] 불변식 때문에 SDK가 스킬을 자체 로드하지
+   * 않아, 클라이언트측 본문 주입이 유일한 발동 경로다). */
+  path: string;
 }
 
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---/;
@@ -55,13 +59,14 @@ export function parseSkillFrontmatter(content: string): SkillInfo | null {
  * 그 안의 SKILL.md는 일반 파일이라 통과해버리는 우회가 남는다(security-auditor 발견, 2026-07-13).
  */
 export function scanSkills(cwd: string): SkillInfo[] {
-  return scanSkillsDir(join(cwd, ".claude", "skills"));
+  return scanSkillsDir(join(cwd, ".claude", "skills")).map(({ name, description }) => ({ name, description }));
 }
 
-/** 한 skills 디렉토리를 스캔하는 공통 코어 — scanSkills(프로젝트)와 전역 스캔이 공유한다. */
-function scanSkillsDir(dir: string): SkillInfo[] {
+/** 한 skills 디렉토리를 스캔하는 공통 코어 — scanSkills(프로젝트)와 전역 스캔이 공유한다. path(SKILL.md
+ * 절대경로)는 항상 포함하고, scanSkills는 기존 호출부(카드 blurb 등) 호환을 위해 벗겨낸다. */
+function scanSkillsDir(dir: string): (SkillInfo & { path: string })[] {
   if (!existsSync(dir)) return [];
-  const out: SkillInfo[] = [];
+  const out: (SkillInfo & { path: string })[] = [];
   for (const entry of readdirSync(dir)) {
     const entryPath = join(dir, entry);
     const skillFile = join(entryPath, "SKILL.md");
@@ -70,7 +75,7 @@ function scanSkillsDir(dir: string): SkillInfo[] {
       if (!existsSync(skillFile)) continue;
       if (lstatSync(skillFile).isSymbolicLink()) continue;
       const parsed = parseSkillFrontmatter(readFileSync(skillFile, "utf8"));
-      if (parsed) out.push(parsed);
+      if (parsed) out.push({ ...parsed, path: skillFile });
     } catch {
       continue; // 개별 스킬 읽기 실패는 그 항목만 건너뜀(패널 전체를 죽이지 않음)
     }
@@ -95,4 +100,22 @@ export function scanSkillsWithOrigin(cwd: string, globalRoot: string = homedir()
     .filter((s) => !projectNames.has(s.name))
     .map((s): SkillInfoWithOrigin => ({ ...s, origin: "global" }));
   return [...project, ...global].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * 선택된 스킬의 SKILL.md 전문을 읽는다(0.10.4 개선1 — 슬래시 드롭다운에서 스킬을 고르면 이 본문을
+ * 프롬프트에 합성 주입해 "실제로 발동"시킨다. engine.ts의 settingSources:[] anti-recursion 불변식
+ * 때문에 스폰된 SDK 세션은 SKILL.md를 자체 로드하지 않으므로, 클라이언트측 주입이 유일한 경로다).
+ * scanSkillsDir와 동일한 심링크 거부 가드를 **제출 시점에 재검사**한다 — path는 스캔 시점 값이라
+ * 그 사이 파일시스템이 바뀌었을 가능성을 다시 방어한다(security-auditor 전례 원칙 재사용). 부재·
+ * 심링크·읽기 실패는 전부 null(개별 실패로 전체 흐름을 죽이지 않음).
+ */
+export function loadSkillBody(path: string): string | null {
+  try {
+    if (lstatSync(dirname(path)).isSymbolicLink()) return null;
+    if (lstatSync(path).isSymbolicLink()) return null;
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
 }
