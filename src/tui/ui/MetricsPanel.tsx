@@ -3,15 +3,14 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
-import { join } from "node:path";
-import { parseEvents, computeMetrics, type Metrics } from "../../metrics.js";
+import { computeMetrics, readEventsMerged, eventsPath, type Metrics } from "../../metrics.js";
 import { extractionPath, parseExtraction } from "../../extraction.js";
 import { computeRealM1, classifyBlockOutcome, joinBySession, loadScores, type RealM1 } from "../../scoring.js";
 import { BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
 
 function load(cwd: string): { m: Metrics; real: RealM1 } {
-  const eventsPath = join(cwd, ".gbc", "events.jsonl");
-  const events = parseEvents(existsSync(eventsPath) ? readFileSync(eventsPath, "utf8") : "");
+  // readEventsMerged(0.10.6 A4) — 로테이션된 .1 세대가 있으면 현행 세대와 병합해 읽는다.
+  const events = readEventsMerged(cwd);
   const exPath = extractionPath(cwd);
   const records = parseExtraction(existsSync(exPath) ? readFileSync(exPath, "utf8") : "");
   const real = computeRealM1(joinBySession(events, records), classifyBlockOutcome(events), loadScores(cwd));
@@ -23,10 +22,12 @@ export function MetricsPanel({ cwd }: { cwd: string }) {
 
   useEffect(() => {
     setData(load(cwd));
-    const eventsPath = join(cwd, ".gbc", "events.jsonl");
+    // 로테이션 발생 시(events.jsonl이 rename되고 같은 경로에 새 파일이 만들어지는 순간) fs.watch가
+    // 그 교체를 놓칠 가능성이 있다(OS별 inotify/rename 처리 차이, 0.10.6 A4 알려진 한계) — 다음
+    // append에서 이어지는 변경은 정상 감지되므로 패널이 영구히 정체되진 않는다.
     let watcher: FSWatcher | null = null;
     try {
-      watcher = watch(eventsPath, () => setData(load(cwd)));
+      watcher = watch(eventsPath(cwd), () => setData(load(cwd)));
     } catch {
       // 파일 아직 없음(이벤트 0건) — 패널은 초기 로드값(0건)으로 표시, watch 재시도는 안 함(패널 재오픈 시 갱신).
     }

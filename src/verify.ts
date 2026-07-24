@@ -2,13 +2,13 @@
 // 핵심 불변식: gbc는 테스트를 *실행하지 않는다*. 표준 결과 포맷(JUnit XML)을 *읽고*, 러너가 없으면
 // LLM 독해(reviewed)로 경량 판정하거나 unverifiable로 정직 보고한다(provider 패턴·RCE 차단·이식성).
 import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { CaseBinding, CaseVerdict, VerifyReport, VerifyProvenance, ReviewVerdict } from "./types.js";
 import { readSpecCases } from "./spec.js";
 import { readVerifyResults, statVerifyResults, JUNIT_DEFAULT_REL } from "./junit.js";
 import { isWithinCwd } from "./store.js";
 import { judgeReviewed } from "./judge.js";
-import { parseEvents, lastAppliedEditAt } from "./metrics.js";
+import { readEventsMerged, lastAppliedEditAt } from "./metrics.js";
 import { nowIso } from "./time.js";
 
 /**
@@ -45,12 +45,12 @@ export interface VerifyOpts {
   lastEditAt?: string | null;
 }
 
-/** .gbc/events.jsonl에서 마지막 적용 편집 시각을 판독(기본 신선도 신호원). 부재/실패면 null. */
+/** .gbc/events.jsonl(로테이션된 .1 세대 포함, 0.10.6 A4 readEventsMerged)에서 마지막 적용 편집
+ * 시각을 판독(기본 신선도 신호원). readEventsMerged가 파일 부재를 이미 빈 배열로 흡수하므로
+ * (두 세대 모두 없으면 []) lastAppliedEditAt이 자연히 null을 반환한다 — 별도 existsSync 가드 불필요. */
 function readLastEditAt(cwd: string): string | null {
-  const path = join(cwd, ".gbc", "events.jsonl");
-  if (!existsSync(path)) return null;
   try {
-    return lastAppliedEditAt(parseEvents(readFileSync(path, "utf8")));
+    return lastAppliedEditAt(readEventsMerged(cwd));
   } catch {
     return null;
   }

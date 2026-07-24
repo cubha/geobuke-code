@@ -6,10 +6,11 @@
 //  · join key = session 단독(specHash 미포함 — A-mode는 작업단위 해시가 아니라 세션이 상관 축).
 //  · 구조 필드(tool·file·decision·kind)는 enum/경로/id라 그대로. 자유텍스트(text)만 redact+캡.
 //  · 사이즈 상한 초과 시 1세대 로테이션(.jsonl→.1.jsonl) — 무한 성장 차단, 최근분 보존.
-import { appendFileSync, statSync, renameSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDir } from "./store.js";
 import { MAX_LINE, serializeCapped } from "./jsonl-line.js";
+import { rotateJsonlIfOversize } from "./jsonl-rotate.js";
 
 // MAX_LINE 재-export(2026-07-24 리팩토링, R1) — 공용 정의는 jsonl-line.ts로 이전했으나 기존
 // 소비처(test/extraction.test.mjs 등)의 "../dist/extraction.js"발 import 계약은 그대로 보존한다.
@@ -121,6 +122,7 @@ export function extractionPath(cwd: string): string {
  * 현재 파일이 상한 이상이면 1세대 로테이션(.jsonl→.1.jsonl, 기존 .1은 덮어씀) 후 append. 파일 부재/stat
  * 실패는 로테이션 없이 append(최초 기록). GBC_NO_EXTRACTION=1이면 무동작(opt-out, metrics 규약 미러).
  * append/rotation 실패는 삼킨다(fail-silent — 계측이 A-mode 실행을 막지 않는다).
+ * 로테이션 자체는 jsonl-rotate.ts(0.10.6 A3)로 공용 추출됨 — metrics.ts events.jsonl과 동일 로직.
  */
 export function appendExtraction(
   cwd: string,
@@ -131,13 +133,7 @@ export function appendExtraction(
   const maxBytes = opts.maxBytes ?? MAX_EXTRACTION_BYTES;
   try {
     const path = extractionPath(cwd);
-    // 상한 이상이면 append 전에 1세대 로테이션(.jsonl→.1.jsonl, 기존 .1 덮어씀). stat 실패(파일 부재)는
-    // 로테이션 없이 그대로 append(최초 기록).
-    try {
-      if (statSync(path).size >= maxBytes) renameSync(path, path.replace(/\.jsonl$/, ".1.jsonl"));
-    } catch {
-      /* stat/rename 실패(부재·권한) → 로테이션 생략, append는 시도 */
-    }
+    rotateJsonlIfOversize(path, maxBytes);
     appendFileSync(path, serializeRecord(rec) + "\n");
   } catch {
     /* append 실패는 삼킨다(fail-silent — 계측이 A-mode 실행을 막지 않는다) */

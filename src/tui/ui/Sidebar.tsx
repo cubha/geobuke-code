@@ -8,10 +8,19 @@
 // 배선돼 있어(포커스·스크롤 상태와 무관) 창이 스크롤돼 9번째 이후가 보이는 항목엔 애초에 ⌃N
 // 단축키가 존재하지 않는다 — 그 항목엔 라벨을 비워 "이 항목은 ⌃N으로 못 간다"를 시각적으로
 // 정확히 반영한다(전역 인덱스<9일 때만 ⌃{i+1} 표시).
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { Box, Text } from "ink";
-import { loadRepos } from "../../repos.js";
-import { MASCOT_S2, renderMascot, formatTabStatusGlyph, formatSidebarRepoPath, computeSidebarWindow, SIDEBAR_COLUMNS } from "../format.js";
+import {
+  MASCOT_S2,
+  renderMascot,
+  formatTabStatusGlyph,
+  formatSidebarRepoPath,
+  computeSidebarWindow,
+  SIDEBAR_COLUMNS,
+  SIDEBAR_HEADER_LABEL,
+  SIDEBAR_HEADER_HINT,
+  SIDEBAR_MAX_VISIBLE_REPOS,
+} from "../format.js";
 import { toneColor, BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
 import { Mascot } from "./Mascot.js";
 import type { TabRegistry } from "../tabs.js";
@@ -23,36 +32,29 @@ import type { TabRegistry } from "../tabs.js";
 // 키입력마다, App이 상태를 dispatch하므로) 다시 계산하지 않는다.
 const SIDEBAR_MASCOT_LINES = renderMascot(MASCOT_S2);
 
-// repos.json은 'gbc repos add/remove' CLI로만 바뀌는 드문 이벤트라 실시간 반응이 필요 없다 —
-// 주기적 폴링으로 충분(과함).
-const REPOS_REFRESH_MS = 5000;
-
-// 사이드바 내부 가용폭(SIDEBAR_COLUMNS-테두리2-paddingX2=30) 안에서 한 번에 보여줄 repo 수 —
-// ⌃1..9 직행 단축키가 물리적으로 9개뿐이라 이 값과 별개로 고정.
-const SIDEBAR_MAX_VISIBLE = 9;
-
 export function Sidebar({
   cwd,
   tabs,
+  repos,
   focused = false,
   cursor = 0,
+  showMascot = true,
 }: {
   cwd: string;
   tabs: TabRegistry;
+  /** 0.10.6 A2 — repos.json 폴링(5초 간격)을 app.tsx로 끌어올렸다. 이전엔 이 컴포넌트가 자체
+   * useState+useEffect로 들고 있었는데, computeResponsiveLayout(강등 판정)도 정확한 repo 개수가
+   * 필요해져 단일 소스로 상위 이동했다 — I/O 총량은 그대로(폴링 지점이 1곳에서 다른 1곳으로
+   * 옮겨졌을 뿐), 렌더마다 다시 읽지 않는다는 불변식은 유지된다. */
+  repos: string[];
   /** Tab 포커스 중이면 커서 행을 강조하고 창이 커서를 따라간다(SubTask5). */
   focused?: boolean;
   cursor?: number;
+  /** 저높이 반응형 강등 1단(0.10.6 A2) — false면 마스코트를 그리지 않는다. 마스코트 30×16
+   * 픽셀 자체는 불변(사용자 확정 디자인) — 숨김/표시만 여기서 제어한다. */
+  showMascot?: boolean;
 }) {
-  // 마운트 시 1회만 읽는 지연 초기화(useState 팩토리) — App이 매 키입력마다 리렌더되는데(0.9.1
-  // detectGit 실사용자 보고와 동일 함정) 렌더 본문에서 직접 loadRepos()를 호출하면 타이핑마다
-  // 동기 파일 I/O가 재발한다. 갱신은 아래 폴링 useEffect가 전담.
-  const [repos, setRepos] = useState(() => loadRepos());
-  useEffect(() => {
-    const id = setInterval(() => setRepos(loadRepos()), REPOS_REFRESH_MS);
-    return () => clearInterval(id);
-  }, []);
-
-  const win = computeSidebarWindow(repos.length, cursor, SIDEBAR_MAX_VISIBLE);
+  const win = computeSidebarWindow(repos.length, cursor, SIDEBAR_MAX_VISIBLE_REPOS);
   const visible = repos.slice(win.start, win.end);
 
   return (
@@ -72,9 +74,11 @@ export function Sidebar({
       borderColor={focused ? toneColor("accent") : BORDER_COLOR}
       paddingX={1}
     >
-      {/* 0.10.3 — Alt+ 표기로 교체(레거시 터미널은 Ctrl+숫자 미전송, 이슈③). */}
+      {/* 0.10.3 — Alt+ 표기로 교체(레거시 터미널은 Ctrl+숫자 미전송, 이슈③). 텍스트는 format.ts
+          SIDEBAR_HEADER_LABEL/HINT(단일 소스) — SIDEBAR_CHROME_ROWS 측정 텍스트와 항상 같아야
+          줄바꿈 행수 드리프트가 재발하지 않는다(0.10.6 A2 tmux 실측 결함 근본수정). */}
       <Text color={PANEL_TITLE_COLOR} bold>
-        📁 repos <Text color="gray">— Alt+1..9 전환/opt-in · Alt+W opt-out · Alt+T 타이틀</Text>
+        {SIDEBAR_HEADER_LABEL} <Text color="gray">{SIDEBAR_HEADER_HINT}</Text>
       </Text>
       {repos.length === 0 ? (
         <Text color="gray">등록된 repo 없음 — 'gbc repos add'로 추가</Text>
@@ -109,7 +113,7 @@ export function Sidebar({
         </>
       )}
       <Box flexGrow={1} />
-      <Mascot lines={SIDEBAR_MASCOT_LINES} />
+      {showMascot && <Mascot lines={SIDEBAR_MASCOT_LINES} />}
     </Box>
   );
 }

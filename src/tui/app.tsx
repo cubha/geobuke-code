@@ -12,6 +12,7 @@ import type { GateDecision } from "../gate-core.js";
 import { createInitialState, reduce, type TuiState, type ApprovalChoice } from "./model.js";
 import * as Editor from "./editor.js";
 import type { EditorState } from "./editor.js";
+import { classifyKey, type KeyRoutingContext } from "./keymap.js";
 import {
   formatGateLine,
   formatStatusline,
@@ -22,6 +23,9 @@ import {
   computeFrameLayout,
   computeChatRegionRows,
   computeHeaderRows,
+  computeResponsiveLayout,
+  computeSidebarListRows,
+  formatWelcomeCard,
   wrapSegmentLine,
   tailLines,
   computeInputLayout,
@@ -193,6 +197,17 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   const [sidebarCursor, setSidebarCursor] = useState(0);
   // 0.10.4 ST6(개선2) — Alt+R repos 패널 키보드 커서(전역 인덱스, Sidebar와 동일 관례).
   const [reposPanelCursor, setReposPanelCursor] = useState(0);
+
+  // 0.10.6 A2 — repos.json 폴링을 Sidebar.tsx에서 이 컴포넌트로 끌어올렸다. computeResponsiveLayout
+  // (반응형 강등 판정)도 정확한 repo 개수가 필요해져 단일 소스가 필요했다 — I/O 총량은 그대로다
+  // (Sidebar.tsx가 하던 5초 폴링 1곳을 여기 1곳으로 옮겼을 뿐, 렌더마다 다시 읽지 않는다는 불변식은
+  // 유지된다. 이 파일은 이미 loadRepos를 Alt+1..9 등 키 핸들러에서 이벤트 단위로 호출하고 있었다).
+  const REPOS_REFRESH_MS = 5000;
+  const [repos, setRepos] = useState(() => loadRepos());
+  useEffect(() => {
+    const id = setInterval(() => setRepos(loadRepos()), REPOS_REFRESH_MS);
+    return () => clearInterval(id);
+  }, []);
 
   // 0.10.4 ST2(결함1 근본수정) — 단일 배열 대신 repoId로 격리된 버퍼(scrollback.ts). 비활성 탭에
   // append해도 다른 탭 버퍼를 건드리지 않으므로, repo 전환 시 화면 이력이 사라지지 않고 백그라운드
@@ -661,252 +676,215 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     setEditorState((s) => ({ ...s, lines: [completed], cursorRow: 0, cursorCol: completed.length }));
   }, [slashCandidates, slashCursorClamped]);
 
+  // 0.10.6 B2 — 판정(classifyKey, keymap.ts)과 실행(아래 switch)을 분리했다. 우선순위 사다리 자체의
+  // 근거(⌃C 전역 최우선·탭전환이 승인보다 우선·슬래시 Tab이 후보0개여도 소비 등)는 keymap.ts에 있다 —
+  // 여기는 각 판정 결과에 대응하는 기존 부수효과를 그대로 옮겨왔을 뿐, 조건이나 순서를 새로 만들지
+  // 않는다(RED-first 계약, test/tui-keymap.test.mjs가 판정 자체를 고정).
   useInput((input, key) => {
-    if (key.ctrl && input === "c") {
-      // ink render()가 exitOnCtrlC:false로 뜨므로(cli.ts) 즉시종료가 아니라 여기서 2단 확인을 직접
-      // 구현한다. 승인 프롬프트·패널이 열려있어도 Ctrl+C는 전역으로 먼저 처리(고무도장 방지 흐름을
-      // 방해하지 않으면서도 항상 탈출구가 있어야 함).
-      if (state.exitConfirmArmed) {
-        process.exit(0);
-      }
-      dispatch({ type: "CTRL_C_PRESSED" });
-      pushLine(tabsRef.current.activeTabId, "🐢 종료하려면 Ctrl+C를 한 번 더 누르세요(2초 내)", "warn");
-      if (exitConfirmTimerRef.current) clearTimeout(exitConfirmTimerRef.current);
-      exitConfirmTimerRef.current = setTimeout(() => {
-        dispatch({ type: "CTRL_C_RESET" });
-      }, 2000);
-      return;
-    }
+    const ctx: KeyRoutingContext = {
+      exitConfirmArmed: state.exitConfirmArmed,
+      hasApproval: state.approval !== null,
+      approvalKind: state.approval?.kind ?? null,
+      approvalEditing,
+      optOutConfirmArmed: optOutConfirmRepoId !== null,
+      isStartRepoTab: tabsRef.current.activeTabId === cwd,
+      panel: state.panel,
+      slashOpen,
+      slashCandidateCount: slashCandidates.length,
+      sidebarFocused,
+      editorEmpty: Editor.isEmpty(editorState),
+    };
+    const action = classifyKey(input, key, ctx);
 
-    // ST11 — 탭 전환 전역키(Alt+1..9, kitty 지원 터미널은 Ctrl+1..9도). 승인 블록보다 먼저 확인한다
-    // (critic 지적: 승인이 모든 입력을 삼켜 다른 탭으로 못 넘어가는 문제 차단) — 이 repo 목록의
-    // N번째로 opt-in/전환(switchToTab이 ensureTab을 경유해 둘 다 처리). 이미 그 탭이면 no-op.
-    // 0.10.3 — 레거시 터미널 인코딩엔 Ctrl+숫자 코드 자체가 없어(C-1은 그냥 '1', C-3은 ESC로 도착)
-    // key.ctrl 분기가 실기에서 절대 발화하지 않았다(2026-07-22 현장보고 이슈③). Alt+숫자는 ESC 접두
-    // (레거시)·CSI ;3u(kitty) 양쪽에서 key.meta로 안정 도착하므로 meta를 1차 바인딩으로 추가한다.
-    // Ctrl 분기는 kitty keyboard protocol 활성 터미널(cli.ts kittyKeyboard:auto)용으로 유지.
-    if ((key.ctrl || key.meta) && /^[1-9]$/.test(input)) {
-      const idx = Number.parseInt(input, 10) - 1;
-      const repos = loadRepos();
-      const target = repos[idx];
-      if (target && target !== tabsRef.current.activeTabId) switchToTab(target);
-      return;
-    }
+    // approval-edit-submit·approval-answer·approval-confirm-selection 3곳이 공유하던 원본 로직
+    // (answer/openEdit 로컬 클로저)을 그대로 유지 — dispatch+resolve, editor-insert+editing 전환을
+    // 여기서만 정의한다.
+    const answer = (choice: ApprovalChoice, editedText?: string) => {
+      dispatch({ type: "APPROVAL_ANSWERED", choice });
+      approvalQueue.current[0]?.resolve({ choice, editedText });
+    };
+    const openEdit = () => {
+      setApprovalEditor(Editor.insertText(Editor.createInitialState(), state.approval?.derivedCase ?? ""));
+      setApprovalEditing(true);
+    };
 
-    // ST11 — opt-out 확인(Ctrl+W). 승인 중엔 시작하지 않는다(동시에 두 y/n 확인이 뜨는 모호함 방지).
-    if (optOutConfirmRepoId) {
-      if (input === "y") {
-        const repoId = optOutConfirmRepoId;
-        setOptOutConfirmRepoId(null);
-        void optOutTab(repoId);
-      } else {
-        setOptOutConfirmRepoId(null);
-        pushLine(tabsRef.current.activeTabId, "🐢 opt-out 취소됨", "dim");
-      }
-      return;
-    }
-    if ((key.ctrl || key.meta) && input === "w" && !state.approval) {
-      const repoId = tabsRef.current.activeTabId;
-      if (repoId === cwd) {
-        pushLine(repoId, "🐢 시작 repo 탭은 닫을 수 없습니다(항상 최소 1탭 유지)", "warn");
+    switch (action.type) {
+      case "ctrl-c-arm": {
+        // ink render()가 exitOnCtrlC:false로 뜨므로(cli.ts) 즉시종료가 아니라 여기서 2단 확인을 직접
+        // 구현한다.
+        dispatch({ type: "CTRL_C_PRESSED" });
+        pushLine(tabsRef.current.activeTabId, "🐢 종료하려면 Ctrl+C를 한 번 더 누르세요(2초 내)", "warn");
+        if (exitConfirmTimerRef.current) clearTimeout(exitConfirmTimerRef.current);
+        exitConfirmTimerRef.current = setTimeout(() => {
+          dispatch({ type: "CTRL_C_RESET" });
+        }, 2000);
         return;
       }
-      setOptOutConfirmRepoId(repoId);
-      pushLine(repoId, `🐢 '${repoId}' 세션을 닫을까요? (y/N — 대기 중인 승인은 거부로 처리됩니다)`, "warn");
-      return;
-    }
+      case "ctrl-c-exit":
+        process.exit(0);
+        return;
 
-    if (state.approval) {
-      const approval = state.approval;
+      case "tab-switch-direct": {
+        // ST11 — 이 repo 목록의 N번째로 opt-in/전환(switchToTab이 ensureTab을 경유해 둘 다 처리).
+        // 이미 그 탭이면 no-op.
+        const repos = loadRepos();
+        const target = repos[action.index];
+        if (target && target !== tabsRef.current.activeTabId) switchToTab(target);
+        return;
+      }
+
+      case "opt-out-confirm-yes": {
+        const repoId = optOutConfirmRepoId as string;
+        setOptOutConfirmRepoId(null);
+        void optOutTab(repoId);
+        return;
+      }
+      case "opt-out-confirm-no":
+        setOptOutConfirmRepoId(null);
+        pushLine(tabsRef.current.activeTabId, "🐢 opt-out 취소됨", "dim");
+        return;
+      case "opt-out-blocked":
+        pushLine(tabsRef.current.activeTabId, "🐢 시작 repo 탭은 닫을 수 없습니다(항상 최소 1탭 유지)", "warn");
+        return;
+      case "opt-out-start": {
+        const repoId = tabsRef.current.activeTabId;
+        setOptOutConfirmRepoId(repoId);
+        pushLine(repoId, `🐢 '${repoId}' 세션을 닫을까요? (y/N — 대기 중인 승인은 거부로 처리됩니다)`, "warn");
+        return;
+      }
+
       // generic 승인엔 편집 대상(derivedCase)이 없어 resolveApproval이 e를 n과 동일(deny) 처리한다
       // (bridge.ts) — ApprovalBox의 GENERIC_LABEL("거부 (e=n)")과 일치시키려면 여기서도 편집 서브플로우
       // 대신 즉시 답변으로 보내야 한다. spec-add만 실제 편집이 유효하다(2차 자체검토로 발견해 수정).
-      const openEdit = () => {
-        setApprovalEditor(Editor.insertText(Editor.createInitialState(), approval.derivedCase ?? ""));
-        setApprovalEditing(true);
-      };
-      const answer = (choice: ApprovalChoice, editedText?: string) => {
-        dispatch({ type: "APPROVAL_ANSWERED", choice });
-        approvalQueue.current[0]?.resolve({ choice, editedText });
-      };
-      if (approvalEditing) {
-        if (key.return) {
-          const text = Editor.getText(approvalEditor);
-          setApprovalEditing(false);
-          answer("e", text);
-          return;
-        }
-        if (key.escape) {
-          setApprovalEditing(false);
-          return;
-        }
+      case "approval-edit-submit": {
+        const text = Editor.getText(approvalEditor);
+        setApprovalEditing(false);
+        answer("e", text);
+        return;
+      }
+      case "approval-edit-cancel":
+        setApprovalEditing(false);
+        return;
+      case "approval-edit-keystroke":
         setApprovalEditor((s) => applyEditorKey(input, key, s));
         return;
-      }
-      if (input === "y" || input === "n" || input === "d") {
-        answer(input as ApprovalChoice);
+      case "approval-answer":
+        answer(action.choice);
         return;
-      }
-      if (input === "e") {
-        if (approval.kind === "spec-add") openEdit();
-        else answer("e");
+      case "approval-open-edit":
+        openEdit();
         return;
-      }
-      if (key.leftArrow) dispatch({ type: "APPROVAL_SELECTION_MOVE", direction: -1 });
-      if (key.rightArrow) dispatch({ type: "APPROVAL_SELECTION_MOVE", direction: 1 });
-      if (key.return) {
+      case "approval-selection-move":
+        dispatch({ type: "APPROVAL_SELECTION_MOVE", direction: action.direction });
+        return;
+      case "approval-confirm-selection": {
+        const approval = state.approval;
+        if (!approval) return;
         const choice = approval.selection;
         if (choice === "e" && approval.kind === "spec-add") {
           openEdit();
           return;
         }
         answer(choice);
+        return;
       }
-      return;
-    }
+      case "approval-swallow":
+        return;
 
-    // 0.10.3 — 패널 토글도 Alt(meta) 폴백 병행. 특히 Ctrl+M은 터미널 레거시 인코딩에서 CR(Enter)과
-    // 동일 바이트라 구분 자체가 불가능했다(이슈④ — 메트릭 패널이 레거시 터미널에선 아예 안 열리고
-    // Enter 제출로 처리됐다). kitty 활성 터미널에서만 Ctrl+M이 CSI 109;5u로 구분 도착한다.
-    if ((key.ctrl || key.meta) && input === "m") {
-      dispatch({ type: "TOGGLE_PANEL", panel: "metrics" });
-      return;
-    }
-    if ((key.ctrl || key.meta) && input === "r") {
-      dispatch({ type: "TOGGLE_PANEL", panel: "repos" });
-      return;
-    }
-    if ((key.ctrl || key.meta) && input === "s") {
-      dispatch({ type: "TOGGLE_PANEL", panel: "skills" });
-      return;
-    }
-    if ((key.ctrl || key.meta) && input === "t") {
-      // 0.11.0(사용자 확정) — 타이틀 헤더 full(압축 워드마크 7행)↔mini(1행) 토글. 시안
-      // 아티팩트 a9ee1e59 — A안(full) 기본, B안(mini)은 이 단축키로만 진입.
-      dispatch({ type: "TOGGLE_TITLE" });
-      return;
-    }
-    // 0.10.4 ST7(개선3-a) — '?' 도움말 패널. 입력창이 비어있을 때만 발동(아니면 물음표 자체를
-    // 타이핑할 수 없어진다 — "이 코드가 맞나요?" 같은 일반 문장에 물음표를 못 쓰는 회귀 방지).
-    if (input === "?" && Editor.isEmpty(editorState)) {
-      dispatch({ type: "TOGGLE_PANEL", panel: "help" });
-      return;
-    }
-    if (state.panel !== "none") {
-      if (key.escape) dispatch({ type: "CLOSE_PANEL" });
+      // 0.10.3 — 패널 토글도 Alt(meta) 폴백 병행. 특히 Ctrl+M은 터미널 레거시 인코딩에서 CR(Enter)과
+      // 동일 바이트라 구분 자체가 불가능했다(이슈④). kitty 활성 터미널에서만 Ctrl+M이 CSI 109;5u로
+      // 구분 도착한다.
+      case "toggle-panel":
+        dispatch({ type: "TOGGLE_PANEL", panel: action.panel });
+        return;
+      case "toggle-title":
+        // 0.11.0(사용자 확정) — 타이틀 헤더 full(압축 워드마크 7행)↔mini(1행) 토글. 시안
+        // 아티팩트 a9ee1e59 — A안(full) 기본, B안(mini)은 이 단축키로만 진입.
+        dispatch({ type: "TOGGLE_TITLE" });
+        return;
+
+      case "panel-close":
+        dispatch({ type: "CLOSE_PANEL" });
+        return;
       // 0.10.4 ST6(개선2) — repos 패널 키보드 선택. Sidebar 내비게이션(SubTask5, 0.10.1)과 동일
       // 전역 인덱스 관례 — computeSidebarWindow가 스크롤 시에도 같은 인덱스 기준을 쓴다.
-      if (state.panel === "repos") {
+      case "repos-panel-cursor": {
         const repos = loadRepos();
-        if (key.upArrow) {
-          setReposPanelCursor((c) => stepBoundedCursor(c, -1, repos.length));
-          return;
-        }
-        if (key.downArrow) {
-          setReposPanelCursor((c) => stepBoundedCursor(c, 1, repos.length));
-          return;
-        }
-        if (key.return) {
-          const target = repos[reposPanelCursor];
-          if (target && target !== tabsRef.current.activeTabId) switchToTab(target);
-          dispatch({ type: "CLOSE_PANEL" });
-          return;
-        }
-      }
-      return;
-    }
-    // SubTask3(0.10.1) — 대화창 스크롤(ⓒ). 승인·패널 열림 중엔 위 두 early return이 이미 이
-    // 지점 도달 자체를 막는다(대화 뷰포트가 그 상태에선 안 보이므로 스크롤 대상이 없다는 게
-    // braintrust 권장 정책 — 실기 검증에서 어색하면 뒤집을 수 있는 결정, computeChatViewport가
-    // 과대 offset을 항상 안전하게 클램프하므로 여기서 상한을 알 필요는 없다).
-    if (key.pageUp) {
-      setScrollOffset((o) => o + PGSCROLL_STEP);
-      return;
-    }
-    if (key.pageDown) {
-      setScrollOffset((o) => Math.max(0, o - PGSCROLL_STEP));
-      return;
-    }
-    // 0.10.4 ST5(개선1) — 슬래시 드롭다운 키 라우팅. Tab(사이드바 포커스 토글) 앞에 둬야 드롭다운이
-    // 열려 있을 때 Tab이 완성 선택으로 먼저 소비된다(계획 명시 순서). ↑/↓/Esc는 후보 유무와 무관하게
-    // 항상 드롭다운이 처리하고, Enter/Tab은 후보가 있을 때만 완성으로 소비한다 — 후보 0개(예: 오타)면
-    // 여기서 return하지 않고 아래로 흘려보내 사용자가 리터럴 텍스트를 그대로 제출할 수 있게 한다.
-    if (slashOpen) {
-      if (key.upArrow) {
-        setSlashCursor((c) => stepBoundedCursor(c, -1, slashCandidates.length));
+        setReposPanelCursor((c) => stepBoundedCursor(c, action.direction, repos.length));
         return;
       }
-      if (key.downArrow) {
-        setSlashCursor((c) => stepBoundedCursor(c, 1, slashCandidates.length));
+      case "repos-panel-select": {
+        const repos = loadRepos();
+        const target = repos[reposPanelCursor];
+        if (target && target !== tabsRef.current.activeTabId) switchToTab(target);
+        dispatch({ type: "CLOSE_PANEL" });
         return;
       }
-      if (key.escape) {
+      case "panel-swallow":
+        return;
+
+      // SubTask3(0.10.1) — 대화창 스크롤(ⓒ). computeChatViewport가 과대 offset을 항상 안전하게
+      // 클램프하므로 여기서 상한을 알 필요는 없다.
+      case "scroll":
+        if (action.direction === 1) setScrollOffset((o) => o + PGSCROLL_STEP);
+        else setScrollOffset((o) => Math.max(0, o - PGSCROLL_STEP));
+        return;
+
+      case "slash-cursor":
+        setSlashCursor((c) => stepBoundedCursor(c, action.direction, slashCandidates.length));
+        return;
+      case "slash-suppress":
         setSlashSuppressedFor(editorState.lines[0] ?? "");
         return;
-      }
-      // 리팩토링(2026-07-24, 코드리뷰 지적) — Tab은 후보 0개(오타 등)여도 드롭다운이 열려있는 한
-      // 항상 여기서 소비해야 한다. Enter는 후보 0개일 때 "리터럴 그대로 제출"로 아래로 흘려보내야
-      // 하므로(위 주석) 조건이 다르지만, Tab은 애초에 제출 키가 아니라 흘려보내면 아래 사이드바 포커스
-      // 토글(key.tab)로 새 — 슬래시 조합 중 Tab이 뜬금없이 사이드바를 토글하는 버그였다.
-      if (key.tab) {
+      case "slash-complete":
         applySlashCompletion();
         return;
-      }
-      if (key.return && slashCandidates.length > 0) {
-        applySlashCompletion();
+
+      // SubTask5(0.10.1) — 사이드바 repos 키보드 내비게이션(Tab 포커스 토글).
+      case "sidebar-focus-toggle":
+        setSidebarFocused((f) => !f);
+        return;
+      // ⌃1..9 직행 단축키(tab-switch-direct)와 달리 이 경로는 창이 스크롤돼 9번째 이후로 밀린 repo도
+      // 커서로 닿을 수 있다 — Sidebar.tsx computeSidebarWindow가 같은 전역 인덱스를 쓴다.
+      case "sidebar-cursor": {
+        const repos = loadRepos();
+        setSidebarCursor((c) => stepBoundedCursor(c, action.direction, repos.length));
         return;
       }
-    }
-    // SubTask5(0.10.1) — 사이드바 repos 키보드 내비게이션(Tab 포커스 토글). 승인·패널 열림 중엔
-    // 위 early return들이 이미 이 지점 도달을 막는다(PgUp/PgDn과 동일 근거) — 별도 가드 불필요.
-    if (key.tab) {
-      setSidebarFocused((f) => !f);
-      return;
-    }
-    if (sidebarFocused) {
-      // ⌃1..9 직행 단축키(위에서 이미 처리됨)와 달리 이 경로는 창이 스크롤돼 9번째 이후로 밀린
-      // repo도 커서로 닿을 수 있다 — Sidebar.tsx computeSidebarWindow가 같은 전역 인덱스를 쓴다.
-      const repos = loadRepos();
-      if (key.upArrow) {
-        setSidebarCursor((c) => stepBoundedCursor(c, -1, repos.length));
-        return;
-      }
-      if (key.downArrow) {
-        setSidebarCursor((c) => stepBoundedCursor(c, 1, repos.length));
-        return;
-      }
-      if (key.return) {
+      case "sidebar-select": {
+        const repos = loadRepos();
         const target = repos[sidebarCursor];
         if (target && target !== tabsRef.current.activeTabId) switchToTab(target);
         setSidebarFocused(false);
         return;
       }
-      if (key.escape) {
+      case "sidebar-unfocus":
         setSidebarFocused(false);
         return;
-      }
-      // 포커스 중엔 그 외 키(타이핑 등)가 에디터로 새지 않게 전부 여기서 삼킨다.
-      return;
-    }
-    if (key.escape) {
-      // ST3(0.9.2)→ST1(0.9.4 T1로 대체) — 스트리밍 중일 때만 중단. 유휴 상태에서 Esc는 여전히
-      // no-op(전역 종료 단축키 아님 — Ctrl+C 2단 확인종료가 그 역할). AbortController.abort() 대신
+      case "sidebar-swallow":
+        return;
+
+      // ST3(0.9.2)→ST1(0.9.4 T1로 대체) — 스트리밍 중일 때만 중단. 유휴 상태에서 Esc는 여전히 no-op
+      // (전역 종료 단축키 아님 — Ctrl+C 2단 확인종료가 그 역할). AbortController.abort() 대신
       // EngineSession.interrupt()를 쓴다(ST0 스파이크 실측: SDK interrupt()는 non-blocking, throw 없이
       // result{error_during_execution}으로 종료 — engine.ts buildEngineResultFromResult가 재해석).
-      if (state.streaming) void sessionsRef.current.get(tabsRef.current.activeTabId)?.interrupt();
-      return;
+      case "interrupt-stream":
+        if (state.streaming) void sessionsRef.current.get(tabsRef.current.activeTabId)?.interrupt();
+        return;
+
+      case "editor-newline":
+        setEditorState(Editor.newline(editorState));
+        return;
+      case "editor-submit": {
+        const { text, state: nextEditor } = Editor.commitSubmit(editorState);
+        setEditorState(nextEditor);
+        if (text && !state.streaming) void submit(text);
+        return;
+      }
+      case "editor-keystroke":
+        setEditorState((s) => applyEditorKey(input, key, s));
+        return;
     }
-    if (key.return && key.shift) {
-      setEditorState(Editor.newline(editorState));
-      return;
-    }
-    if (key.return) {
-      const { text, state: nextEditor } = Editor.commitSubmit(editorState);
-      setEditorState(nextEditor);
-      if (text && !state.streaming) void submit(text);
-      return;
-    }
-    setEditorState((s) => applyEditorKey(input, key, s));
   });
 
   // SubTask2(0.10.1)→0.11.0 — ChatBox와 좌측 스택(카드+사이드바)이 같은 세로 높이를 공유한다
@@ -917,9 +895,27 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // (구 splashDismissed 조건 분기 폐기) 이제 두 컬럼 모두 정적 산술로 확정할 수 있다 — 측정을
   // 완전히 제거한다. leftStack Box에 이 값을 height로 명시하면, Sidebar 내부 flexGrow 스페이서가
   // 남는 여백을 흡수해 마스코트가 항상 컬럼 하단에 붙는다(레퍼런스: Sidebar.tsx 최하단 스페이서).
-  const chatHeaderRows = computeHeaderRows(frameLayout.innerColumns, state.titleMode);
+  // 반응형 강등(0.10.6 A1/A2) — cardRows는 formatWelcomeCard(...).length+2(round 테두리 상하 2행,
+  // WelcomeCard.tsx와 동일 관례)로 실측한다. Sidebar 콘텐츠(repo 목록)는 상한(SIDEBAR_MAX_LIST_ROWS)
+  // 근사만 쓴다 — Sidebar.tsx가 repos.json을 자체 폴링으로만 들고 있어(0.10.5 동기 I/O 재발 방지
+  // 리팩토링) 여기서 실제 repos.length를 또 읽으면 그 버그가 되돌아온다(format.ts 주석 참조).
+  const cardRows = formatWelcomeCard(state.specCount, state.deferCount, cardSkills).length + 2;
+  const sidebarContentRows = computeSidebarListRows(repos.length);
+  const responsiveLayout = computeResponsiveLayout(
+    rows,
+    frameLayout.innerColumns,
+    frameLayout.bandRows,
+    cardRows,
+    sidebarContentRows,
+    state.titleMode,
+  );
+  const chatHeaderRows = computeHeaderRows(frameLayout.innerColumns, responsiveLayout.effectiveTitleMode);
   const chatTotalRows = computeChatRegionRows(rows, frameLayout.bandRows, chatHeaderRows);
-  const chatOuterColumns = Math.max(0, computeContentColumns(frameLayout.innerColumns, SIDEBAR_COLUMNS) - CHAT_COLUMN_GAP);
+  const sidebarColumns = responsiveLayout.showSidebar ? SIDEBAR_COLUMNS : 0;
+  const chatOuterColumns = Math.max(
+    0,
+    computeContentColumns(frameLayout.innerColumns, sidebarColumns) - (responsiveLayout.showSidebar ? CHAT_COLUMN_GAP : 0),
+  );
   const chatInnerColumns = Math.max(1, chatOuterColumns - 4); // ChatBox 테두리2+paddingX(1×2)
   // 입력창(또는 승인박스)이 실제로 차지할 행수 — 프롬프트("❯ ")·커서(█)까지 포함해 에디터 텍스트를
   // 표시폭으로 랩한 결과다. shift+↵ 개행·긴 입력 랩·승인박스 프리뷰로 하단부가 늘어나는 만큼 대화
@@ -966,7 +962,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // 있다"를 전제로 위로 이동량을 계산하는데, 우리 레이아웃은 출력이 터미널 행수를 정확히 채우는
     // 정적 설계라 커서가 최하단 행에서 클램프돼 전제가 1행 깨진다 — 실측 y=33 vs 실제 입력행 34.
     setCursorPosition({
-      x: frameLayout.gutterColumns + SIDEBAR_COLUMNS + CHAT_COLUMN_GAP + 2 + 2 + inputLayout.caretCol,
+      x: frameLayout.gutterColumns + sidebarColumns + (responsiveLayout.showSidebar ? CHAT_COLUMN_GAP : 0) + 2 + 2 + inputLayout.caretCol,
       y: frameLayout.bandRows + chatHeaderRows + 2 + chatViewportRows + 1 + dropdownRows + inputLayout.caretRow + 1,
     });
   } else {
@@ -997,7 +993,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           여백을 '+' 채움 열로 직접 그려야 프레임 텍스처가 Title Area 안까지 이어진다(사용자
           요청 — 외곽선뿐 아니라 내부 배경도 채움). 상단 여백행(구 topMarginRows)은 0.11.0 헤더
           압축으로 제거됐다. */}
-      <SplashHeader columns={frameLayout.innerColumns} version={version} mode={state.titleMode} leftMargin={HERO_LEFT_MARGIN} />
+      {/* mode={responsiveLayout.effectiveTitleMode} — 사용자 선택(state.titleMode, ⌃T로만 바뀜)과
+          렌더 강등값을 분리한다(0.10.6 A2, scope-critic 확인 계약). 2단 강등(저높이)일 때만
+          effectiveTitleMode가 "mini"로 표시값을 오버라이드하고, model.ts의 실제 titleMode는
+          그대로다 — 리사이즈로 복귀하면 사용자가 골랐던 모드가 그대로 되살아난다. */}
+      <SplashHeader columns={frameLayout.innerColumns} version={version} mode={responsiveLayout.effectiveTitleMode} leftMargin={HERO_LEFT_MARGIN} />
       {/* ST10(0.10.0 A3b) — 터틀 덱 2컬럼: 좌측 상시 스택(카드+사이드바, 고정폭)+우측 대화 컬럼
           (가변폭, flexGrow). 사이드바는 토글 패널 시스템(state.panel)과 별개 축이라 ⌃M/⌃R/⌃S
           기존 동작은 무변경. SubTask10 — 카드가 사이드바와 동일폭 34로 이 스택에 합류한다. */}
@@ -1014,10 +1014,21 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         {/* height=chatTotalRows(0.11.0 정적 전환) — 이 컬럼과 ChatBox가 같은 높이를 갖도록 명시
             고정한다. WelcomeCard·Sidebar 실콘텐츠가 이보다 짧으면 Sidebar 내부 flexGrow
             스페이서가 남는 세로공간을 흡수해 마스코트를 컬럼 하단에 붙인다. */}
-        <Box flexDirection="column" flexShrink={0} height={chatTotalRows}>
-          <WelcomeCard specCount={state.specCount} deferCount={state.deferCount} skills={cardSkills} />
-          <Sidebar cwd={cwd} tabs={tabs} focused={sidebarFocused} cursor={sidebarCursor} />
-        </Box>
+        {/* showSidebar=false(0.10.6 A2, ⓑ 저폭 강등) — 카드까지 포함한 좌측 스택 전체를 숨긴다.
+            카드만 남기고 사이드바만 숨기는 절충은 34열을 그대로 점유해 대화 컬럼에 폭을 돌려주는
+            목적을 달성하지 못한다. */}
+        {/* overflow="hidden"(0.10.6 A2 tmux 실측) — computeResponsiveLayout의 2단(마스코트 숨김+
+            타이틀 mini)까지 다 써도 극저행(예: 24행+스킬 3개+repo 여러 개)에서 1~2행 부족할 수
+            있는 잔여 한계가 실측으로 확인됐다(PREVIEW_RESERVED_ROWS류 "완전 해소 아님" 전례와 동일
+            성격). ChatBox가 이미 쓰는 최종 방어선(콘텐츠 영역 고정+클리핑)을 여기도 적용해, 예산을
+            살짝 벗어나도 사이드바 테두리가 프레임 밖으로 넘쳐 옆 대화 컬럼을 침범하는 대신 박스
+            안에서 조용히 잘리게 한다. */}
+        {responsiveLayout.showSidebar && (
+          <Box flexDirection="column" flexShrink={0} height={chatTotalRows} overflow="hidden">
+            <WelcomeCard specCount={state.specCount} deferCount={state.deferCount} skills={cardSkills} />
+            <Sidebar cwd={cwd} tabs={tabs} repos={repos} focused={sidebarFocused} cursor={sidebarCursor} showMascot={responsiveLayout.showMascot} />
+          </Box>
+        )}
         {/* SubTask2(0.10.1) — 대화영역 박스 상주(시안 ff0eb0b1). Static을 완전히 걷어내고 ChatBox가
             scrollback 전량을 시각행 윈도잉으로 그린다. 패널·승인은 대화 뷰포트/입력창 자리를
             대체하되 ChatBox 자체 테두리·행 예산은 그대로다(ⓓ, 상세는 ChatBox.tsx 주석). */}

@@ -51,7 +51,7 @@ import type { CaseVerdict } from "./types.js";
 import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER, assessRepoHealth, GBC_SKILL_NAMES } from "./install.js";
 import { readProjectSettings } from "./notice.js";
 import { refreshCacheIfStale } from "./version.js";
-import { logEvent, parseEvents, computeMetrics, tagEventsWithRepo } from "./metrics.js";
+import { logEvent, computeMetrics, tagEventsWithRepo, readEventsMerged, eventsPath } from "./metrics.js";
 import type { GateEvent, Metrics } from "./metrics.js";
 import type { EventKind } from "./metrics.js";
 import { nowIso, nowStamp } from "./time.js";
@@ -752,9 +752,9 @@ function cmdGateReview(cwd: string, args: string[]): void {
  */
 function loadMetricsEvents(cwd: string, all: boolean): { events: GateEvent[]; scope: string; source: string } {
   if (!all) {
-    const eventsPath = join(cwd, ".gbc", "events.jsonl");
     return {
-      events: parseEvents(existsSync(eventsPath) ? readFileSync(eventsPath, "utf8") : ""),
+      // readEventsMerged(0.10.6 A4) — 로테이션된 .1 세대가 있으면 현행 세대와 병합해 읽는다(metrics.ts).
+      events: readEventsMerged(cwd),
       scope: cwd,
       source: ".gbc/events.jsonl",
     };
@@ -771,12 +771,11 @@ function loadMetricsEvents(cwd: string, all: boolean): { events: GateEvent[]; sc
         skipped++;
         continue;
       }
-      const p = join(abs, ".gbc", "events.jsonl");
-      if (!existsSync(p)) {
+      if (!existsSync(eventsPath(abs))) {
         skipped++;
         continue;
       }
-      merged.push(...tagEventsWithRepo(parseEvents(readFileSync(p, "utf8")), abs));
+      merged.push(...tagEventsWithRepo(readEventsMerged(abs), abs));
       included++;
     } catch {
       skipped++; // repo별 읽기 실패는 조용히 skip(fail-silent)
@@ -859,8 +858,9 @@ async function cmdScore(args: string[]): Promise<void> {
     console.log("🐢 채점할 extraction이 없습니다 — A-mode 세션('gbc run')이 .gbc/extraction.jsonl을 남깁니다.");
     return;
   }
-  const eventsPath = join(cwd, ".gbc", "events.jsonl");
-  const events = parseEvents(existsSync(eventsPath) ? readFileSync(eventsPath, "utf8") : "");
+  // readEventsMerged(0.10.6 A4) — 로테이션된 .1 세대가 있으면 병합해 읽는다. extraction은 의도적으로
+  // 현행 세대만(위 records) — 채점 후보 소스라 최근분으로 충분하다(metrics.ts readEventsMerged 주석 참조).
+  const events = readEventsMerged(cwd);
   const cands = selectScoringCandidates(joinBySession(events, records));
   if (cands.length === 0) {
     console.log("🐢 채점 후보가 없습니다 — 적용 판정(pass/cached)과 편집이 있는 A-mode 세션이 필요합니다.");

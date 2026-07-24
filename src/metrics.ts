@@ -1,10 +1,11 @@
 // 거북이코드 계측 레이어 (M1~M3) — B-모드 hook 관측 프록시.
 // 1차 자산 = 원시 events.jsonl(append-only). 메트릭은 그 위의 thin 집계.
 // ⚠️ 진짜 M1(post-gate 시나리오위반율)은 A-mode 사후대조 필요 — B-모드는 churn 약신호만.
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDir } from "./store.js";
 import { serializeCapped } from "./jsonl-line.js";
+import { rotateJsonlIfOversize } from "./jsonl-rotate.js";
 
 /** missing[] 캡 (항목 수 / 항목당 길이) */
 const MAX_MISSING_ITEMS = 20;
@@ -246,16 +247,46 @@ export function lastAppliedEditAt(events: GateEvent[]): string | null {
   return latest;
 }
 
-// events.jsonl 무제한 성장 갭(인프라 리뷰 지적, confidence 65)은 리팩토링 범위(기능 무변경) 밖이라
-// 이 배치에서 다루지 않는다 — scope-critic 판정(2026-07-24): 로테이션 도입은 온-디스크 보존 정책을
-// 바꾸는 실질 기능 변경이라 별도 승인 SubTask로 분리해야 한다. 필요 시 다음 페이즈에서 재검토.
+/** events.jsonl 파일 상한(바이트). 초과 시 .1로 로테이션(0.10.6 A3, extraction.ts MAX_EXTRACTION_BYTES
+ * 미러) — events.jsonl 무제한 성장 갭(인프라 리뷰 지적)은 리팩토링 배치(2026-07-24)에서 "기능 변경은
+ * 범위 밖"이라는 scope-critic 판정으로 한 차례 리버트됐다가, 이번 0.10.6 A3에서 정식 승인 SubTask로
+ * 재도입한다. */
+export const MAX_EVENTS_BYTES = 5 * 1024 * 1024;
 
-/** events.jsonl에 이벤트 1줄 append. 실패는 무시(계측이 개발 흐름을 막지 않음). */
-export function logEvent(cwd: string, event: GateEvent): void {
+/** .gbc/events.jsonl 경로. */
+export function eventsPath(cwd: string): string {
+  return join(gbcDir(cwd), "events.jsonl");
+}
+
+/** events.jsonl에 이벤트 1줄 append — 상한 이상이면 append 전에 1세대 로테이션(jsonl-rotate.ts,
+ * extraction.ts와 동일 정책). 실패는 무시(계측이 개발 흐름을 막지 않음). */
+export function logEvent(cwd: string, event: GateEvent, opts: { maxBytes?: number } = {}): void {
   if (process.env.GBC_NO_METRICS === "1") return;
+  const maxBytes = opts.maxBytes ?? MAX_EVENTS_BYTES;
   try {
-    appendFileSync(join(gbcDir(cwd), "events.jsonl"), serializeEvent(event) + "\n");
+    const path = eventsPath(cwd);
+    rotateJsonlIfOversize(path, maxBytes);
+    appendFileSync(path, serializeEvent(event) + "\n");
   } catch {
     /* 계측 실패는 무시 */
   }
+}
+
+/**
+ * 로테이션된 .1 세대(있으면)+현행 세대를 시간순(과거→최근)으로 병합해 읽는다(0.10.6 A4) —
+ * events.jsonl이 MAX_EVENTS_BYTES를 넘겨 로테이션된 뒤에도 M1(churn)·M2/M3 집계가 넘어간 이벤트를
+ * 계속 반영하게 한다. "현행 세대만 읽기"는 로테이션 시점마다 오탐율·churn 분모가 조용히 리셋되는
+ * 관측 결함이라 기각했다(설계 결정, plan 단계). .1 세대가 없으면(로테이션 미발생 — 흔한 경우) 기존
+ * 동작(현행 세대만)과 동일하다. 1세대 로테이션이라 병합 총량도 ≤2×MAX_EVENTS_BYTES로 유계다.
+ *
+ * extraction.ts 소비처(cmdScore의 parseExtraction)는 여전히 현행 세대만 읽는 비대칭이 의도돼 있다 —
+ * extraction은 채점 후보 소스라 최근분으로 충분하지만, events는 집계 1차 자산이라 연속성이 더
+ * 중요하다(0.10.6 plan 설계 근거).
+ */
+export function readEventsMerged(cwd: string): GateEvent[] {
+  const path = eventsPath(cwd);
+  const rotatedPath = path.replace(/\.jsonl$/, ".1.jsonl");
+  const rotated = existsSync(rotatedPath) ? parseEvents(readFileSync(rotatedPath, "utf8")) : [];
+  const current = existsSync(path) ? parseEvents(readFileSync(path, "utf8")) : [];
+  return [...rotated, ...current];
 }

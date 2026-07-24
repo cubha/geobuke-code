@@ -65,7 +65,7 @@ import {
   writeVersionCache,
   shouldRefreshCache,
 } from "../dist/version.js";
-import { serializeEvent, parseEvents, computeMetrics, logEvent, tagEventsWithRepo } from "../dist/metrics.js";
+import { serializeEvent, parseEvents, computeMetrics, logEvent, tagEventsWithRepo, readEventsMerged, eventsPath } from "../dist/metrics.js";
 import { goldenCaseId, diffVerdict, upsertGolden, summarizeReplay } from "../dist/golden.js";
 import { resolveApiKey, safeModel, buildCliInvocation } from "../dist/judge.js";
 import { normalizeCase, MAX_CASE } from "../dist/text.js";
@@ -1418,6 +1418,61 @@ test("logEvent: GBC_NO_METRICS=1이면 기록 안 함(opt-out)", () => {
   } finally {
     if (prev === undefined) delete process.env.GBC_NO_METRICS;
     else process.env.GBC_NO_METRICS = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("logEvent: 상한 이상이면 append 전에 1세대 로테이션(.jsonl→.1.jsonl)한다(0.10.6 A3)", () => {
+  const dir = tmp();
+  try {
+    // maxBytes를 인위적으로 작게 잡아 두 번째 append에서 로테이션이 발동하도록 유도한다.
+    logEvent(dir, { at: "t1", session: "S", specHash: "h", kind: "gate", decision: "pass" }, { maxBytes: 10 });
+    logEvent(dir, { at: "t2", session: "S", specHash: "h", kind: "gate", decision: "pass" }, { maxBytes: 10 });
+    const rotated = readFileSync(eventsPath(dir).replace(/\.jsonl$/, ".1.jsonl"), "utf8");
+    assert.match(rotated, /"at":"t1"/);
+    const current = readFileSync(eventsPath(dir), "utf8");
+    assert.match(current, /"at":"t2"/);
+    assert.doesNotMatch(current, /"at":"t1"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 0.10.6 A4(TDD) — 로테이션된 .1 세대가 있으면 현행 세대와 시간순(과거→최근) 병합해 읽는다.
+// M1(churn)·M2/M3 집계가 로테이션 이후에도 넘어간 이벤트를 계속 반영해야 오탐율 분모가 로테이션
+// 시점마다 조용히 리셋되는 관측 결함(plan 단계에서 지적된 설계 결정)을 피한다.
+test("readEventsMerged: .1 세대가 없으면 현행 세대만 반환한다(로테이션 미발생 — 흔한 경우)", () => {
+  const dir = tmp();
+  try {
+    logEvent(dir, { at: "t1", session: "S", specHash: "h", kind: "gate", decision: "pass" });
+    const evs = readEventsMerged(dir);
+    assert.equal(evs.length, 1);
+    assert.equal(evs[0].at, "t1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readEventsMerged: .1 세대+현행 세대를 과거→최근 순서로 병합한다", () => {
+  const dir = tmp();
+  try {
+    logEvent(dir, { at: "t1", session: "S", specHash: "h", kind: "gate", decision: "pass" }, { maxBytes: 10 });
+    logEvent(dir, { at: "t2", session: "S", specHash: "h", kind: "gate", decision: "pass" }, { maxBytes: 10 });
+    const evs = readEventsMerged(dir);
+    assert.deepEqual(
+      evs.map((e) => e.at),
+      ["t1", "t2"],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readEventsMerged: 파일이 전혀 없으면(최초 실행) 빈 배열", () => {
+  const dir = tmp();
+  try {
+    assert.deepEqual(readEventsMerged(dir), []);
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
