@@ -139,12 +139,19 @@ function detectGit(cwd: string): { branch: string; dirty: boolean } {
   }
 }
 
-function applyEditorKey(input: string, key: Key, s: EditorState): EditorState {
+// 리팩토링(2026-07-24) — repos 패널·사이드바·슬래시 드롭다운 3곳이 각각 복붙하던 "↑/↓ 경계클램프
+// 커서 이동"(Math.max(0,c-1) / Math.min(Math.max(0,len-1),c+1)) 산술을 공용화(R1).
+function stepBoundedCursor(current: number, delta: -1 | 1, length: number): number {
+  return Math.max(0, Math.min(Math.max(0, length - 1), current + delta));
+}
+
+export function applyEditorKey(input: string, key: Key, s: EditorState): EditorState {
   if (key.leftArrow) return Editor.moveCursorLeft(s);
   if (key.rightArrow) return Editor.moveCursorRight(s);
   if (key.upArrow) return Editor.arrowUp(s);
   if (key.downArrow) return Editor.arrowDown(s);
-  if (key.backspace || key.delete) return Editor.backspace(s);
+  if (key.delete) return Editor.deleteForward(s);
+  if (key.backspace) return Editor.backspace(s);
   if (input && !key.ctrl && !key.meta) return Editor.insertText(s, input);
   return s;
 }
@@ -563,13 +570,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     [getOrCreateSession, pushLine, pushSegments, commitStream, slashSkills],
   );
 
-  // ST11 — 탭 전환/opt-in. TuiState를 새 탭 기준으로 완전히 재시드한다(model.ts TAB_SWITCHED).
-  // 0.10.4 ST2 — scrollback은 더 이상 초기화하지 않는다(결함1 근본수정): per-repo 버퍼(scrollback.ts)
-  // 덕분에 화면 이력이 repoId별로 그대로 보존되고, 렌더가 activeTabId 버퍼로 자동 전환된다.
-  // ensureTab이 이미 등록된 탭이면 no-op이라 기존 세션은 그대로 살아있다.
-  const switchToTab = useCallback(
+  // 리팩토링(2026-07-24) — switchToTab/optOutTab이 각각 독립적으로 복붙하던 "detectGit→
+  // TAB_SWITCHED 디스패치→scrollOffset 리셋" 5줄 시퀀스를 공용 콜백으로 추출(R1 중복 제거).
+  // 0.10.4 ST2(결함1) — 전환 안내 리셋 폐기(사용자 확정). per-repo 버퍼(scrollback.ts)가 그 탭의
+  // 이력을 그대로 보존하므로 지울 이유가 없다 — 지금 어느 repo에 있는지는 사이드바 ❯·statusline이
+  // 이미 표시한다.
+  const dispatchTabSwitch = useCallback(
     (repoId: string) => {
-      setTabs((prev) => setActiveTab(ensureTab(prev, repoId), repoId));
       const g = detectGit(repoId);
       dispatch({
         type: "TAB_SWITCHED",
@@ -580,12 +587,21 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         specCount: readSpecCases(repoId).length,
         deferCount: activeDeferItems(repoId).length,
       });
-      // 0.10.4 ST2(결함1) — 전환 안내 리셋 폐기(사용자 확정). per-repo 버퍼(scrollback.ts)가 그
-      // 탭의 이력을 그대로 보존하므로 지울 이유가 없다 — 지금 어느 repo에 있는지는 사이드바 ❯·
-      // statusline이 이미 표시한다.
-      setScrollOffset(0); // SubTask3 — 탭 전환 시에도 대화창 최하단으로.
+      setScrollOffset(0); // SubTask3 — 탭 전환 시 대화창 최하단으로.
     },
     [model],
+  );
+
+  // ST11 — 탭 전환/opt-in. TuiState를 새 탭 기준으로 완전히 재시드한다(model.ts TAB_SWITCHED).
+  // 0.10.4 ST2 — scrollback은 더 이상 초기화하지 않는다(결함1 근본수정): per-repo 버퍼(scrollback.ts)
+  // 덕분에 화면 이력이 repoId별로 그대로 보존되고, 렌더가 activeTabId 버퍼로 자동 전환된다.
+  // ensureTab이 이미 등록된 탭이면 no-op이라 기존 세션은 그대로 살아있다.
+  const switchToTab = useCallback(
+    (repoId: string) => {
+      setTabs((prev) => setActiveTab(ensureTab(prev, repoId), repoId));
+      dispatchTabSwitch(repoId);
+    },
+    [dispatchTabSwitch],
   );
 
   // ST11 — opt-out 시퀀스: 이 repo에 대기 중인 승인을 전부 거부로 플러시 → 세션 interrupt → close.
@@ -611,24 +627,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       }
       setTabs((prev) => {
         const next = removeTab(prev, repoId);
-        if (next.activeTabId !== prev.activeTabId) {
-          const g = detectGit(next.activeTabId);
-          dispatch({
-            type: "TAB_SWITCHED",
-            dir: next.activeTabId,
-            branch: g.branch,
-            dirty: g.dirty,
-            model: model ?? "",
-            specCount: readSpecCases(next.activeTabId).length,
-            deferCount: activeDeferItems(next.activeTabId).length,
-          });
-          // 0.10.4 ST2 — 전환 안내 리셋 폐기(switchToTab과 동일 근거).
-          setScrollOffset(0); // SubTask3 — opt-out 후 활성 탭이 바뀔 때도 최하단으로.
-        }
+        if (next.activeTabId !== prev.activeTabId) dispatchTabSwitch(next.activeTabId);
         return next;
       });
     },
-    [model],
+    [dispatchTabSwitch],
   );
 
   // 0.10.4 ST5(개선1) — 슬래시 드롭다운 판정(파생 상태, editorState 첫 줄에서 매 렌더 재계산).
@@ -648,6 +651,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   useEffect(() => {
     setSlashCursor(0);
   }, [editorState.lines[0]]);
+
+  // 리팩토링(2026-07-24) — Tab/Enter 두 완성 경로가 복붙하던 "커서 위치 후보→completeSlashText→
+  // 에디터 치환" 3줄을 공용화(R1). 후보 0개일 때는 no-op(호출측이 그 경우 호출 여부를 결정).
+  const applySlashCompletion = useCallback(() => {
+    if (slashCandidates.length === 0) return;
+    const target = slashCandidates[slashCursorClamped];
+    const completed = completeSlashText(target.name);
+    setEditorState((s) => ({ ...s, lines: [completed], cursorRow: 0, cursorCol: completed.length }));
+  }, [slashCandidates, slashCursorClamped]);
 
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
@@ -787,11 +799,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       if (state.panel === "repos") {
         const repos = loadRepos();
         if (key.upArrow) {
-          setReposPanelCursor((c) => Math.max(0, c - 1));
+          setReposPanelCursor((c) => stepBoundedCursor(c, -1, repos.length));
           return;
         }
         if (key.downArrow) {
-          setReposPanelCursor((c) => Math.min(Math.max(0, repos.length - 1), c + 1));
+          setReposPanelCursor((c) => stepBoundedCursor(c, 1, repos.length));
           return;
         }
         if (key.return) {
@@ -821,21 +833,27 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // 여기서 return하지 않고 아래로 흘려보내 사용자가 리터럴 텍스트를 그대로 제출할 수 있게 한다.
     if (slashOpen) {
       if (key.upArrow) {
-        setSlashCursor((c) => Math.max(0, c - 1));
+        setSlashCursor((c) => stepBoundedCursor(c, -1, slashCandidates.length));
         return;
       }
       if (key.downArrow) {
-        setSlashCursor((c) => Math.min(Math.max(0, slashCandidates.length - 1), c + 1));
+        setSlashCursor((c) => stepBoundedCursor(c, 1, slashCandidates.length));
         return;
       }
       if (key.escape) {
         setSlashSuppressedFor(editorState.lines[0] ?? "");
         return;
       }
-      if ((key.return || key.tab) && slashCandidates.length > 0) {
-        const target = slashCandidates[slashCursorClamped];
-        const completed = completeSlashText(target.name);
-        setEditorState((s) => ({ ...s, lines: [completed], cursorRow: 0, cursorCol: completed.length }));
+      // 리팩토링(2026-07-24, 코드리뷰 지적) — Tab은 후보 0개(오타 등)여도 드롭다운이 열려있는 한
+      // 항상 여기서 소비해야 한다. Enter는 후보 0개일 때 "리터럴 그대로 제출"로 아래로 흘려보내야
+      // 하므로(위 주석) 조건이 다르지만, Tab은 애초에 제출 키가 아니라 흘려보내면 아래 사이드바 포커스
+      // 토글(key.tab)로 새 — 슬래시 조합 중 Tab이 뜬금없이 사이드바를 토글하는 버그였다.
+      if (key.tab) {
+        applySlashCompletion();
+        return;
+      }
+      if (key.return && slashCandidates.length > 0) {
+        applySlashCompletion();
         return;
       }
     }
@@ -850,11 +868,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       // repo도 커서로 닿을 수 있다 — Sidebar.tsx computeSidebarWindow가 같은 전역 인덱스를 쓴다.
       const repos = loadRepos();
       if (key.upArrow) {
-        setSidebarCursor((c) => Math.max(0, c - 1));
+        setSidebarCursor((c) => stepBoundedCursor(c, -1, repos.length));
         return;
       }
       if (key.downArrow) {
-        setSidebarCursor((c) => Math.min(Math.max(0, repos.length - 1), c + 1));
+        setSidebarCursor((c) => stepBoundedCursor(c, 1, repos.length));
         return;
       }
       if (key.return) {

@@ -2,10 +2,11 @@
 // 핵심 불변식: gbc는 테스트를 *실행하지 않는다*. 표준 결과 포맷(JUnit XML)을 *읽고*, 러너가 없으면
 // LLM 독해(reviewed)로 경량 판정하거나 unverifiable로 정직 보고한다(provider 패턴·RCE 차단·이식성).
 import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import type { CaseBinding, CaseVerdict, VerifyReport, VerifyProvenance, ReviewVerdict } from "./types.js";
 import { readSpecCases } from "./spec.js";
 import { readVerifyResults, statVerifyResults, JUNIT_DEFAULT_REL } from "./junit.js";
+import { isWithinCwd } from "./store.js";
 import { judgeReviewed } from "./judge.js";
 import { parseEvents, lastAppliedEditAt } from "./metrics.js";
 import { nowIso } from "./time.js";
@@ -120,7 +121,7 @@ export async function runVerify(cwd: string, opts: VerifyOpts = {}): Promise<Ver
       // 보안: spec.md는 커밋/PR 기여 파일이라 ::file ref가 cwd 밖(예: ~/.ssh/id_rsa)을 가리키면
       // 그 내용을 읽어 LLM API로 보내는 유출 벡터가 된다. 2중 차단:
       //  ① 어휘 컨테인먼트 — 경로 문자열이 cwd 밖이면 거부.
-      if (abs !== cwd && !abs.startsWith(cwd + sep)) {
+      if (!isWithinCwd(abs, cwd)) {
         cases.push(unverifiable(b.text, `프로젝트 밖 파일 참조 거부: ${b.ref}`, "review:outside"));
       } else {
         //  ② lstatSync 단일 호출 — 부재·심링크·비정규파일을 한 번에 거부(TOCTOU 없이).

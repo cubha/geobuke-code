@@ -4,9 +4,8 @@
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDir } from "./store.js";
+import { serializeCapped } from "./jsonl-line.js";
 
-/** 한 줄 이벤트의 최대 바이트 — O_APPEND atomic 보장(미만 길이) */
-const MAX_LINE = 4096;
 /** missing[] 캡 (항목 수 / 항목당 길이) */
 const MAX_MISSING_ITEMS = 20;
 const MAX_MISSING_LEN = 200;
@@ -89,14 +88,9 @@ function capMissing(missing: string[]): string[] {
 export function serializeEvent(e: GateEvent): string {
   const out: GateEvent = { ...e };
   if (out.missing) out.missing = capMissing(out.missing);
-  let line = JSON.stringify(out);
-  if (line.length >= MAX_LINE && out.missing) {
-    out.missing = [`${e.missing?.length ?? 0} items (truncated)`];
-    line = JSON.stringify(out);
-  }
-  // 극단적 경우(다른 필드가 비대)에도 캡 — 한 줄 보장
-  if (line.length >= MAX_LINE) line = line.slice(0, MAX_LINE - 1);
-  return line;
+  return serializeCapped(out, (o) => {
+    if (o.missing) o.missing = [`${e.missing?.length ?? 0} items (truncated)`];
+  });
 }
 
 /** jsonl 원시 텍스트를 이벤트 배열로 파싱 (빈 줄·깨진 줄 skip) */
@@ -251,6 +245,10 @@ export function lastAppliedEditAt(events: GateEvent[]): string | null {
   }
   return latest;
 }
+
+// events.jsonl 무제한 성장 갭(인프라 리뷰 지적, confidence 65)은 리팩토링 범위(기능 무변경) 밖이라
+// 이 배치에서 다루지 않는다 — scope-critic 판정(2026-07-24): 로테이션 도입은 온-디스크 보존 정책을
+// 바꾸는 실질 기능 변경이라 별도 승인 SubTask로 분리해야 한다. 필요 시 다음 페이즈에서 재검토.
 
 /** events.jsonl에 이벤트 1줄 append. 실패는 무시(계측이 개발 흐름을 막지 않음). */
 export function logEvent(cwd: string, event: GateEvent): void {

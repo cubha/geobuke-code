@@ -21,26 +21,34 @@ function readConfig(cwd: string): GbcConfig {
   return readJson<GbcConfig>(configPath(cwd), {});
 }
 
+// 리팩토링(2026-07-24) — stopHintMuted/captureGolden 두 플래그의 동형 getter/setter 쌍을
+// getFlag/setFlag 제네릭으로 통합(R1). 플래그가 늘어도 이 두 함수만 재사용하면 된다.
+function getFlag(cwd: string, key: keyof GbcConfig): boolean {
+  return readConfig(cwd)[key] === true;
+}
+
+function setFlag(cwd: string, key: keyof GbcConfig, value: boolean): void {
+  const cfg = readConfig(cwd);
+  cfg[key] = value;
+  writeJson(configPath(cwd), cfg);
+}
+
 /** Stop hook defer 리마인드가 음소거 상태인지. 파일/키 부재 시 false(기본=노출). */
 export function isStopHintMuted(cwd: string): boolean {
-  return readConfig(cwd).stopHintMuted === true;
+  return getFlag(cwd, "stopHintMuted");
 }
 
 /** Stop hook defer 리마인드 음소거 토글을 영속 저장(수동 unmute 전까지 유지). */
 export function setStopHintMuted(cwd: string, muted: boolean): void {
-  const cfg = readConfig(cwd);
-  cfg.stopHintMuted = muted;
-  writeJson(configPath(cwd), cfg);
+  setFlag(cwd, "stopHintMuted", muted);
 }
 
 /** 골든셋 캡처 모드인지. 파일/키 부재 시 false(기본=캡처 안 함). */
 export function isGoldenCapture(cwd: string): boolean {
-  return readConfig(cwd).captureGolden === true;
+  return getFlag(cwd, "captureGolden");
 }
 
 /** 골든셋 캡처 모드 토글을 영속 저장(수동 off 전까지 유지). */
 export function setGoldenCapture(cwd: string, on: boolean): void {
-  const cfg = readConfig(cwd);
-  cfg.captureGolden = on;
-  writeJson(configPath(cwd), cfg);
+  setFlag(cwd, "captureGolden", on);
 }

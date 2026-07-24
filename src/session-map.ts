@@ -3,7 +3,7 @@
 // 동위(store.ts gbcDir(homedir()) 관례): 크로스프로젝트 데이터라 project .gbc/가 아니라 홈.
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { gbcDir, readJson, writeJson, withStoreLock } from "./store.js";
+import { gbcDir, readJsonObject, writeJson, withStoreLock } from "./store.js";
 
 export interface SessionMapOpts {
   homeDir?: string;
@@ -18,10 +18,9 @@ function sessionMapPath(opts: SessionMapOpts): string {
  * 내용을 무조건 신뢰하지 않는다. non-object(배열 등)는 빈 맵, 값이 문자열이 아닌 항목은 필터링.
  */
 function readMap(opts: SessionMapOpts): Record<string, string> {
-  const raw = readJson<unknown>(sessionMapPath(opts), {});
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const raw = readJsonObject<Record<string, unknown>>(sessionMapPath(opts), {});
   const out: Record<string, string> = {};
-  for (const [repoId, sessionId] of Object.entries(raw as Record<string, unknown>)) {
+  for (const [repoId, sessionId] of Object.entries(raw)) {
     if (typeof sessionId === "string") out[repoId] = sessionId;
   }
   return out;

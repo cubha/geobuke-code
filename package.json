@@ -1,6 +1,6 @@
 {
   "name": "geobuke-code",
-  "version": "0.10.4",
+  "version": "0.10.5",
   "description": "거북이코드 — 계획↔구현↔검증 게이트. Claude Code PreToolUse hook으로 구현 전 계획 케이스 누락·시나리오 미지정을 차단하고, 응답 종료(Stop) 시 scope 사후판정(축A 파급반경·축B 최소구현 사다리)으로 품질을 권고하며, gbc verify로 구현 후 케이스를 증거(JUnit·코드 독해)와 대조한다(verified>reviewed>unverifiable).",
   "type": "module",
   "bin": {

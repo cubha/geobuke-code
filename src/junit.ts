@@ -2,7 +2,8 @@
 // 한다(RCE 차단·이식성). jest/vitest/pytest/go/cargo 등 모든 주요 러너가 JUnit 리포터를 내므로,
 // 이 한 포맷만 읽으면 러너 불문 이식된다(provider 패턴). zero-dep 정규식 파서(런타임 의존성 보존).
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
+import { isWithinCwd } from "./store.js";
 
 /** 테스트 1건의 판정. failure/error=fail, skipped=skipped, 그 외=pass. */
 export type TestStatus = "pass" | "fail" | "skipped";
@@ -64,7 +65,7 @@ export function readVerifyResults(cwd: string, relPath: string = JUNIT_DEFAULT_R
   const path = resolve(cwd, relPath);
   // 컨테인먼트(::file과 동일 방어계층, security-auditor S3) — relPath가 cwd 밖을 가리키면 읽지 않는다.
   // 현재 호출부는 상수 경로뿐이나, runVerify는 공개 API라 향후 경로 주입 시의 트래버설을 미리 차단.
-  if (path !== cwd && !path.startsWith(cwd + sep)) return null;
+  if (!isWithinCwd(path, cwd)) return null;
   if (!existsSync(path)) return null;
   try {
     return parseJUnit(readFileSync(path, "utf8"));
@@ -79,7 +80,7 @@ export function readVerifyResults(cwd: string, relPath: string = JUNIT_DEFAULT_R
  */
 export function statVerifyResults(cwd: string, relPath: string = JUNIT_DEFAULT_REL): string | null {
   const path = resolve(cwd, relPath);
-  if (path !== cwd && !path.startsWith(cwd + sep)) return null;
+  if (!isWithinCwd(path, cwd)) return null;
   try {
     return statSync(path).mtime.toISOString();
   } catch {

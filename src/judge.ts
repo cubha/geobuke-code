@@ -119,7 +119,6 @@ export interface KeyResolveOpts {
 /**
  * API 키 해석 (크로스플랫폼, 셸 무관).
  * 1) ANTHROPIC_API_KEY 환경변수 우선, 2) 없으면 ~/.gbc/api-key 파일.
- * STUB
  */
 export function resolveApiKey(opts: KeyResolveOpts = {}): string | null {
   const env = opts.env ?? process.env;
@@ -508,9 +507,19 @@ export function parseReviewVerdict(raw: string): ReviewVerdict {
 export type ReviewInvoke = (system: string, user: string) => Promise<string>;
 
 /**
+ * 기본 invoke 구현(리팩토링 2026-07-24, R1) — judgeReviewed·judgeScope·judgeM1Violation이 각각
+ * 복붙하던 "transport 선택(api 우선, 없으면 claude -p 폴백)" 클로저를 modelFn 주입으로 통합.
+ * ReviewInvoke/ScopeInvoke/ScoreInvoke는 전부 동일 구조(`(system, user) => Promise<string>`)라
+ * 반환 함수 하나로 세 타입 전부에 구조적으로 대입된다.
+ */
+function defaultInvoke(modelFn: () => string): (system: string, user: string) => Promise<string> {
+  return (system, user) =>
+    selectedTransport() === "api" ? judgeViaApi(system, user, undefined, modelFn()) : judgeViaCli(system, user, modelFn());
+}
+
+/**
  * reviewed 판정. 케이스 + 최종 코드 본문을 모델에 독해시켜 pass/fail. 호출 실패·타임아웃은
  * **unverifiable**로 매핑한다(failOpenVerdict의 'pass'를 복사하지 않는다 — reviewed의 핵심 가드).
- * STUB(ST3 RED).
  */
 export async function judgeReviewed(
   caseText: string,
@@ -519,12 +528,7 @@ export async function judgeReviewed(
 ): Promise<ReviewVerdict> {
   const user = buildReviewMessage(caseText, fileContent);
   // 기본 호출자: 게이트와 동일 transport 선택(api 우선, 없으면 claude -p 폴백).
-  const invoke: ReviewInvoke =
-    opts.invoke ??
-    ((system, u) =>
-      selectedTransport() === "api"
-        ? judgeViaApi(system, u, undefined, verifyModel())
-        : judgeViaCli(system, u, verifyModel()));
+  const invoke: ReviewInvoke = opts.invoke ?? defaultInvoke(verifyModel);
   try {
     return parseReviewVerdict(await invoke(REVIEW_SYSTEM, user));
   } catch (e) {
@@ -702,12 +706,7 @@ export async function judgeScope(
   const user = buildScopeMessage(entries, grepContext, opts.planSpec ?? "");
   // F5(0.6.1): scopeViaApi/scopeViaCli 별도쌍 제거 — judgeViaApi/judgeViaCli에 scopeModel()만 주입
   // (win32 SCOPE_MODEL 명시 전달[0.5.3 W2] 의미는 judgeViaCli의 model 파라미터 경유로 동일 보존).
-  const invoke: ScopeInvoke =
-    opts.invoke ??
-    ((s, u) =>
-      selectedTransport() === "api"
-        ? judgeViaApi(s, u, undefined, scopeModel())
-        : judgeViaCli(s, u, scopeModel()));
+  const invoke: ScopeInvoke = opts.invoke ?? defaultInvoke(scopeModel);
   const timeoutMs = opts.timeoutMs ?? SCOPE_TIMEOUT_MS;
   try {
     const raw = await withTimeout(invoke(SCOPE_SYSTEM, user), timeoutMs);
@@ -803,12 +802,7 @@ export async function judgeM1Violation(
   opts: { invoke?: ScoreInvoke } = {},
 ): Promise<ScoreVerdict> {
   const user = buildScoreMessage(specText, editsText);
-  const invoke: ScoreInvoke =
-    opts.invoke ??
-    ((s, u) =>
-      selectedTransport() === "api"
-        ? judgeViaApi(s, u, undefined, scoreModel())
-        : judgeViaCli(s, u, scoreModel()));
+  const invoke: ScoreInvoke = opts.invoke ?? defaultInvoke(scoreModel);
   try {
     return parseScoreVerdict(await invoke(SCORE_SYSTEM, user));
   } catch (e) {

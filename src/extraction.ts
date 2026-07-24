@@ -9,9 +9,12 @@
 import { appendFileSync, statSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDir } from "./store.js";
+import { MAX_LINE, serializeCapped } from "./jsonl-line.js";
 
-/** 한 줄 레코드 최대 바이트(events.jsonl과 동일 상한 — O_APPEND atomic 보장). */
-export const MAX_LINE = 4096;
+// MAX_LINE 재-export(2026-07-24 리팩토링, R1) — 공용 정의는 jsonl-line.ts로 이전했으나 기존
+// 소비처(test/extraction.test.mjs 등)의 "../dist/extraction.js"발 import 계약은 그대로 보존한다.
+export { MAX_LINE };
+
 /** 자유텍스트 필드 캡(직렬화 전 선절단 — 라인 상한과 별개로 본문 폭주 방지). */
 export const MAX_TEXT = 2000;
 /** extraction.jsonl 파일 상한(바이트). 초과 시 .1로 로테이션. */
@@ -83,13 +86,9 @@ export function serializeRecord(rec: ExtractionRecord): string {
     if (t.length > MAX_TEXT) t = t.slice(0, MAX_TEXT) + "…(절단)";
     out.text = t;
   }
-  let line = JSON.stringify(out);
-  if (line.length >= MAX_LINE && out.text !== undefined) {
-    out.text = `(text ${rec.text?.length ?? 0}자 생략 — 라인 상한)`;
-    line = JSON.stringify(out);
-  }
-  if (line.length >= MAX_LINE) line = line.slice(0, MAX_LINE - 1);
-  return line;
+  return serializeCapped(out, (o) => {
+    if (o.text !== undefined) o.text = `(text ${rec.text?.length ?? 0}자 생략 — 라인 상한)`;
+  });
 }
 
 /**
@@ -122,7 +121,6 @@ export function extractionPath(cwd: string): string {
  * 현재 파일이 상한 이상이면 1세대 로테이션(.jsonl→.1.jsonl, 기존 .1은 덮어씀) 후 append. 파일 부재/stat
  * 실패는 로테이션 없이 append(최초 기록). GBC_NO_EXTRACTION=1이면 무동작(opt-out, metrics 규약 미러).
  * append/rotation 실패는 삼킨다(fail-silent — 계측이 A-mode 실행을 막지 않는다).
- * STUB(ST2 RED).
  */
 export function appendExtraction(
   cwd: string,

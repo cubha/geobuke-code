@@ -5,6 +5,7 @@
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDir, readJson, writeJson } from "./store.js";
+import { selectByRef } from "./text.js";
 import type { PendingReview } from "./types.js";
 
 function pendingPath(cwd: string): string {
@@ -34,31 +35,12 @@ export function clearPendingReview(cwd: string): void {
 }
 
 /**
- * 펜딩 케이스(1-base 표시) 중 ref에 해당하는 케이스 텍스트를 고른다. defer selectTargets와 동형:
- * - "all" → 전부
- * - 공백구분 토큰이 전부 정수 → 복수 인덱스(1-base, 범위 밖·중복 무시)
- * - 그 외 → 부분 텍스트 1건 매칭(공백 포함 문구 하위호환)
- * 빈 ref → [](includes("") 오매칭 방어).
+ * 펜딩 케이스(1-base 표시) 중 ref에 해당하는 케이스 텍스트를 고른다 — text.ts selectByRef(defer.ts
+ * selectTargets와 공용, R1 리팩토링 2026-07-24)의 얇은 래퍼. 상태 적격 개념이 없으므로 eligible은
+ * 기본값(전부 적격) 그대로 쓴다.
  */
 export function selectCases(cases: string[], ref: string): string[] {
-  const trimmed = ref.trim();
-  if (trimmed === "") return [];
-  if (trimmed === "all") return [...cases];
-
-  const tokens = trimmed.split(/\s+/).filter(Boolean);
-  const allInts = tokens.length > 0 && tokens.every((t) => /^\d+$/.test(t));
-  if (allInts) {
-    const out: string[] = [];
-    for (const t of tokens) {
-      const idx = Number.parseInt(t, 10);
-      if (idx >= 1 && idx <= cases.length && !out.includes(cases[idx - 1])) {
-        out.push(cases[idx - 1]);
-      }
-    }
-    return out;
-  }
-  const found = cases.find((c) => c.includes(trimmed));
-  return found ? [found] : [];
+  return selectByRef(cases, ref, (c) => c);
 }
 
 /**
