@@ -434,6 +434,100 @@ export function computeChatRegionRows(totalRows: number, bandRows: number, heade
   return Math.max(8, totalRows - bandRows * 2 - headerRows);
 }
 
+// ── 반응형 강등 사다리(0.10.6 A1) ──
+// 사외 실기 스크린샷 보고: 저높이 터미널에서 좌측 스택(카드+사이드바)이 대화창과 같은 고정 높이
+// (chatTotalRows)를 받는데, 사이드바 내부엔 강등 경로가 없어(flexGrow 스페이서+고정 마스코트) 내용이
+// 넘치면 그대로 잘렸다. 임계값은 상수 하드코딩이 아니라 기존 산술(computeHeaderRows·
+// computeChatRegionRows)을 그대로 재사용해 도출한다 — PREVIEW_RESERVED_ROWS류 상수는 스킬·repo 수가
+// 늘면 드리프트하는 결함 클래스였다(scope-critic 반복 지적).
+
+/** Sidebar.tsx MASCOT_S2 half-block 렌더(16행 매트릭스 → 2:1) 출력 행수. 단일 소스 — Sidebar.tsx가
+ * 이 값을 직접 쓰지 않고 renderMascot(MASCOT_S2).length로 검증한다(테스트 참조). */
+export const SIDEBAR_MASCOT_ROWS = 8;
+
+/** Sidebar.tsx 헤더 텍스트(단일 소스) — Sidebar.tsx가 이 두 상수를 그대로 렌더해 아래 SIDEBAR_CHROME_ROWS
+ * 측정 텍스트와 실렌더 텍스트가 항상 같다(카피 변경 시 자동으로 재측정됨). */
+export const SIDEBAR_HEADER_LABEL = "📁 repos";
+export const SIDEBAR_HEADER_HINT = "— Alt+1..9 전환/opt-in · Alt+W opt-out · Alt+T 타이틀";
+
+/** Sidebar.tsx 패널 크롬(테두리2 + 헤더 실측 줄바꿈 행수). 이전엔 "헤더=1행"으로 가정했으나 tmux
+ * 80×24 실측(0.10.6 A2)에서 헤더 텍스트가 사이드바 내부폭(SIDEBAR_COLUMNS-테두리2-paddingX2=30)을
+ * 넘겨 실제로 3행으로 줄바꿈됨이 드러나 사이드바 하단 테두리가 잘리는 결함으로 이어졌다 — 이제
+ * wrapSegmentLine으로 실측해 드리프트를 구조적으로 차단한다. */
+export const SIDEBAR_CHROME_ROWS =
+  2 + wrapSegmentLine([{ text: `${SIDEBAR_HEADER_LABEL} ${SIDEBAR_HEADER_HINT}`, tone: "plain" }], SIDEBAR_COLUMNS - 4).length;
+
+/** ⌃/Alt+1..9 직행 단축키 물리 상한 — Sidebar.tsx 창(window) 크기의 단일 소스. 이전엔 Sidebar.tsx
+ * 로컬 상수였으나 computeSidebarListRows(아래)도 같은 값이 필요해 여기로 옮겼다. */
+export const SIDEBAR_MAX_VISIBLE_REPOS = 9;
+
+/**
+ * 사이드바 repo 목록이 실제로 차지하는 행수(순수) — repoCount==0이면 "등록된 repo 없음" 1행.
+ * repoCount<=상한이면 인디케이터 없이 그대로 repoCount행(0.10.6 A2 이전엔 상한을 고정 근사해 repo가
+ * 적은 흔한 경우에도 마스코트가 불필요하게 숨겨지는 결함이 tmux 45행 실측에서 확인됐다 — 이제 실제
+ * 개수를 정확히 반영한다). 상한 초과 시엔 위/아래 인디케이터가 최대 2행 붙는데, 정확히 1행일지
+ * 2행일지는 커서 위치에 따라 달라진다 — 커서가 움직일 때마다 강등 판정이 흔들리지 않도록(사이드바
+ * 포커스 이동이 마스코트를 깜빡이게 만드는 결함 방지) 그 경우엔 항상 worst-case(2)로 고정한다.
+ */
+export function computeSidebarListRows(repoCount: number, maxVisible: number = SIDEBAR_MAX_VISIBLE_REPOS): number {
+  if (repoCount === 0) return 1;
+  if (repoCount <= maxVisible) return repoCount;
+  return maxVisible + 2;
+}
+
+/** 사이드바를 아예 숨기는 폭 임계값 — SIDEBAR_COLUMNS(34)+CHAT_COLUMN_GAP(1)+대화 최소가독폭(border2+
+ * padding2+내부 21열)=58, 여유 2를 더해 60. wordmark 임계값(72, 정확한 폭 합산)과 달리 이건 "가독
+ * 가능한 최소 대화 폭" 선택값이라 그 취지를 주석으로 남긴다. */
+export const SIDEBAR_MIN_COLUMNS = 60;
+
+export interface ResponsiveLayout {
+  /** 사용자의 ⌃T titleMode 선택은 그대로 두고, 렌더에만 쓰는 강등 결과값(2단에서만 "mini"로 오버라이드). */
+  effectiveTitleMode: TitleMode;
+  showMascot: boolean;
+  showSidebar: boolean;
+}
+
+/**
+ * 좌측 스택(카드+사이드바)이 chatTotalRows 안에 들어가는지 판정해 강등 단계를 고른다(순수).
+ * 사다리: 0단(무강등) → 1단(마스코트 숨김) → 2단(그래도 부족하면 타이틀 mini 강제, 표시값만 —
+ * model.ts의 실제 titleMode 상태는 건드리지 않아 리사이즈 복귀 시 사용자 토글 의도가 보존된다).
+ * 폭이 SIDEBAR_MIN_COLUMNS 미만이면 높이 계산 전에 사이드바 자체를 숨긴다(showSidebar=false).
+ *
+ * sidebarContentRows(호출부가 computeSidebarListRows(repos.length)로 산출해 넘긴다) — 0.10.6 A1
+ * 초판은 이 값을 보수적 상한(11)으로 근사했으나, tmux 45행 실측에서 repo가 적은 흔한 경우(예: 6개)에도
+ * 마스코트가 불필요하게 숨겨지는 결함이 드러났다(scope-critic이 A1 리뷰에서 예견한 바로 그 시나리오).
+ * repos 상태를 app.tsx로 끌어올려(Sidebar.tsx는 이제 prop으로만 받는다) 실제 개수를 정확히 반영한다 —
+ * app.tsx의 폴링은 Sidebar.tsx가 하던 것과 동일한 5초 간격 1곳으로 옮겨졌을 뿐, 렌더마다 fs를 더
+ * 읽는 게 아니다(동기 I/O 재발 우려 해소).
+ */
+export function computeResponsiveLayout(
+  rows: number,
+  columns: number,
+  bandRows: number,
+  cardRows: number,
+  sidebarContentRows: number,
+  userTitleMode: TitleMode,
+): ResponsiveLayout {
+  if (columns < SIDEBAR_MIN_COLUMNS) {
+    return { effectiveTitleMode: userTitleMode, showMascot: false, showSidebar: false };
+  }
+
+  const sidebarChrome = SIDEBAR_CHROME_ROWS + sidebarContentRows;
+  const fits = (titleMode: TitleMode, mascotRows: number): boolean => {
+    const headerRows = computeHeaderRows(columns, titleMode);
+    const chatTotalRows = computeChatRegionRows(rows, bandRows, headerRows);
+    return cardRows + sidebarChrome + mascotRows <= chatTotalRows;
+  };
+
+  if (fits(userTitleMode, SIDEBAR_MASCOT_ROWS)) {
+    return { effectiveTitleMode: userTitleMode, showMascot: true, showSidebar: true };
+  }
+  if (fits(userTitleMode, 0)) {
+    return { effectiveTitleMode: userTitleMode, showMascot: false, showSidebar: true };
+  }
+  return { effectiveTitleMode: "mini", showMascot: false, showSidebar: true };
+}
+
 // ── 사이드바 repos 커서추종 윈도잉 (0.10.1 SubTask4) ──
 // computeChatViewport(대화창)와는 계약 축이 다르다 — 대화창은 "하단 고정+오프셋 스크롤", 사이드바는
 // "커서가 항상 창 안에 보이게" 축이라 억지로 통합하면 호출부가 cursor→offset 환산을 떠안게 된다.

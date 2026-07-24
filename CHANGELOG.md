@@ -2,6 +2,19 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.10.6] - 2026-07-24
+
+**필드 하드닝: 저높이/저폭 반응형 강등 + events.jsonl 로테이션 + useInput 순수화** — 0.10.5 이월항목 4그룹 중 A(반응형+로테이션)와 B(useInput 분해)를 하나로 묶어 발행한다(사용자 지시로 0.10.7 분리 대신 0.10.6 동승).
+
+### Added
+- **저높이/저폭 터미널 반응형 강등 사다리** — 사이드바(카드+repos+마스코트)가 대화창과 같은 고정 높이를 나눠 쓰는데, 낮은 터미널에서 강등 경로가 없어 사이드바가 넘쳐 잘리던 버그를 근본수정. `computeResponsiveLayout`(format.ts)이 0단(무강등)→1단(마스코트 숨김)→2단(그래도 부족하면 타이틀 mini 강제, 사용자의 실제 titleMode는 안 건드림) 사다리를 산술로 판정한다. 사이드바 콘텐츠 행수는 보수적 상한이 아니라 repos.json 폴링을 app.tsx로 끌어올려 실제 개수로 정확히 계산(tmux 45행 실측에서 상한 근사가 불필요한 조기 강등을 유발함을 발견해 수정). 저폭(`<60`열)에서는 사이드바 전체를 숨기고 대화 컬럼에 전체 폭을 할당(ⓑ). tmux 실기 캡처(80×24/30/45, 50×30)로 각 단계를 검증.
+- **events.jsonl 1세대 로테이션** — extraction.ts(0.7.0)의 로테이션 패턴(.jsonl→.1.jsonl, 5MB 상한)을 `jsonl-rotate.ts`로 공용 추출하고 metrics.ts `logEvent`에도 적용해 events.jsonl 무제한 성장 갭을 해소. `readEventsMerged`가 로테이션된 .1 세대와 현행 세대를 시간순 병합해 읽어, 로테이션 이후에도 M1(churn)·M2/M3 집계가 넘어간 이벤트를 계속 반영한다(cli.ts·verify.ts·MetricsPanel.tsx 4곳 배선).
+
+### Changed
+- **useInput 키 우선순위 판정 분리** — app.tsx의 240줄 단일 콜백에 뒤섞여 있던 16단 키 우선순위 사다리(⌃C→Alt+탭전환→opt-out확인→Alt+W→승인→패널토글→'?'→패널열림→스크롤→슬래시→Tab포커스→사이드바→Esc→개행→제출→에디터폴백)를 순수함수 `classifyKey`(신규 `keymap.ts`)로 추출. 판정 계약을 RED-first 테스트 40케이스로 먼저 고정한 뒤 app.tsx가 그 결과로 switch 디스패치하도록 재배선 — 부수효과(dispatch·pushLine·switchToTab 등)는 그대로 두고 "무엇을 할지"만 분리해 회귀 위험을 낮췄다.
+
+검증: verify.sh --full 780/780 · security-auditor DEEP(Crit0/Warn0/Info0, jsonl-rotate.ts path 안전성·게이트 우회 여부·--all symlink 가드 유지 집중 확인) · tmux 실기 5종 시나리오. hook 계약 무변경=재init 불요.
+
 ## [0.10.5] - 2026-07-24
 
 **전체 코드베이스 리팩토링 배치(17건) + TUI 버그 3건 수정** — src/ 전수 리뷰(3렌즈 병렬)에서 나온 Critical 2·Important 7·Minor 8을 일괄 반영. 기능 무변경 원칙(리팩토링 스코프)을 scope-critic 게이트로 강제했고, 그 과정에서 실제 기능 버그 3건이 함께 잡혀 수정됐다.
