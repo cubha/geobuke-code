@@ -2,6 +2,21 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.10.5] - 2026-07-24
+
+**전체 코드베이스 리팩토링 배치(17건) + TUI 버그 3건 수정** — src/ 전수 리뷰(3렌즈 병렬)에서 나온 Critical 2·Important 7·Minor 8을 일괄 반영. 기능 무변경 원칙(리팩토링 스코프)을 scope-critic 게이트로 강제했고, 그 과정에서 실제 기능 버그 3건이 함께 잡혀 수정됐다.
+
+### Fixed
+- **Delete 키가 Backspace로 오동작** — `applyEditorKey`가 `key.delete`를 backspace로 배선해 커서 뒤 문자 삭제(forward-delete)가 불가능했다. `deleteForward`/`backspace`로 분리 배선(TDD RED-first, `test/tui-app-editor-key.test.mjs` 신규).
+- **Tab 키가 슬래시 드롭다운 0후보 상태에서 사이드바 포커스를 오토글** — 드롭다운 후보가 없을 때 Tab이 완성 로직을 지나쳐 사이드바 토글로 낙하하던 것을 완성 경로에서 소비하도록 수정.
+- **SkillsPanel이 repo 탭 전환 후에도 이전 repo 스킬을 표시** — 스캔이 최초 1회 지연초기화뿐이라 cwd 변경을 못 따라가던 것을 `useEffect([cwd])` 재스캔으로 수정(scope-critic 적발).
+
+### Changed
+- **TUI 패널 렌더 본문 동기 I/O 제거** — ReposPanel(repo별 게이트/defer 파일 판독)·SkillsPanel(스킬 디렉터리 스캔)이 매 렌더마다 fs를 치던 것을 useState+useEffect(5초 폴링/이벤트 재스캔)로 전환.
+- **중복 로직 공용 추출** — ref-선택 파싱(`text.ts selectByRef` ← defer/review), judge 트랜스포트 클로저(`defaultInvoke` ← 3판정), settings hook 순회(`install.ts forEachHookCmd/findHookCmd` ← 5함수), cwd 컨테인먼트(`store.ts isWithinCwd` ← junit/verify 보안경로), 버전캐시 refresh(`version.ts refreshCacheIfStale` ← hook/cli), jsonl 한 줄 상한 가드(`jsonl-line.ts serializeCapped` ← metrics/extraction), 커서 클램프(`app.tsx stepBoundedCursor` ← 3패널), 탭전환 디스패치(`dispatchTabSwitch`), config flag 접근자 등.
+- **read-modify-write 락 확대** — `defer.ts`(add/ack/transition)·`state.ts`(markGated/resetGate)에 `withStoreLock` 적용(repos.ts와 동일 이유 — CLI 단발 호출과 TUI 장수 프로세스의 lost-update 방지).
+- 미사용 필드(`permission_mode`)·stale STUB 주석 제거, `readPkgJson`/`readJsonObject` 등 소규모 dedup.
+
 ## [0.10.4] - 2026-07-23
 
 **탭 전환 대화 소실 근본수정 + 현장 개선 4건** — 0.10.3 발행 직후 사외 실사용 추가 보고. repo 탭 전환 시 대화내용이 사라지던 치명 결함(단순 미표시가 아니라 실제 영구 유실 경로 포함)을 per-repo 스크롤백으로 근본수정하고, 스킬 드롭다운·repos 패널 키보드 선택·`?` 도움말·색상 톤 정합을 함께 반영.

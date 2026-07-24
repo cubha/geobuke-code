@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import { gbcDir, readJsonArray, writeJson } from "./store.js";
-import { normalizeCase } from "./text.js";
+import { gbcDir, readJsonArray, writeJson, withStoreLock } from "./store.js";
+import { normalizeCase, selectByRef } from "./text.js";
 import { nowIso } from "./time.js";
 import type { DeferEntry, DeferStatus, RawDeferEntry } from "./types.js";
 
@@ -46,16 +46,20 @@ function save(cwd: string, defers: DeferEntry[]): void {
  * 기존 엔트리를 added:false로 반환한다 — 같은 '무관' defer가 시점만 달리 누적되던 증상(2026-06-26 진단) 차단.
  * 종결(resolved·withdrawn)된 동일 텍스트는 막지 않는다(종결 후 같은 케이스가 정당히 재발할 수 있음 → 재-defer 허용).
  * @returns { entry, added } — added=false면 entry는 기존(미해결) 항목.
+ * withStoreLock(2026-07-24 리팩토링, repos.ts addRepo와 동일 이유) — read(loadDefers)→modify→write
+ * 전체를 락으로 감싸 다른 프로세스(gbc CLI 단발 vs TUI 장수 프로세스)의 lost-update를 막는다.
  */
 export function addDefer(cwd: string, item: string): { entry: DeferEntry; added: boolean } {
-  const defers = loadDefers(cwd);
-  const normalized = normalizeCase(item);
-  const dup = defers.find((d) => !isClosedStatus(d.status) && d.item === normalized);
-  if (dup) return { entry: dup, added: false };
-  const entry: DeferEntry = { item: normalized, at: nowIso(), status: "open" };
-  defers.push(entry);
-  save(cwd, defers);
-  return { entry, added: true };
+  return withStoreLock(deferPath(cwd), () => {
+    const defers = loadDefers(cwd);
+    const normalized = normalizeCase(item);
+    const dup = defers.find((d) => !isClosedStatus(d.status) && d.item === normalized);
+    if (dup) return { entry: dup, added: false };
+    const entry: DeferEntry = { item: normalized, at: nowIso(), status: "open" };
+    defers.push(entry);
+    save(cwd, defers);
+    return { entry, added: true };
+  });
 }
 
 /**
@@ -67,16 +71,19 @@ export function addDefer(cwd: string, item: string): { entry: DeferEntry; added:
  * 중복 감지: 정규화 텍스트가 이미 **resolved** 상태로 있으면 새로 추가하지 않는다(addDefer의
  * 미해결-dedup과 대칭 — 여긴 "이미 완료로 기록된" 것과의 중복만 막는다).
  * @returns { entry, added } — added=false면 entry는 기존(resolved) 항목.
+ * withStoreLock — addDefer와 동일 이유(read-modify-write 보호).
  */
 export function ackDefer(cwd: string, item: string): { entry: DeferEntry; added: boolean } {
-  const defers = loadDefers(cwd);
-  const normalized = normalizeCase(item);
-  const dup = defers.find((d) => d.status === "resolved" && d.item === normalized);
-  if (dup) return { entry: dup, added: false };
-  const entry: DeferEntry = { item: normalized, at: nowIso(), status: "resolved", origin: "ack" };
-  defers.push(entry);
-  save(cwd, defers);
-  return { entry, added: true };
+  return withStoreLock(deferPath(cwd), () => {
+    const defers = loadDefers(cwd);
+    const normalized = normalizeCase(item);
+    const dup = defers.find((d) => d.status === "resolved" && d.item === normalized);
+    if (dup) return { entry: dup, added: false };
+    const entry: DeferEntry = { item: normalized, at: nowIso(), status: "resolved", origin: "ack" };
+    defers.push(entry);
+    save(cwd, defers);
+    return { entry, added: true };
+  });
 }
 
 /**
@@ -107,37 +114,16 @@ export function resolvedDeferItems(cwd: string): string[] {
 }
 
 /**
- * ref 문자열로 전환 대상 엔트리를 고른다. 세 형태 지원:
- * - "all": eligibleFrom 상태에 해당하는 전부
- * - 공백구분 토큰이 전부 정수: 복수 인덱스(1-base). 인덱스는 명시 지정이라 적격 무시(사용자가 번호를 안다)
- * - 그 외: 통째로 부분 텍스트 1건 매칭(적격 항목 중) — 공백 포함 문구 하위호환
+ * ref 문자열로 전환 대상 엔트리를 고른다 — text.ts selectByRef(review.ts selectCases와 공용, R1
+ * 리팩토링 2026-07-24)에 상태 적격 술어만 얹은 얇은 래퍼. CLI(cli.ts)는 이미 빈 ref를 사전
+ * 차단하지만, selectByRef 자체도 빈 ref를 []로 방어한다(라이브러리 직접 호출 대비).
  */
 function selectTargets(
   defers: DeferEntry[],
   ref: string,
   eligibleFrom: DeferStatus[],
 ): DeferEntry[] {
-  const trimmed = ref.trim();
-  // 빈 ref 가드: includes("")는 항상 첫 항목을 매칭하므로 빈 문자열이 엉뚱한 항목을 고른다.
-  // CLI(cli.ts)는 이미 빈 ref를 사전 차단하지만, selectTargets가 라이브러리로 직접 호출될 때를 위한 방어.
-  if (trimmed === "") return [];
-  const eligible = (d: DeferEntry) => eligibleFrom.includes(d.status);
-  if (trimmed === "all") return defers.filter(eligible);
-
-  const tokens = trimmed.split(/\s+/).filter(Boolean);
-  const allInts = tokens.length > 0 && tokens.every((t) => /^\d+$/.test(t));
-  if (allInts) {
-    const out: DeferEntry[] = [];
-    for (const t of tokens) {
-      const idx = Number.parseInt(t, 10);
-      if (idx >= 1 && idx <= defers.length && !out.includes(defers[idx - 1])) {
-        out.push(defers[idx - 1]);
-      }
-    }
-    return out;
-  }
-  const t = defers.find((d) => eligible(d) && d.item.includes(trimmed));
-  return t ? [t] : [];
+  return selectByRef(defers, ref, (d) => d.item, (d) => eligibleFrom.includes(d.status));
 }
 
 /**
@@ -145,6 +131,7 @@ function selectTargets(
  * strictEligible: 인덱스 ref의 "적격 무시" 예외(사용자가 번호를 안다)까지 무효화하고 eligibleFrom을
  * 강제한다 — withdraw 전용(0.5.5). resolved를 인덱스로 철회하면 judge [이미 완료된 항목] 엔트리가
  * 조용히 사라져 재차단 오탐 방지가 상실되므로, resolved 정정은 reopen 경유만 허용(scope-critic 판정).
+ * withStoreLock — addDefer와 동일 이유(read-modify-write 보호).
  */
 function transition(
   cwd: string,
@@ -153,12 +140,14 @@ function transition(
   eligibleFrom: DeferStatus[],
   opts: { strictEligible?: boolean } = {},
 ): DeferEntry[] {
-  const defers = loadDefers(cwd);
-  let targets = selectTargets(defers, ref, eligibleFrom);
-  if (opts.strictEligible) targets = targets.filter((t) => eligibleFrom.includes(t.status));
-  for (const t of targets) t.status = toStatus;
-  if (targets.length > 0) save(cwd, defers);
-  return targets;
+  return withStoreLock(deferPath(cwd), () => {
+    const defers = loadDefers(cwd);
+    let targets = selectTargets(defers, ref, eligibleFrom);
+    if (opts.strictEligible) targets = targets.filter((t) => eligibleFrom.includes(t.status));
+    for (const t of targets) t.status = toStatus;
+    if (targets.length > 0) save(cwd, defers);
+    return targets;
+  });
 }
 
 /** open → in_progress (착수). 텍스트/all 적격 = open. 인덱스는 명시 지정. */

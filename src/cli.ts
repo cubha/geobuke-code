@@ -35,7 +35,7 @@ import {
 import type { SessionScore, RealM1 } from "./scoring.js";
 import { parseExtraction, extractionPath } from "./extraction.js";
 import { loadState, resetGate } from "./state.js";
-import { addDefer, ackDefer, loadDefers, resolveDefer, startDefer, withdrawDefer, reopenDefer, isClosedStatus } from "./defer.js";
+import { addDefer, ackDefer, loadDefers, resolveDefer, startDefer, withdrawDefer, reopenDefer, isClosedStatus, unresolvedDefers } from "./defer.js";
 import { loadRepos, addRepo, removeRepo, getVerifyRunPin, setVerifyRunPin } from "./repos.js";
 import { resolveRunCommand, runRunnerCommand } from "./run.js";
 import { statVerifyResults } from "./junit.js";
@@ -50,12 +50,9 @@ import { scaffoldVerify } from "./scaffold.js";
 import type { CaseVerdict } from "./types.js";
 import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER, assessRepoHealth, GBC_SKILL_NAMES } from "./install.js";
 import { readProjectSettings } from "./notice.js";
-import {
-  isCacheStale,
-  readVersionCache,
-  refreshVersionCache,
-} from "./version.js";
+import { refreshCacheIfStale } from "./version.js";
 import { logEvent, parseEvents, computeMetrics, tagEventsWithRepo } from "./metrics.js";
+import type { GateEvent, Metrics } from "./metrics.js";
 import type { EventKind } from "./metrics.js";
 import { nowIso, nowStamp } from "./time.js";
 import type { DeferStatus, Settings } from "./types.js";
@@ -65,10 +62,16 @@ import type { TuiDepsVersions } from "./tui/startup-diagnostics.js";
 const CLI_PATH = fileURLToPath(import.meta.url);
 const PKG_ROOT = join(dirname(CLI_PATH), ".."); // dist/cli.js → 패키지 루트
 
+// 리팩토링(2026-07-24) — readPkgVersion·readTuiDepsVersions이 각각 복붙하던
+// "JSON.parse(readFileSync(package.json))"을 공용화(R1).
+function readPkgJson(): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8")) as Record<string, unknown>;
+}
+
 /** 설치된 패키지 버전(업데이트 안내 비교 기준). 읽기 실패 시 "". */
 function readPkgVersion(): string {
   try {
-    return (JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8")).version as string) ?? "";
+    return (readPkgJson().version as string) ?? "";
   } catch {
     return "";
   }
@@ -80,7 +83,7 @@ const PKG_VERSION = readPkgVersion();
 function readTuiDepsVersions(): TuiDepsVersions {
   const FALLBACK: TuiDepsVersions = { ink: "7.1.0", react: "19.2.7", agentSdk: "0.3.202" };
   try {
-    const deps = JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8")).optionalDependencies as
+    const deps = readPkgJson().optionalDependencies as
       | Record<string, string>
       | undefined;
     if (!deps) return FALLBACK;
@@ -237,25 +240,13 @@ ${
 
   // 설치 직후 버전 캐시 seed — 신버전 안내(①)가 "설치만 하고 init 안 한" 코호트에도
   // 신뢰성 있게 동작하도록(SessionStart 없는 환경의 유일한 seed 지점일 수 있음). best-effort.
-  try {
-    if (process.env.GBC_NO_UPDATE_NOTICE !== "1" && isCacheStale(readVersionCache())) {
-      await refreshVersionCache();
-    }
-  } catch {
-    /* 갱신 실패는 무시(fail-silent) */
-  }
+  await refreshCacheIfStale(true);
 }
 
 // ---------- gbc status ----------
 async function cmdStatus(): Promise<void> {
-  // 버전 캐시가 stale면 갱신(status는 대화형이라 짧은 대기 허용). 실패는 무시.
-  try {
-    if (process.env.GBC_NO_UPDATE_NOTICE !== "1" && isCacheStale(readVersionCache())) {
-      await refreshVersionCache();
-    }
-  } catch {
-    /* 갱신 실패 무시 */
-  }
+  // 버전 캐시가 stale면 갱신(status는 대화형이라 짧은 대기 허용). 실패는 무시(refreshCacheIfStale 내부).
+  await refreshCacheIfStale(true);
   const cwd = process.cwd();
   const { text, source, warning } = loadPlanSpec(cwd);
   // R6 순수화로 loadPlanSpec이 stderr 대신 반환하는 컨테인먼트 경고를 CLI가 표면화.
@@ -719,36 +710,25 @@ function cmdGateReview(cwd: string, args: string[]): void {
   }
 
   const beforeHash = curHash(cwd); // 변이 전 해시 = 게이트된 작업단위와 상관(M1 churn)
-  const specAdded: string[] = [];
-  const specDup: string[] = [];
-  for (const c of toSpec) {
-    if (addSpecCase(cwd, c)) {
-      logCli(cwd, "spec-add", beforeHash);
-      specAdded.push(c);
-    } else {
-      specDup.push(c);
+  // 리팩토링(2026-07-24) — spec/defer/ack 3개 분류가 각각 복붙하던 "추가시도→성공시 로그+added
+  // push·실패시 dup push" 루프를 공용화(R1). tryAdd가 add-fn마다 다른 반환형(boolean vs
+  // {added:boolean})을 boolean으로 통일해 흡수한다.
+  const classifyBatch = (items: string[], kind: EventKind, tryAdd: (c: string) => boolean) => {
+    const added: string[] = [];
+    const dup: string[] = [];
+    for (const c of items) {
+      if (tryAdd(c)) {
+        logCli(cwd, kind, beforeHash);
+        added.push(c);
+      } else {
+        dup.push(c);
+      }
     }
-  }
-  const deferAdded: string[] = [];
-  const deferDup: string[] = [];
-  for (const c of toDefer) {
-    if (addDefer(cwd, c).added) {
-      logCli(cwd, "defer-add", beforeHash);
-      deferAdded.push(c);
-    } else {
-      deferDup.push(c);
-    }
-  }
-  const ackAdded: string[] = [];
-  const ackDup: string[] = [];
-  for (const c of toAck) {
-    if (ackDefer(cwd, c).added) {
-      logCli(cwd, "gate-ack", beforeHash);
-      ackAdded.push(c);
-    } else {
-      ackDup.push(c);
-    }
-  }
+    return { added, dup };
+  };
+  const { added: specAdded, dup: specDup } = classifyBatch(toSpec, "spec-add", (c) => addSpecCase(cwd, c));
+  const { added: deferAdded, dup: deferDup } = classifyBatch(toDefer, "defer-add", (c) => addDefer(cwd, c).added);
+  const { added: ackAdded, dup: ackDup } = classifyBatch(toAck, "gate-ack", (c) => ackDefer(cwd, c).added);
   clearPendingReview(cwd);
 
   if (specAdded.length > 0) console.log(`🐢 명세 등록 ${specAdded.length}건: ${specAdded.join(", ")}`);
@@ -762,66 +742,54 @@ function cmdGateReview(cwd: string, args: string[]): void {
 }
 
 // ---------- gbc metrics ----------
-function cmdMetrics(args: string[]): void {
-  const cwd = process.cwd();
-  const all = args.includes("--all");
-
-  // --all: 등록된 각 repo의 events.jsonl을 repo경로로 태깅 후 병합(specHash 해시충돌 차단).
-  // M1 churn축은 specHash 단독키라, 태깅 없이 합치면 repo간 boilerplate spec 해시가 충돌해
-  // 한 repo의 통과 뒤 다른 repo의 변이가 churn으로 오집계된다(M2/M3는 session-UUID 키라 안전).
-  let events;
-  let scope: string;
-  let source: string;
-  if (all) {
-    const merged = [];
-    let included = 0;
-    let skipped = 0;
-    for (const repo of loadRepos()) {
-      const abs = resolve(repo);
-      try {
-        // 단일 lstatSync로 symlink 거부 — existsSync+lstatSync 분리는 TOCTOU 경합창을 연다(보안검토 W1).
-        // lstat은 링크를 따라가지 않아 symlink면 isDirectory()=false, 부재면 throw→catch로 skip.
-        if (!lstatSync(abs).isDirectory()) {
-          skipped++;
-          continue;
-        }
-        const p = join(abs, ".gbc", "events.jsonl");
-        if (!existsSync(p)) {
-          skipped++;
-          continue;
-        }
-        merged.push(...tagEventsWithRepo(parseEvents(readFileSync(p, "utf8")), abs));
-        included++;
-      } catch {
-        skipped++; // repo별 읽기 실패는 조용히 skip(fail-silent)
-      }
-    }
-    events = merged;
-    scope = `전체 ${included}개 repo 병합${skipped ? ` (${skipped}개 skip: 부재/이벤트없음)` : ""}`;
-    source = "등록 repo들의 .gbc/events.jsonl(repo 태깅 병합)";
-  } else {
-    const eventsPath = join(cwd, ".gbc", "events.jsonl");
-    events = parseEvents(existsSync(eventsPath) ? readFileSync(eventsPath, "utf8") : "");
-    scope = cwd;
-    source = ".gbc/events.jsonl";
-  }
-
-  const m = computeMetrics(events);
-
-  // 진짜 M1(A2 사후대조) — 단일 repo 전용(extraction·scores는 repo-로컬 자산이라 --all 병합 부적합).
-  // 오탐율(행동신호)은 events만으로 항상 산출, 위반율은 scores.json(gbc score 산출물) 있을 때만.
-  let real: RealM1 | null = null;
+// 리팩토링(2026-07-24) — cmdMetrics(이벤트 수집+진짜M1 계산+출력)가 한 함수에 몰려있던 것을
+// "수집"과 "출력"으로 분리(R3, 책임 분리). 계산(computeMetrics/computeRealM1 호출)과 --json 분기는
+// 두 데이터가 모두 필요하므로 cmdMetrics 본체에 남긴다.
+/**
+ * --all: 등록된 각 repo의 events.jsonl을 repo경로로 태깅 후 병합(specHash 해시충돌 차단).
+ * M1 churn축은 specHash 단독키라, 태깅 없이 합치면 repo간 boilerplate spec 해시가 충돌해
+ * 한 repo의 통과 뒤 다른 repo의 변이가 churn으로 오집계된다(M2/M3는 session-UUID 키라 안전).
+ */
+function loadMetricsEvents(cwd: string, all: boolean): { events: GateEvent[]; scope: string; source: string } {
   if (!all) {
-    const exPath = extractionPath(cwd);
-    const records = parseExtraction(existsSync(exPath) ? readFileSync(exPath, "utf8") : "");
-    real = computeRealM1(joinBySession(events, records), classifyBlockOutcome(events), loadScores(cwd));
+    const eventsPath = join(cwd, ".gbc", "events.jsonl");
+    return {
+      events: parseEvents(existsSync(eventsPath) ? readFileSync(eventsPath, "utf8") : ""),
+      scope: cwd,
+      source: ".gbc/events.jsonl",
+    };
   }
-
-  if (args.includes("--json")) {
-    console.log(JSON.stringify(real ? { ...m, realM1: real } : m, null, 2));
-    return;
+  const merged: GateEvent[] = [];
+  let included = 0;
+  let skipped = 0;
+  for (const repo of loadRepos()) {
+    const abs = resolve(repo);
+    try {
+      // 단일 lstatSync로 symlink 거부 — existsSync+lstatSync 분리는 TOCTOU 경합창을 연다(보안검토 W1).
+      // lstat은 링크를 따라가지 않아 symlink면 isDirectory()=false, 부재면 throw→catch로 skip.
+      if (!lstatSync(abs).isDirectory()) {
+        skipped++;
+        continue;
+      }
+      const p = join(abs, ".gbc", "events.jsonl");
+      if (!existsSync(p)) {
+        skipped++;
+        continue;
+      }
+      merged.push(...tagEventsWithRepo(parseEvents(readFileSync(p, "utf8")), abs));
+      included++;
+    } catch {
+      skipped++; // repo별 읽기 실패는 조용히 skip(fail-silent)
+    }
   }
+  return {
+    events: merged,
+    scope: `전체 ${included}개 repo 병합${skipped ? ` (${skipped}개 skip: 부재/이벤트없음)` : ""}`,
+    source: "등록 repo들의 .gbc/events.jsonl(repo 태깅 병합)",
+  };
+}
 
+function printMetricsReport(scope: string, source: string, m: Metrics, real: RealM1 | null): void {
   console.log(`🐢 거북이 게이트 계측 — ${scope}
   이벤트 총 ${m.totalEvents}건  (${source})
 
@@ -852,6 +820,29 @@ function cmdMetrics(args: string[]): void {
       v.scored === 0 && real.sessions.scorable > 0 ? "\n      → 'gbc score'로 A-mode 세션 채점 실행" : ""
     }${real.sessions.scorable === 0 ? "\n      → 채점 대상 없음('gbc run' A-mode 세션이 extraction을 남김)" : ""}`);
   }
+}
+
+function cmdMetrics(args: string[]): void {
+  const cwd = process.cwd();
+  const all = args.includes("--all");
+  const { events, scope, source } = loadMetricsEvents(cwd, all);
+  const m = computeMetrics(events);
+
+  // 진짜 M1(A2 사후대조) — 단일 repo 전용(extraction·scores는 repo-로컬 자산이라 --all 병합 부적합).
+  // 오탐율(행동신호)은 events만으로 항상 산출, 위반율은 scores.json(gbc score 산출물) 있을 때만.
+  let real: RealM1 | null = null;
+  if (!all) {
+    const exPath = extractionPath(cwd);
+    const records = parseExtraction(existsSync(exPath) ? readFileSync(exPath, "utf8") : "");
+    real = computeRealM1(joinBySession(events, records), classifyBlockOutcome(events), loadScores(cwd));
+  }
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(real ? { ...m, realM1: real } : m, null, 2));
+    return;
+  }
+
+  printMetricsReport(scope, source, m, real);
 }
 
 // ---------- gbc score (A2 사후대조 채점, 0.8.0) ----------
@@ -996,7 +987,7 @@ function cmdRepos(args: string[]): void {
         /* 부재/권한오류 → exists=false */
       }
       const gated = isDir && existsSync(join(r, ".gbc"));
-      const unresolved = gated ? loadDefers(r).filter((d) => !isClosedStatus(d.status)).length : 0;
+      const unresolved = gated ? unresolvedDefers(r).length : 0;
       const mark = !exists
         ? "✗부재"
         : !isDir

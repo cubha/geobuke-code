@@ -98,6 +98,22 @@ export function shouldRefreshCache(hasCliPath: boolean, home?: string, now: numb
 }
 
 /**
+ * shouldRefreshCache 판정이 true면 refreshVersionCache를 실행한다(fail-silent) — cli.ts(cmdInit·
+ * cmdStatus)·hook.ts(SessionStart)가 각각 복붙하던 "판정→네트워크 갱신→외곽 try/catch" 시퀀스를
+ * 통합(R1 리팩토링, 2026-07-24). hasCliPath=true 고정 호출(직접 CLI 커맨드)은 곧
+ * "안내 opt-out 아니고 캐시 stale이면 갱신"과 동치.
+ */
+export async function refreshCacheIfStale(hasCliPath: boolean, home?: string): Promise<void> {
+  try {
+    if (shouldRefreshCache(hasCliPath, home)) {
+      await refreshVersionCache(home);
+    }
+  } catch {
+    /* 갱신 실패는 무시(fail-silent) */
+  }
+}
+
+/**
  * npm 레지스트리에서 최신 버전을 받아 캐시에 쓴다(짧은 타임아웃, 비차단·fail-silent).
  * spawn(npm) 대신 fetch — Windows .cmd 실행 문제를 피한다. 실패·타임아웃은 조용히 무시.
  */

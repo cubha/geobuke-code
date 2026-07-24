@@ -2,7 +2,25 @@
 // 키 주입은 셸이 아니라 gbc 코드(judge.ts resolveApiKey)가 처리한다 → hook 명령은
 // 셸 무관 순수 형태라 native Windows(cmd.exe)/bash/zsh/Mac에서 동일하게 동작한다.
 
-import type { Settings } from "./types.js";
+import type { Settings, HookCmd } from "./types.js";
+
+// 리팩토링(2026-07-24) — normalizeHooks·hasStalePreToolUse·hasSessionStartHook·hasPreToolUseGate·
+// ensureSessionStartHook 5개 함수가 각각 복붙하던 "settings.hooks?.<event> 이중 for-loop 순회"를
+// 공용화(R1). event별 hook 목록 순회는 이 두 헬퍼(forEachHookCmd/findHookCmd)만 경유한다 — 향후
+// 이벤트 타입 추가·조건 변경 시 단일 지점만 갱신하면 되므로 드리프트를 구조적으로 차단한다.
+function forEachHookCmd(settings: Settings, event: string, fn: (h: HookCmd) => void): void {
+  for (const entry of settings.hooks?.[event] ?? []) {
+    for (const h of entry.hooks ?? []) fn(h);
+  }
+}
+
+function findHookCmd(settings: Settings, event: string, predicate: (command: string) => boolean): HookCmd | undefined {
+  let found: HookCmd | undefined;
+  forEachHookCmd(settings, event, (h) => {
+    if (!found && predicate(h.command)) found = h;
+  });
+  return found;
+}
 
 /**
  * dev(도그푸딩) 설치용 hook 경로 placeholder. `gbc init --dev`가 절대경로(CLI_PATH) 대신 이걸
@@ -50,16 +68,14 @@ export function buildPreCommand(cliPath: string): string {
 export function normalizeHooks(settings: Settings, cliPath: string): number {
   const canon = canonicalPreCommands(cliPath);
   let changed = 0;
-  for (const entry of settings.hooks?.PreToolUse ?? []) {
-    for (const h of entry.hooks ?? []) {
-      // 이미 정식(절대 or placeholder)이면 건드리지 않는다 — dev placeholder를 절대경로로 덮어
-      // 도그푸딩 설치를 깨뜨리지 않게. 진짜 구식(옛 bash 키주입 등)만 절대경로로 교체.
-      if (h.command.includes("hook pre-tool-use") && !canon.includes(h.command)) {
-        h.command = buildPreCommand(cliPath);
-        changed++;
-      }
+  forEachHookCmd(settings, "PreToolUse", (h) => {
+    // 이미 정식(절대 or placeholder)이면 건드리지 않는다 — dev placeholder를 절대경로로 덮어
+    // 도그푸딩 설치를 깨뜨리지 않게. 진짜 구식(옛 bash 키주입 등)만 절대경로로 교체.
+    if (h.command.includes("hook pre-tool-use") && !canon.includes(h.command)) {
+      h.command = buildPreCommand(cliPath);
+      changed++;
     }
-  }
+  });
   return changed;
 }
 
@@ -74,24 +90,14 @@ export function buildSessionStartCommand(cliPath: string): string {
  */
 export function hasStalePreToolUse(settings: Settings, cliPath: string): boolean {
   const canon = canonicalPreCommands(cliPath);
-  for (const entry of settings.hooks?.PreToolUse ?? []) {
-    for (const h of entry.hooks ?? []) {
-      // dev placeholder도 정식이므로 stale 아님 — 절대경로 런타임에서 placeholder를 구식으로 오판해
-      // 'gbc init' 재실행을 헛권하던 false-positive 차단(B-잔여 #3의 실제 증상).
-      if (h.command.includes("hook pre-tool-use") && !canon.includes(h.command)) return true;
-    }
-  }
-  return false;
+  // dev placeholder도 정식이므로 stale 아님 — 절대경로 런타임에서 placeholder를 구식으로 오판해
+  // 'gbc init' 재실행을 헛권하던 false-positive 차단(B-잔여 #3의 실제 증상).
+  return findHookCmd(settings, "PreToolUse", (c) => c.includes("hook pre-tool-use") && !canon.includes(c)) !== undefined;
 }
 
 /** (read-only) SessionStart hook(session-start 명령)이 등록돼 있는지. 0.2.1 이하 init엔 없음. */
 export function hasSessionStartHook(settings: Settings): boolean {
-  for (const entry of settings.hooks?.SessionStart ?? []) {
-    for (const h of entry.hooks ?? []) {
-      if (h.command.includes("hook session-start")) return true;
-    }
-  }
-  return false;
+  return findHookCmd(settings, "SessionStart", (c) => c.includes("hook session-start")) !== undefined;
 }
 
 /**
@@ -101,12 +107,7 @@ export function hasSessionStartHook(settings: Settings): boolean {
  * 검사 불가지만, '게이트 hook이 아예 없음'(=게이트 조용히 죽음)은 cliPath 없이도 결정론적으로 잡힌다.
  */
 export function hasPreToolUseGate(settings: Settings): boolean {
-  for (const entry of settings.hooks?.PreToolUse ?? []) {
-    for (const h of entry.hooks ?? []) {
-      if (h.command.includes("hook pre-tool-use")) return true;
-    }
-  }
-  return false;
+  return findHookCmd(settings, "PreToolUse", (c) => c.includes("hook pre-tool-use")) !== undefined;
 }
 
 /** repo 건강성 — gateDead=gbc 프로젝트인데 게이트 hook 부재, missingSession=SessionStart hook 부재. */
@@ -134,11 +135,7 @@ export function assessRepoHealth(settings: Settings, isGbcProject: boolean): Rep
  * settings를 제자리 수정하고, 새로 추가했으면 true(이미 있으면 false)를 반환한다.
  */
 export function ensureSessionStartHook(settings: Settings, cliPath: string): boolean {
-  for (const entry of settings.hooks?.SessionStart ?? []) {
-    for (const h of entry.hooks ?? []) {
-      if (h.command.includes("hook session-start")) return false;
-    }
-  }
+  if (findHookCmd(settings, "SessionStart", (c) => c.includes("hook session-start"))) return false;
   const hooks = (settings.hooks ??= {});
   (hooks.SessionStart ??= []).push({
     matcher: "startup|resume",

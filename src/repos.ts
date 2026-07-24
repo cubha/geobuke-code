@@ -3,7 +3,7 @@
 // (~/.gbc/api-key·~/.gbc/version-check.json과 동위. gbcDir(homedir())가 ~/.gbc를 보장.)
 import { homedir } from "node:os";
 import { join, resolve, isAbsolute } from "node:path";
-import { gbcDir, readJson, readJsonArray, writeJson, withStoreLock } from "./store.js";
+import { gbcDir, readJsonArray, readJsonObject, writeJson, withStoreLock } from "./store.js";
 
 function reposPath(): string {
   return join(gbcDir(homedir()), "repos.json");
@@ -62,8 +62,7 @@ function verifyRunPath(): string {
 
 /** verify-run.json 판독 — non-object(null·배열 등) 내용은 빈 객체로 방어(크래시 방지, security-auditor Info). */
 function readVerifyRunMap(): Record<string, unknown> {
-  const raw = readJson<unknown>(verifyRunPath(), {});
-  return typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  return readJsonObject<Record<string, unknown>>(verifyRunPath(), {});
 }
 
 /** repo별 고정(pin) 러너 명령 판독 — 없으면 null. 비-문자열 방어 필터(repos.json W4 미러). */

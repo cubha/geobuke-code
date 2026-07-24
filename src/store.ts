@@ -1,6 +1,26 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmdirSync, lstatSync, renameSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { homedir } from "node:os";
+
+/**
+ * 어휘 컨테인먼트(경로 문자열 비교) — abs가 cwd 자신이거나 cwd 하위인지(junit.ts·verify.ts 공용
+ * 추출, 2026-07-24 리팩토링 R1). resolve()는 어휘 연산이라 cwd 내부 심링크가 밖을 가리키는 것은
+ * 못 막는다 — 호출부가 lstatSync 등으로 별도 방어해야 한다(1차 관문일 뿐).
+ */
+export function isWithinCwd(abs: string, cwd: string): boolean {
+  return abs === cwd || abs.startsWith(cwd + sep);
+}
+
+/**
+ * JSON을 객체로 읽는다 — non-object(null·배열 등)는 defaultValue로 방어(repos.ts readVerifyRunMap·
+ * session-map.ts readMap 공용 추출, 2026-07-24 리팩토링 R1). 다른 프로세스가 쓰는 글로벌 파일이라
+ * 형상을 무조건 신뢰하지 않는다는 관례(W4)의 공통 1차 관문 — 값 단위 타입 필터링(문자열만 허용 등)은
+ * 호출부가 각자 이어서 수행한다.
+ */
+export function readJsonObject<T extends Record<string, unknown>>(path: string, defaultValue: T): T {
+  const raw = readJson<unknown>(path, defaultValue);
+  return typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as T) : defaultValue;
+}
 
 /** .gbc 디렉토리 경로 보장 */
 export function gbcDir(cwd: string): string {
@@ -78,7 +98,8 @@ export function writeJson(path: string, data: unknown): void {
   renameSync(tmpPath, path);
 }
 
-function basenameOf(path: string): string {
+/** 크로스플랫폼 경로 마지막 세그먼트 추출(공용, hook.ts 크로스-repo 힌트와 동일 목적으로 재사용). */
+export function basenameOf(path: string): string {
   const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   return idx >= 0 ? path.slice(idx + 1) : path;
 }

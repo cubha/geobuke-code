@@ -3,22 +3,17 @@
 // "이미 게이트됨 → exit 0"은 상태파일만 읽고 즉시 종료(judge 미호출).
 import { loadPlanSpec } from "./spec.js";
 import { markGated } from "./state.js";
-import { loadDefers, isClosedStatus } from "./defer.js";
+import { loadDefers, isClosedStatus, unresolvedDefers } from "./defer.js";
 import { isStopHintMuted } from "./config.js";
 import { loadRepos } from "./repos.js";
 import { writePendingReview } from "./review.js";
 import { addGoldenCase } from "./golden.js";
 import { enqueueScope, readScopeQueue, clearScopeQueue, collectGrepContext, enrichVerdictsWithSpecHash } from "./scope.js";
 import { readProjectSettings, buildUpdateNotice, wasNotified, markNotified } from "./notice.js";
-import {
-  isCacheStale,
-  readVersionCache,
-  refreshVersionCache,
-  shouldRefreshCache,
-} from "./version.js";
+import { refreshVersionCache, shouldRefreshCache, refreshCacheIfStale } from "./version.js";
 import { appendFileSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { gbcDir, resolveProjectRoot } from "./store.js";
+import { gbcDir, resolveProjectRoot, basenameOf } from "./store.js";
 import { nowIso } from "./time.js";
 import { logEvent } from "./metrics.js";
 import {
@@ -40,7 +35,6 @@ interface PreToolUseInput {
   tool_name?: string;
   tool_input?: EditToolInput;
   cwd?: string;
-  permission_mode?: string;
   session_id?: string;
 }
 
@@ -525,7 +519,7 @@ export function buildCrossRepoHint(repos: string[], cwd: string): string {
       // 자기 프로젝트가 W1에서 폐기한 TOCTOU 패턴(cli.ts cmdMetrics·cmdRepos 표준과 통일).
       // lstat은 링크를 안 따라가 symlink면 isDirectory()=false(보안검토 S3), 부재는 throw→catch skip.
       if (!lstatSync(abs).isDirectory()) continue;
-      unresolved = loadDefers(abs).filter((d) => !isClosedStatus(d.status));
+      unresolved = unresolvedDefers(abs);
     } catch {
       continue;
     }
@@ -533,7 +527,7 @@ export function buildCrossRepoHint(repos: string[], cwd: string): string {
     const ip = unresolved.filter((d) => d.status === "in_progress").length;
     const op = unresolved.length - ip;
     const counts = [ip ? `진행중${ip}` : "", op ? `미착수${op}` : ""].filter(Boolean).join("·");
-    const name = abs.split(/[\\/]/).filter(Boolean).pop() ?? abs;
+    const name = basenameOf(abs); // store.ts 공용(2026-07-24 리팩토링, R1) — 경로 부재면 abs 그대로.
     segs.push(`${name} ${counts}`);
   }
   return segs.length ? `🌐 타 repo 미해결: ${segs.join(" · ")}` : "";
@@ -622,13 +616,7 @@ async function sessionStartBody(ctx?: HookContext, onCwd?: (cwd: string) => void
   // ①신버전 안내 — 캐시가 stale이면 '표시 전에' 먼저 갱신(1.5s 상한, fail-silent)해 이번 세션에
   // 즉시 반영한다(표시-후-갱신의 '다음 세션 지연' 제거). SessionStart는 게이트를 막지 않으므로
   // 짧은 네트워크가 안전(advisor 승인). 갱신은 24h TTL당 1회만 발생.
-  try {
-    if (ctx?.cliPath && process.env.GBC_NO_UPDATE_NOTICE !== "1" && isCacheStale(readVersionCache())) {
-      await refreshVersionCache();
-    }
-  } catch {
-    /* 갱신 실패는 무시(fail-silent) */
-  }
+  await refreshCacheIfStale(Boolean(ctx?.cliPath));
   // 업데이트 안내(staleness + version) — SessionStart 보유 코호트(0.2.3+)용. 세션 식별자가 없어
   // 항상 표시되므로 dedup 대신 GBC_NO_UPDATE_NOTICE opt-out에 맡긴다(buildUpdateNotice 내부).
   // 위에서 갱신된 캐시를 읽으므로 신버전이 뜨는 그 세션에 즉시 표시된다.
