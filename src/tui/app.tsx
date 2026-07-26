@@ -608,6 +608,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           onEnded: (info) => {
             sessionsRef.current.delete(repoId);
             setTabs((prev) => updateTabStatus(prev, repoId, { status: "dead" }));
+            // D-4(잔여 근본수정) — optOutTab과의 비대칭 수정: 세션이 스스로 죽을 때(사용자의 opt-out이
+            // 아니라 SESSION_ENDED 등)는 지금까지 이 repo의 대기 승인을 아무도 처리하지 않았다.
+            // 결과: 그 승인의 canUseTool Promise가 죽은 세션에 대고 영구 대기(leak)하고, 마침 이
+            // 탭이 활성탭이었다면 화면엔 이제 답할 수 없는 승인 프롬프트만 남는다. optOutTab과
+            // 동일하게 deny로 drain한다.
+            const flushedCount = drainApprovals(repoId, "n");
+            if (flushedCount > 0 && repoId === tabsRef.current.activeTabId && stateRef.current.approval) {
+              dispatch({ type: "APPROVAL_ANSWERED", choice: "n" });
+            }
             // 0.10.4 ST2 — activeTabId 가드 제거: per-repo 버퍼라 배경 탭 배너도 그 탭에 안전히
             // 쌓이고, 사용자가 나중에 그 탭으로 돌아오면 확인할 수 있다(사이드바 ✖ 아이콘과 상보).
             pushLine(repoId, `🐢 세션이 종료되어 다음 메시지부터 새 세션으로 다시 시작합니다. (${info.reason.slice(0, 80)})`, "warn");
@@ -617,7 +626,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       sessionsRef.current.set(repoId, session);
       return session;
     },
-    [model, makeInkCanUseTool, makeOnGateDecision, makeHandleEngineMessage, pushLine],
+    [model, makeInkCanUseTool, makeOnGateDecision, makeHandleEngineMessage, pushLine, drainApprovals],
   );
 
   // ST1-3(0.11.0) — repoId를 tabsRef.current.activeTabId에서 암묵적으로 읽던 것을 명시 매개변수로
@@ -665,6 +674,22 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         // EngineSession.submit()도 runEngine과 동일 계약(rethrow하지 않음, engine.ts) — 인증/네트워크
         // 실패·중단 어느 쪽도 반환값으로만 알 수 있다(0.9.1 실사용자 보고 교훈 승계).
         commitStream(repoId); // 턴 종료 — 동적 영역에 델타 잔여가 남아있으면 정리(중단된 턴 방어)
+        // D-4(잔여 근본수정, scope-critic 재검토 2차 지적) — session.submit()이 반환했다는 것 자체가
+        // "이 턴 안에서 열렸던 canUseTool 승인은 전부 해소됐어야 한다"는 뜻이다(SDK가 canUseTool의
+        // resolve를 기다려야 다음 메시지를 만들 수 있으므로). 그런데도 이 repo의 큐에 뭔가 남아있다면
+        // 그건 이번 턴 도중 세션이 죽으며 생긴 고아 항목이다 — 발생 경로가 3가지라 분기별로 따로
+        // 잡으면 하나씩 새어나간다:
+        //   ① SESSION_ENDED로 여기 바로 반환(아래 if) — 이 지점의 drain으로 커버.
+        //   ② onEnded가 유휴 사망을 별도로 잡는 경우 — getOrCreateSession의 onEnded가 이미 drain.
+        //   ③ createEngineSessionWithResumeFallback이 첫 세션의 SESSION_ENDED를 여기 알리지 않고
+        //      내부에서 새 세션으로 조용히 재시도(engine.ts 704~712행) — 성공하면 result는 에러가
+        //      아니므로 아래 if도 안 걸리고, 죽은 첫 세션이 남긴 큐 항목은 영원히 고아가 된다.
+        // ①·②는 이미 비어있어 여기서 no-op이고, ③이 바로 이 지점이 아니면 못 잡는 이유다 — session.
+        // submit()이 반환한 "직후"라는 시점 자체가 유일하게 세 경로를 전부 포괄한다.
+        const flushedCount = drainApprovals(repoId, "n");
+        if (flushedCount > 0 && repoId === tabsRef.current.activeTabId && stateRef.current.approval) {
+          dispatch({ type: "APPROVAL_ANSWERED", choice: "n" });
+        }
         if (result.isError && result.error?.startsWith("SESSION_ENDED")) {
           // ST2(0.9.4) 감지 → 여기서 실제 복구: 죽은 세션을 버리고 다음 submit()이 새로 만들게 한다.
           // (0.10.0 ST5) onEnded가 유휴 사망을 이미 잡았다면 이 분기는 "이 submit() 자체가 대기
@@ -726,7 +751,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         }
       }
     },
-    [getOrCreateSession, pushLine, pushSegments, commitStream, slashSkills],
+    [getOrCreateSession, pushLine, pushSegments, commitStream, slashSkills, drainApprovals],
   );
 
   // ST1-3(0.11.0) — submit() 종료 직후 그 repo의 대기열을 순차 drain한다. submit()이 이미 자신의
