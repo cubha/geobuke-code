@@ -103,6 +103,19 @@ test("APPROVAL_REQUESTED: kind:'spec-add' 명시 시 approval.kind에 그대로 
   assert.equal(s.approval.kind, "spec-add");
 });
 
+test("APPROVAL_REQUESTED: preview 생략 시 approval.preview=null(기존 계약 불변)", () => {
+  const s = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r" });
+  assert.equal(s.approval.preview, null);
+});
+
+test("APPROVAL_REQUESTED: preview는 kind와 독립적으로 반영된다(spec-add에도 generic에도 실릴 수 있음, ST2-2)", () => {
+  const preview = { toolName: "Edit", input: { file_path: "a.ts" } };
+  const generic = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", preview });
+  assert.deepEqual(generic.approval.preview, preview);
+  const specAdd = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", kind: "spec-add", preview });
+  assert.deepEqual(specAdd.approval.preview, preview, "kind=spec-add여도 preview는 그대로 실린다(의미론축과 표시축 분리)");
+});
+
 test("APPROVAL_CASE_DERIVED: approval.derivedCase 채움(엔진 도출 완료)", () => {
   let s = createInitialState();
   s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "r" });
