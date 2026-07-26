@@ -731,10 +731,25 @@ const SIDEBAR_REPO_PREFIX_COLUMNS = 7;
 const SIDEBAR_START_SUFFIX_COLUMNS = 7;
 
 /** 사이드바 repo 목록 한 줄에 들어가도록 경로를 폭 예산에 맞게 축약(순수). */
-export function formatSidebarRepoPath(path: string, isStart: boolean): string {
+// D-5(잔여 근본수정) — 승인 대기 배지(" [N]"/" [9+]") 최대폭. isStart와 동일하게 이 row에 배지가
+// 실제로 뜰 때만 예산에서 뺀다(항상 예약하면 배지가 드문 상황에서도 매 row 경로폭이 손해를 본다).
+const SIDEBAR_APPROVAL_BADGE_COLUMNS = 5;
+
+export function formatSidebarRepoPath(path: string, isStart: boolean, hasApproval = false): string {
   const budget =
-    SIDEBAR_INNER_COLUMNS - SIDEBAR_REPO_PREFIX_COLUMNS - (isStart ? SIDEBAR_START_SUFFIX_COLUMNS : 0);
+    SIDEBAR_INNER_COLUMNS -
+    SIDEBAR_REPO_PREFIX_COLUMNS -
+    (isStart ? SIDEBAR_START_SUFFIX_COLUMNS : 0) -
+    (hasApproval ? SIDEBAR_APPROVAL_BADGE_COLUMNS : 0);
   return abbreviateDir(path, budget);
+}
+
+/** 승인 대기 건수를 사이드바 배지 문구로. 0건이면 배지 자체가 없다는 뜻이라 빈 문자열(호출부가
+ * hasApproval 판정과 이 결과를 같은 조건 — count>0 — 으로 묶어 쓴다). 10건 이상은 "[9+]"로
+ * 상한해 SIDEBAR_APPROVAL_BADGE_COLUMNS 폭 예산이 실제 렌더에서도 항상 지켜지게 한다. */
+export function formatApprovalBadge(count: number): string {
+  if (count <= 0) return "";
+  return ` [${count > 9 ? "9+" : count}]`;
 }
 
 // ⌃R 토글 ReposPanel도 동일 계열 오버플로(사이드바 수정 시 scope-critic 지적, 2026-07-17).

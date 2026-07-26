@@ -441,7 +441,12 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 근본원인이었다, security-auditor DEEP 발견). useRef에 담아 async 클로저(makeInkCanUseTool)
   // 안에서도 항상 최신 상태를 동기적으로 읽고 쓴다(useState로 올리면 stale 클로저로 wasEmpty/shift
   // 판정이 깨진다 — scope-critic D-2 리뷰 지적).
-  const approvalQueueRef = useRef<ApprovalQueueState<QueuedApproval>>(createApprovalQueue<QueuedApproval>());
+  // D-5 — submitQueue(289~293행)와 동일한 state+ref 미러 패턴. approvalQueueRef만으론 mutation이
+  // 렌더를 트리거하지 않아 사이드바 배지가 갱신되지 않는다 — setApprovalQueue를 각 변경 지점에서
+  // 함께 호출해 렌더를 깨우고, 다음 렌더의 아래 대입이 ref를 다시 동기화한다.
+  const [approvalQueue, setApprovalQueue] = useState<ApprovalQueueState<QueuedApproval>>(() => createApprovalQueue<QueuedApproval>());
+  const approvalQueueRef = useRef(approvalQueue);
+  approvalQueueRef.current = approvalQueue;
   // activeTabId 가드 — makeOnGateDecision(494행 근처)·makeHandleEngineMessage(507행 근처)와 동일
   // 규약: 화면(TuiState)엔 지금 보고 있는 탭의 것만 dispatch한다. 배경 탭 push는 이 가드에 걸려
   // 애초에 dispatch 자체가 안 나가므로, 기존 최소완화(ApprovalBox 경고 배지)가 다루던 "이미 뜬
@@ -491,6 +496,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       removed.resolve({ choice });
       flushedCount++;
     }
+    if (flushedCount > 0) setApprovalQueue(approvalQueueRef.current); // 루프당 1회만(불필요 리렌더 방지, queue.ts 관례).
     return flushedCount;
   }, []);
 
@@ -514,6 +520,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         };
         const wasEmpty = countApprovalsFor(approvalQueueRef.current, repoId) === 0;
         approvalQueueRef.current = pushApproval(approvalQueueRef.current, repoId, item);
+        setApprovalQueue(approvalQueueRef.current); // D-5 — 사이드바 배지 렌더 트리거.
         // 이 repo의 큐가 비어있었을 때만 즉시 화면에 띄운다 — 이미 뭔가 대기 중이면 그게 응답될 때
         // 이어서 연다. activateApproval 자체도 activeTabId 가드를 걸지만, 배경 탭 push는 여기서
         // 애초에 호출 자체를 생략해 불필요한 dispatch를 만들지 않는다.
@@ -527,6 +534,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       // 받으므로(0.11.0 D-3) 큐에서 꺼낸 아이템의 repoId를 다시 읽어 방어할 필요가 없어졌다.
       const { queue } = shiftApproval(approvalQueueRef.current, repoId);
       approvalQueueRef.current = queue;
+      setApprovalQueue(approvalQueueRef.current); // D-5 — 사이드바 배지 렌더 트리거.
       if (resolution.deferText) {
         try {
           addDefer(repoId, resolution.deferText);
@@ -1154,6 +1162,16 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     sidebarContentRows,
     state.titleMode,
   );
+  // D-5 — repoId별 승인 대기 건수(0건인 repo는 아예 키를 안 실어 Sidebar가 "표시할 배지 없음"과
+  // "0건"을 굳이 구분할 필요가 없게 한다, formatGateLine의 queueCount 생략 규약과 동일 정신).
+  const approvalCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const r of repos) {
+      const n = countApprovalsFor(approvalQueue, r);
+      if (n > 0) counts[r] = n;
+    }
+    return counts;
+  }, [approvalQueue, repos]);
   const chatHeaderRows = computeHeaderRows(frameLayout.innerColumns, responsiveLayout.effectiveTitleMode);
   const chatTotalRows = computeChatRegionRows(rows, frameLayout.bandRows, chatHeaderRows);
   const sidebarColumns = responsiveLayout.showSidebar ? SIDEBAR_COLUMNS : 0;
@@ -1286,7 +1304,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         {responsiveLayout.showSidebar && (
           <Box flexDirection="column" flexShrink={0} height={chatTotalRows} overflow="hidden">
             <WelcomeCard specCount={state.specCount} deferCount={state.deferCount} skills={cardSkills} />
-            <Sidebar cwd={cwd} tabs={tabs} repos={repos} focused={sidebarFocused} cursor={sidebarCursor} showMascot={responsiveLayout.showMascot} />
+            <Sidebar cwd={cwd} tabs={tabs} repos={repos} focused={sidebarFocused} cursor={sidebarCursor} showMascot={responsiveLayout.showMascot} approvalCounts={approvalCounts} />
           </Box>
         )}
         {/* SubTask2(0.10.1) — 대화영역 박스 상주(시안 ff0eb0b1). Static을 완전히 걷어내고 ChatBox가
