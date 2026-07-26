@@ -33,6 +33,7 @@ import {
   formatSidebarRepoPath,
   formatReposPanelPath,
   computeFrameLayout,
+  decorateBubble,
 } from "../dist/tui/format.js";
 import { createInitialState, reduce } from "../dist/tui/model.js";
 
@@ -535,6 +536,43 @@ test("computeContentColumns: 사이드바 포함 100열 터미널이 워드마�
 // ── 스트리밍 프리뷰 tail 윈도잉 (0.10.0 A3b 실기검증 이슈③, braintrust 4렌즈 만장일치) — ink
 // <Static>은 뷰포트 초과 시 이전 프레임을 못 지워 잔상이 쌓인다(tmux 실측: "안녕하세요" 8회 중복).
 // 표준형(Claude Code 본체·gemini-cli MaxSizedBox 동일 패턴): 마지막 N줄만 남기고 잘림을 표시. ──
+
+// ── decorateBubble(0.11.0 ST4-2, Task C-4) — 사용자 승인 Option B(정렬만·장식 없음) 확정 반영.
+// role="user"만 우측 정렬(줄 앞 공백 패딩), assistant/system은 항등(기존 좌측정렬 그대로 — 시안에
+// 새 장식 요소 없음). 반드시 innerWidth로 이미 wrap된 lines를 받는다(wrap 전 패딩은 폭 계산이 깨짐). ──
+
+test("decorateBubble: role=user — 각 줄 앞에 공백을 채워 우측 정렬한다", () => {
+  const lines = [[{ text: "hi", tone: "plain" }]];
+  const out = decorateBubble(lines, "user", 10);
+  assert.equal(out[0].map((s) => s.text).join(""), " ".repeat(8) + "hi");
+  assert.equal(stringWidth(out[0].map((s) => s.text).join("")), 10, "총 표시폭은 innerWidth와 같아야 함");
+});
+
+test("decorateBubble: role=assistant/system — 항등(무변경, Option B는 장식 없음)", () => {
+  const lines = [[{ text: "hi", tone: "plain" }], [{ text: "there", tone: "dim" }]];
+  assert.deepEqual(decorateBubble(lines, "assistant", 10), lines);
+  assert.deepEqual(decorateBubble(lines, "system", 10), lines);
+});
+
+test("decorateBubble: role=user — 줄 표시폭이 innerWidth 이상이면 패딩 없이 그대로(음수 패딩 방지)", () => {
+  const lines = [[{ text: "이미 폭을 꽉 채운 긴 줄", tone: "plain" }]];
+  const out = decorateBubble(lines, "user", 5);
+  assert.deepEqual(out, lines);
+});
+
+test("decorateBubble: role=user — 멀티라인(wrap된 여러 줄) 각각 독립적으로 우측 정렬", () => {
+  const lines = [[{ text: "ab", tone: "plain" }], [{ text: "cdef", tone: "plain" }]];
+  const out = decorateBubble(lines, "user", 6);
+  assert.equal(out[0].map((s) => s.text).join(""), "    ab");
+  assert.equal(out[1].map((s) => s.text).join(""), "  cdef");
+});
+
+test("decorateBubble: role=user — 패딩 세그먼트는 tone:plain(장식색 없음 — Option B)", () => {
+  const out = decorateBubble([[{ text: "x", tone: "accent" }]], "user", 5);
+  assert.equal(out[0][0].tone, "plain");
+  assert.equal(out[0][1].text, "x");
+  assert.equal(out[0][1].tone, "accent", "원본 세그먼트 톤은 보존");
+});
 
 test("tailLines: 줄 수가 상한 이하면 원문 그대로(자르지 않음)", () => {
   assert.equal(tailLines("a\nb\nc", 5), "a\nb\nc");
