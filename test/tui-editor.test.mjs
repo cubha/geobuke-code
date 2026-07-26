@@ -19,6 +19,8 @@ import {
   isEmpty,
   getText,
   commitSubmit,
+  getRepoEditorState,
+  setRepoEditorState,
 } from "../dist/tui/editor.js";
 
 test("createInitialState: lines=[''], 커서 (0,0), history 빈배열", () => {
@@ -202,6 +204,32 @@ test("commitSubmit: 연속 중복 제출은 history에 다시 쌓지 않음", ()
   s = commitSubmit(insertText(s, "same")).state;
   s = commitSubmit(insertText(s, "same")).state;
   assert.deepEqual(s.history, ["same"]);
+});
+
+// ── ST3-1(0.11.0) — repoId별 에디터 상태(대기중 텍스트+히스토리) 격리. 지금까지 app.tsx가 단일
+// EditorState를 App 전역으로 들고 있어, 탭을 전환하면 다른 repo에서 쌓은 프롬프트 히스토리가
+// ↑로 그대로 보였다(0.10.4 결함1과 동일 결함 클래스 — 활성탭 가정으로 다른 repo 데이터가 샘). ──
+
+test("getRepoEditorState: 등록 없는 repoId는 createInitialState()와 동등한 값(빈 히스토리)", () => {
+  const s = getRepoEditorState({}, "/repo/a");
+  assert.deepEqual(s, createInitialState());
+});
+
+test("setRepoEditorState/getRepoEditorState: repoId별로 완전히 격리된다(교차오염 없음)", () => {
+  let states = {};
+  const aState = commitSubmit(insertText(createInitialState(), "a의 히스토리")).state;
+  states = setRepoEditorState(states, "/repo/a", aState);
+  assert.deepEqual(getRepoEditorState(states, "/repo/a").history, ["a의 히스토리"]);
+  assert.deepEqual(getRepoEditorState(states, "/repo/b").history, [], "b는 a의 히스토리를 전혀 보지 않는다");
+});
+
+test("setRepoEditorState: 지정 repoId만 갱신, 다른 repoId 항목은 물리적으로 손대지 않는다", () => {
+  let states = {};
+  const bState = commitSubmit(insertText(createInitialState(), "b용")).state;
+  states = setRepoEditorState(states, "/repo/b", bState);
+  const before = states["/repo/b"];
+  states = setRepoEditorState(states, "/repo/a", createInitialState());
+  assert.equal(states["/repo/b"], before, "a 갱신이 b 참조를 바꾸지 않음(불필요 리렌더 방지)");
 });
 
 test("모든 편집 연산은 입력 state를 변형하지 않는다(순수성)", () => {
