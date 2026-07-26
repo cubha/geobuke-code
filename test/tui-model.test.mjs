@@ -89,7 +89,7 @@ test("APPROVAL_REQUESTED: gateStatus=block·approval 생성(reason만, derivedCa
   let s = createInitialState();
   s = reduce(s, { type: "TOGGLE_PANEL", panel: "metrics" });
   assert.equal(s.panel, "metrics");
-  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "명세에 없는 파일 편집: 붙여넣기 처리 시나리오 미지정" });
+  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "명세에 없는 파일 편집: 붙여넣기 처리 시나리오 미지정", repoId: "/repo/a" });
   assert.equal(s.gateStatus, "block");
   assert.equal(s.approval.reason, "명세에 없는 파일 편집: 붙여넣기 처리 시나리오 미지정");
   assert.equal(s.approval.derivedCase, null);
@@ -99,26 +99,35 @@ test("APPROVAL_REQUESTED: gateStatus=block·approval 생성(reason만, derivedCa
 });
 
 test("APPROVAL_REQUESTED: kind:'spec-add' 명시 시 approval.kind에 그대로 반영(bridge.ts ApprovalRequestContext.kind와 대칭)", () => {
-  const s = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", kind: "spec-add" });
+  const s = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", kind: "spec-add", repoId: "/repo/a" });
   assert.equal(s.approval.kind, "spec-add");
 });
 
+// security-auditor 지적(0.11.0 Task C 발행게이트 DEEP 스캔, Critical) — 승인 dispatch가 repoId를
+// 안 실어 백그라운드 탭의 승인이 활성탭 화면에 오귀속 표시됐다(GATE_RESULT는 이미 활성탭 격리인데
+// APPROVAL_REQUESTED만 비대칭). 근본(배경 승인을 지연/큐잉하는 아키텍처 변경)은 별도 검토 대상이라
+// 이번엔 최소 완화: approval에 repoId를 실어 최소한 사용자가 오귀속을 인지할 수 있게 한다.
+test("APPROVAL_REQUESTED: repoId가 approval.repoId에 그대로 실린다", () => {
+  const s = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", repoId: "/repo/other" });
+  assert.equal(s.approval.repoId, "/repo/other");
+});
+
 test("APPROVAL_REQUESTED: preview 생략 시 approval.preview=null(기존 계약 불변)", () => {
-  const s = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r" });
+  const s = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", repoId: "/repo/a" });
   assert.equal(s.approval.preview, null);
 });
 
 test("APPROVAL_REQUESTED: preview는 kind와 독립적으로 반영된다(spec-add에도 generic에도 실릴 수 있음, ST2-2)", () => {
   const preview = { toolName: "Edit", input: { file_path: "a.ts" } };
-  const generic = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", preview });
+  const generic = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", preview, repoId: "/repo/a" });
   assert.deepEqual(generic.approval.preview, preview);
-  const specAdd = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", kind: "spec-add", preview });
+  const specAdd = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", kind: "spec-add", preview, repoId: "/repo/a" });
   assert.deepEqual(specAdd.approval.preview, preview, "kind=spec-add여도 preview는 그대로 실린다(의미론축과 표시축 분리)");
 });
 
 test("APPROVAL_CASE_DERIVED: approval.derivedCase 채움(엔진 도출 완료)", () => {
   let s = createInitialState();
-  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "r" });
+  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "r", repoId: "/repo/a" });
   s = reduce(s, { type: "APPROVAL_CASE_DERIVED", caseText: 'bracketed paste 수신 시 멀티라인 원문 그대로 삽입' });
   assert.equal(s.approval.derivedCase, "bracketed paste 수신 시 멀티라인 원문 그대로 삽입");
 });
@@ -131,7 +140,7 @@ test("APPROVAL_CASE_DERIVED: approval 없을 때는 no-op(방어)", () => {
 
 test("APPROVAL_SELECTION_MOVE: y→n→e→d→y 순환(키맵 순서), 역방향도 순환", () => {
   let s = createInitialState();
-  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "r" });
+  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "r", repoId: "/repo/a" });
   assert.deepEqual([...APPROVAL_CHOICES], ["y", "n", "e", "d"]);
   s = reduce(s, { type: "APPROVAL_SELECTION_MOVE", direction: 1 });
   assert.equal(s.approval.selection, "n");
@@ -146,7 +155,7 @@ test("APPROVAL_SELECTION_MOVE: y→n→e→d→y 순환(키맵 순서), 역방�
 
 test("APPROVAL_ANSWERED: approval=null·gateStatus=idle(재판정 대기)·streaming=true(엔진 재개)", () => {
   let s = createInitialState();
-  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "r" });
+  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "r", repoId: "/repo/a" });
   s = reduce(s, { type: "APPROVAL_ANSWERED", choice: "y" });
   assert.equal(s.approval, null);
   assert.equal(s.gateStatus, "idle");
@@ -259,7 +268,7 @@ test("TAB_SWITCHED: 새 탭 기준 statusline·spec/defer로 완전히 재시드
 test("TAB_SWITCHED: 이전 탭의 streaming·approval·gateStatus·streamingText를 절대 이어받지 않는다(교차오염 차단)", () => {
   let s = createInitialState();
   s = reduce(s, { type: "TURN_START" });
-  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "r" });
+  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "r", repoId: "/repo/a" });
   s = reduce(s, { type: "STREAM_DELTA", text: "이전 탭 진행중 텍스트" });
   s = reduce(s, { type: "GATE_RESULT", status: "block", specCount: 9, deferCount: 9 });
   s = reduce(s, { type: "TAB_SWITCHED", dir: "/repo/b", branch: "", dirty: false, model: "", specCount: 0, deferCount: 0 });
