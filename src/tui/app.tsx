@@ -61,6 +61,7 @@ import { activeDeferItems, addDefer } from "../defer.js";
 import { loadRepos } from "../repos.js";
 import { createTabRegistry, ensureTab, removeTab, setActiveTab, updateTabStatus, isRepoStreaming } from "./tabs.js";
 import { createSubmitQueue, enqueue, dequeueNext, countFor, type SubmitQueue } from "./queue.js";
+import { createApprovalQueue, pushApproval, peekApproval, shiftApproval, countApprovalsFor, type ApprovalQueueState } from "./approval-queue.js";
 import { appendText, appendSegments, getBuffer, type ScrollBuffers, type EntryRole } from "./scrollback.js";
 import { gbcDir } from "../store.js";
 import { nowIso } from "../time.js";
@@ -435,13 +436,62 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // ST2-2/2-3(0.11.0) — canUseTool이 이미 들고 있는 원본 toolName/input을 그대로 실어둔다.
     preview: ToolCallPreview;
   };
-  const approvalQueue = useRef<QueuedApproval[]>([]);
-  const activateApproval = useCallback((item: QueuedApproval) => {
+  // D-2/D-3(잔여 근본수정) — approval-queue.ts로 repoId별 격리(직전엔 전체 세션 공유 단일 배열이라
+  // repoId 필드는 태깅만 될 뿐 배경 탭 승인이 활성 탭 화면에 그대로 dispatch되던 Critical의
+  // 근본원인이었다, security-auditor DEEP 발견). useRef에 담아 async 클로저(makeInkCanUseTool)
+  // 안에서도 항상 최신 상태를 동기적으로 읽고 쓴다(useState로 올리면 stale 클로저로 wasEmpty/shift
+  // 판정이 깨진다 — scope-critic D-2 리뷰 지적).
+  const approvalQueueRef = useRef<ApprovalQueueState<QueuedApproval>>(createApprovalQueue<QueuedApproval>());
+  // activeTabId 가드 — makeOnGateDecision(494행 근처)·makeHandleEngineMessage(507행 근처)와 동일
+  // 규약: 화면(TuiState)엔 지금 보고 있는 탭의 것만 dispatch한다. 배경 탭 push는 이 가드에 걸려
+  // 애초에 dispatch 자체가 안 나가므로, 기존 최소완화(ApprovalBox 경고 배지)가 다루던 "이미 뜬
+  // 승인이 사실 다른 탭 것"이라는 상황 자체가 구조적으로 불가능해진다(D-6에서 그 경고 분기 제거).
+  // activeTabId 가드 없이 항상 dispatch하는 원형 — activateApproval(가드 있음)과
+  // reseedApprovalForTab(아래, repoId를 이미 신뢰할 수 있어 가드가 필요없고 오히려 방해가 되는
+  // 경로) 둘이 공유한다.
+  const dispatchApprovalActivation = useCallback((item: QueuedApproval) => {
     dispatch({ type: "APPROVAL_REQUESTED", reason: item.reason, kind: item.ctx.kind, preview: item.preview, repoId: item.repoId });
     if (item.ctx.kind === "spec-add") {
       dispatch({ type: "APPROVAL_CASE_DERIVED", caseText: item.ctx.derivedCase });
     }
     setSidebarFocused(false); // SubTask5 — 승인 프롬프트가 뜨면 사이드바 포커스를 자동 해제.
+  }, []);
+  const activateApproval = useCallback(
+    (item: QueuedApproval) => {
+      if (item.repoId !== tabsRef.current.activeTabId) return;
+      dispatchApprovalActivation(item);
+    },
+    [dispatchApprovalActivation],
+  );
+  // D-3 — 이 repo에 배경에서 쌓인 대기 승인이 있으면(peek만, shift는 사용자가 응답할 때) 탭 전환
+  // 직후 재현한다. TAB_SWITCHED 리듀서가 TuiState를 createInitialState로 완전 재시드해 approval을
+  // 이미 null로 되돌린 다음이라(model.ts), 그 위에 이 dispatch가 안전하게 얹힌다.
+  // ⚠️ activateApproval이 아니라 dispatchApprovalActivation을 직접 부른다(scope-critic 지적,
+  // ref staleness 버그) — 여기서 넘어오는 repoId는 switchToTab이 setTabs로 "방금 예약한" 새
+  // activeTabId 그 자체라 이미 신뢰할 수 있는데, tabsRef.current는 다음 렌더 전까지(280행 대입
+  // 지점) 여전히 이전 탭을 가리킨다. activateApproval의 가드를 거치면 "전환 목적지 repoId !==
+  // 아직 안 갱신된 이전 activeTabId"가 항상 참이 돼 재시드 자체가 조용히 죽은 코드가 된다.
+  const reseedApprovalForTab = useCallback(
+    (repoId: string) => {
+      const head = peekApproval(approvalQueueRef.current, repoId);
+      if (head) dispatchApprovalActivation(head);
+    },
+    [dispatchApprovalActivation],
+  );
+  // optOutTab(탭 종료)·onEnded(세션 사망, D-4)가 공유하는 drain — 단순 폐기(clear)가 아니라 각
+  // 항목을 명시 choice로 resolve해야 한다. resolve 미호출로 두면 canUseTool을 기다리는 SDK
+  // Promise가 영구 대기(leak)한다(scope-critic D-2 리뷰 지적, 기존 전역배열 시절부터 있던 동일
+  // 위험 — optOutTab은 이미 이걸 지키고 있었고 onEnded엔 아예 처리 자체가 없었다).
+  const drainApprovals = useCallback((repoId: string, choice: ApprovalChoice) => {
+    let flushedCount = 0;
+    for (;;) {
+      const { removed, queue } = shiftApproval(approvalQueueRef.current, repoId);
+      approvalQueueRef.current = queue;
+      if (!removed) break;
+      removed.resolve({ choice });
+      flushedCount++;
+    }
+    return flushedCount;
   }, []);
 
   // SubTask10 — 스플래시(워드마크+카드+웰컴)는 더 이상 Static에 커밋하지 않는다. 0.11.0부터는
@@ -462,31 +512,33 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           resolve,
           preview: { toolName, input: input as Record<string, unknown> },
         };
-        const wasEmpty = approvalQueue.current.length === 0;
-        approvalQueue.current.push(item);
-        // 큐가 비어있었을 때만 즉시 화면에 띄운다 — 이미 뭔가 대기 중이면 그게 응답될 때 이어서 연다.
-        if (wasEmpty) activateApproval(item);
+        const wasEmpty = countApprovalsFor(approvalQueueRef.current, repoId) === 0;
+        approvalQueueRef.current = pushApproval(approvalQueueRef.current, repoId, item);
+        // 이 repo의 큐가 비어있었을 때만 즉시 화면에 띄운다 — 이미 뭔가 대기 중이면 그게 응답될 때
+        // 이어서 연다. activateApproval 자체도 activeTabId 가드를 걸지만, 배경 탭 push는 여기서
+        // 애초에 호출 자체를 생략해 불필요한 dispatch를 만들지 않는다.
+        if (wasEmpty && repoId === tabsRef.current.activeTabId) activateApproval(item);
       });
       const resolution = resolveApproval(answer.choice, ctx, input as Record<string, unknown>, answer.editedText);
       // ANSWERED dispatch는 useInput의 answer() 헬퍼가 resolve() 직전에 이미 실행한다(3차 자체검토로
       // 발견한 중복 제거 — 여기서 다시 부르면 동일 이벤트가 두 번 발화돼 향후 reducer가 비-멱등 로직을
       // 갖게 될 때 이중 실행 버그의 씨앗이 된다).
-      // resolvedItem — shift()가 반환하는 "지금 막 답변된 그 아이템"에서 repoId를 읽는다(큐 헤드가
-      // 우연히 다른 repo 것일 리 없음: canUseTool 클로저마다 자기 repoId로 push했으므로 이 아이템은
-      // 항상 이 canUseTool 호출이 만든 그 아이템이다 — 그래도 방어적으로 cwd를 최종 폴백에 둔다).
-      const resolvedItem = approvalQueue.current.shift();
+      // repoId는 이 canUseTool 클로저 자신의 것을 그대로 쓴다 — shiftApproval이 repoId를 인자로
+      // 받으므로(0.11.0 D-3) 큐에서 꺼낸 아이템의 repoId를 다시 읽어 방어할 필요가 없어졌다.
+      const { queue } = shiftApproval(approvalQueueRef.current, repoId);
+      approvalQueueRef.current = queue;
       if (resolution.deferText) {
         try {
-          addDefer(resolvedItem?.repoId ?? cwd, resolution.deferText);
+          addDefer(repoId, resolution.deferText);
         } catch {
           // 로컬 TUI 편의기능 — 실패해도 canUseTool 응답(deny)은 이미 확정돼 있어 엔진 흐름은 계속됨.
         }
       }
-      const next = approvalQueue.current[0];
-      if (next) activateApproval(next);
+      const next = peekApproval(approvalQueueRef.current, repoId);
+      if (next && repoId === tabsRef.current.activeTabId) activateApproval(next);
       return resolution.result;
     };
-  }, [cwd, activateApproval]);
+  }, [activateApproval]);
 
   // ST11 — repoId별 게이트 판정 콜백. 백그라운드 탭의 판정은 TuiState(단일 라이브 뷰)에 절대
   // dispatch하지 않는다 — 화면엔 지금 보고 있는 탭의 게이트 상태만 떠야 한다(교차오염 표면 차단,
@@ -717,8 +769,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         streaming: isRepoStreaming(tabsRef.current, repoId),
       });
       setScrollOffset(0); // SubTask3 — 탭 전환 시 대화창 최하단으로.
+      reseedApprovalForTab(repoId); // D-3 — 배경에서 쌓인 이 repo의 대기 승인을 재현.
     },
-    [model],
+    [model, reseedApprovalForTab],
   );
 
   // ST11 — 탭 전환/opt-in. TuiState를 새 탭 기준으로 완전히 재시드한다(model.ts TAB_SWITCHED).
@@ -739,10 +792,8 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // tabs.ts removeTab이 스스로 거부한다(항상 최소 1탭 유지).
   const optOutTab = useCallback(
     async (repoId: string) => {
-      const flushed = approvalQueue.current.filter((item) => item.repoId === repoId);
-      approvalQueue.current = approvalQueue.current.filter((item) => item.repoId !== repoId);
-      for (const item of flushed) item.resolve({ choice: "n" });
-      if (flushed.length > 0 && repoId === tabsRef.current.activeTabId && stateRef.current.approval) {
+      const flushedCount = drainApprovals(repoId, "n"); // D-3 — approval-queue.ts 기반으로 교체.
+      if (flushedCount > 0 && repoId === tabsRef.current.activeTabId && stateRef.current.approval) {
         dispatch({ type: "APPROVAL_ANSWERED", choice: "n" });
       }
       const session = sessionsRef.current.get(repoId);
@@ -761,7 +812,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         return next;
       });
     },
-    [dispatchTabSwitch],
+    [dispatchTabSwitch, drainApprovals],
   );
 
   // 0.10.4 ST5(개선1) — 슬래시 드롭다운 판정(파생 상태, editorState 첫 줄에서 매 렌더 재계산).
@@ -816,7 +867,10 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // 여기서만 정의한다.
     const answer = (choice: ApprovalChoice, editedText?: string) => {
       dispatch({ type: "APPROVAL_ANSWERED", choice });
-      approvalQueue.current[0]?.resolve({ choice, editedText });
+      // state.approval.repoId — 지금 화면에 뜬 승인은 activateApproval의 activeTabId 가드 때문에
+      // 항상 activeTabId 것이다(D-3). peek으로 그 repo의 큐 헤드를 찾아 resolve만 호출한다 — 실제
+      // shift는 canUseTool 클로저(makeInkCanUseTool)가 resolve 콜백 이후 이어서 수행한다.
+      peekApproval(approvalQueueRef.current, state.approval?.repoId ?? tabsRef.current.activeTabId)?.resolve({ choice, editedText });
     };
     const openEdit = () => {
       setApprovalEditor(Editor.insertText(Editor.createInitialState(), state.approval?.derivedCase ?? ""));
