@@ -48,6 +48,7 @@ import {
   formatResumeFallbackBanner,
   formatCrashDump,
   formatSessionStartFailure,
+  mapContextUsageToStatuslinePatch,
   DeltaAssembler,
 } from "./bridge.js";
 import { createEngineSessionWithResumeFallback, buildSessionOptionsForRepo, mapSdkMessage, type EngineSession } from "../engine.js";
@@ -533,8 +534,14 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       // 후속 제출·재접속(respawn) 전부 이 한 줄로 커버된다. activeTabId 무관(배경 탭도 정확히 갱신).
       setTabs((prev) => updateTabStatus(prev, repoId, { status: "streaming" }));
       const turnStartedAt = Date.now(); // ST15(0.9.2) — statusline lastTurnMs 계산용
+      // ST5-4(0.11.0) — finally에서 getContextUsage()를 부르려면 try 블록 밖에서도 세션 핸들이
+      // 필요하다(catch 경로로 빠지면 세션이 아예 없을 수 있어 undefined 허용). try 내부는 별도
+      // const로 받아 그대로 쓴다 — let을 closure(setTabs 콜백 등)에서 참조하면 TS가 "possibly
+      // undefined"로 좁히지 못한다(재대입 가능성 때문에 narrowing이 함수 경계를 못 넘음).
+      let sessionForUsage: EngineSession | undefined;
       try {
         const session = await getOrCreateSession(repoId);
+        sessionForUsage = session;
         // 0.10.4 ST5(개선1) — "/name [args]" 형태고 name이 스캔된 스킬과 일치하면, 그 SKILL.md
         // 본문을 클라이언트측에서 읽어 프롬프트에 합성 주입한다(engine.ts settingSources:[] 불변식
         // 때문에 SDK가 스킬을 자체 로드하지 않으므로 이게 유일한 발동 경로 — slash.ts 모듈 주석
@@ -591,9 +598,20 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         if (repoId === tabsRef.current.activeTabId) {
           dispatch({ type: "TURN_END" });
           const g = detectGit(repoId);
+          // ST5-4 — 턴 종료 시 1회만(폴링 아님 — 0.9.1 실사용자 보고로 확인된 "매 렌더/키입력마다
+          // 반복 I/O가 타이핑을 지연시킨다" 결함 클래스 재발 방지). fail-open: session이 없거나
+          // getContextUsage()가 실패해도(engine.ts가 이미 null로 흡수) 이 턴의 다른 statusline
+          // 필드(branch·dirty·lastTurnMs) 갱신은 그대로 진행하고, 토큰 필드만 패치에서 생략돼
+          // 직전 표시값이 유지된다(mapContextUsageToStatuslinePatch 계약).
+          const usage = sessionForUsage ? await sessionForUsage.getContextUsage() : null;
           dispatch({
             type: "STATUSLINE_UPDATE",
-            patch: { branch: g.branch, dirty: g.dirty, lastTurnMs: Date.now() - turnStartedAt },
+            patch: {
+              branch: g.branch,
+              dirty: g.dirty,
+              lastTurnMs: Date.now() - turnStartedAt,
+              ...mapContextUsageToStatuslinePatch(usage),
+            },
           });
         }
       }

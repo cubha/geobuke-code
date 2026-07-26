@@ -52,6 +52,19 @@ export function mapEngineMessageToTuiEvents(msg: SdkMessageLike): TuiEvent[] {
   return [];
 }
 
+/**
+ * ST5-2(0.11.0) — engine.ts EngineSession.getContextUsage()의 응답을 STATUSLINE_UPDATE patch로
+ * 매핑한다. null(세션 종료·미지원·오류 — engine.ts가 이미 fail-open으로 흡수)이면 빈 패치를 반환해
+ * 필드를 아예 싣지 않는다 — 0으로 덮어써 직전 표시값을 지우지 않는다(mapEngineMessageToTuiEvents의
+ * ttft_ms 옵셔널 patch 규약과 동일 정신).
+ */
+export function mapContextUsageToStatuslinePatch(
+  usage: SDKControlGetContextUsageResponse | null,
+): Partial<Statusline> {
+  if (!usage) return {};
+  return { tokensUsed: usage.totalTokens, tokensMax: usage.maxTokens };
+}
+
 // ── GateDecision → TuiEvent (gate-sdk.ts의 onDecision seam이 넘겨주는 판정) ──
 
 /**

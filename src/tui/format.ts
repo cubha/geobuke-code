@@ -819,7 +819,18 @@ export function formatStatusline(data: Statusline, opts?: { dirWidth?: number })
   if (data.lastTtftMs > 0) {
     segments.push({ text: `ttft ${(data.lastTtftMs / 1000).toFixed(1)}s`, tone: "dim" });
   }
+  // ST5-3(0.11.0) — 맨 끝에 붙인다: 이 줄은 height=1·overflow=hidden으로 클램프되므로(app.tsx 렌더
+  // 주석 "넘치는 꼬리는 잘리는 게 프레임 밀림보다 낫다"), 순서 자체가 좁은 폭 강등 우선순위다 —
+  // dir/branch/model/usageBar/cost보다 덜 중요한 토큰 정보가 가장 먼저 잘려나간다.
+  if (data.tokensMax > 0) {
+    segments.push({ text: `${formatTokenCount(data.tokensUsed)}/${formatTokenCount(data.tokensMax)}`, tone: "dim" });
+  }
   return segments;
+}
+
+function formatTokenCount(n: number): string {
+  if (n < 1000) return `${n}`;
+  return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
 }
 
 // ── 게이트 줄 ──

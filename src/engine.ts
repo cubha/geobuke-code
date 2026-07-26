@@ -8,7 +8,14 @@
 //    둬야 "agent-sdk가 무엇으로 과금되나"를 실측할 수 있다(하드코딩하면 ⓑ가 사문화). resolveApiKey 미사용.
 // ⚠️ settingSources:[](anti-recursion 불변식): query()가 프로젝트 .claude/settings.json을 로드하면 그 안의
 //    gbc 자신의 PreToolUse stdin hook이 실려 도구 호출마다 게이트가 이중발화/재귀한다. 명시적으로 미로드.
-import type { Options, SDKMessage, SDKUserMessage, HookCallback, CanUseTool } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  Options,
+  SDKMessage,
+  SDKUserMessage,
+  HookCallback,
+  CanUseTool,
+  SDKControlGetContextUsageResponse,
+} from "@anthropic-ai/claude-agent-sdk";
 import type { ExtractionRecord } from "./extraction.js";
 import { appendExtraction } from "./extraction.js";
 import { nowIso } from "./time.js";
@@ -440,6 +447,13 @@ export interface EngineSession {
   interrupt(): Promise<void>;
   /** 세션 프로세스를 종료한다(이후 submit() 호출은 재개 없이 즉시 에러 EngineResult를 반환). */
   close(): void;
+  /**
+   * ST5-1(0.11.0) — 컨텍스트 사용량 조회(SDK getContextUsage, 안정 API — bridge.ts가 예전에 미룬
+   * usage_EXPERIMENTAL...과 다른 채널). 세션 종료·SDK 오류 시 null(throw하지 않는다 — 호출부는
+   * statusline 표시 여부만 결정하고, 실패해도 기존 표시값을 유지해야 한다. fail-open 계약은
+   * ST5-4에서 소비).
+   */
+  getContextUsage(): Promise<SDKControlGetContextUsageResponse | null>;
 }
 
 export type EngineSessionOptions = Omit<EngineOptions, "prompt"> & {
@@ -622,6 +636,14 @@ export async function createEngineSession(opts: EngineSessionOptions): Promise<E
       input.close();
       q.close();
     },
+    async getContextUsage(): Promise<SDKControlGetContextUsageResponse | null> {
+      if (ended) return null;
+      try {
+        return await q.getContextUsage();
+      } catch {
+        return null; // fail-open — 세션이 이 control-request를 지원하지 않거나 일시적으로 응답 못함.
+      }
+    },
   };
 }
 
@@ -694,6 +716,13 @@ export async function createEngineSessionWithResumeFallback(
     },
     close(): void {
       current.close();
+    },
+    // ⚠️ ST5-1 — 메서드별 수동 위임 구조(이 래퍼는 EngineSession 전체를 감싸지 않고 필드마다 손으로
+    // current에 넘긴다). 새 EngineSession 메서드를 추가할 때 여기 위임을 빠뜨리면 resume 경로에서만
+    // 무음 실패(undefined 호출 시 타입에러로 즉시 드러나 컴파일 타임에 걸리지만, 실수로 no-op 폴백을
+    // 넣으면 조용히 죽는다 — 그래서 그대로 current에 위임한다).
+    async getContextUsage(): Promise<SDKControlGetContextUsageResponse | null> {
+      return current.getContextUsage();
     },
   };
 }
