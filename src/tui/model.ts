@@ -9,6 +9,14 @@ export type ApprovalChoice = "y" | "n" | "e" | "d";
 
 export const APPROVAL_CHOICES: readonly ApprovalChoice[] = ["y", "n", "e", "d"];
 
+/** ST2-2(0.11.0) — canUseTool 원본 toolName/input을 그대로 담는다(포맷팅은 렌더 시점, app.tsx가
+ *  diff.ts formatToolPreview로 그때의 rowBudget에 맞춰 수행 — 승인 요청 시점엔 터미널 크기에 따른
+ *  예산을 알 수 없다). */
+export interface ToolCallPreview {
+  toolName: string;
+  input: Record<string, unknown>;
+}
+
 export interface ApprovalState {
   reason: string;
   /** spec-add = 에이전트의 Bash("gbc spec add ...") 자기발화 승인(e/d 유효) · generic = 그 외 도구
@@ -16,6 +24,10 @@ export interface ApprovalState {
   kind: "spec-add" | "generic";
   derivedCase: string | null;
   selection: ApprovalChoice;
+  /** ST2-2(0.11.0) — kind(승인 의미론)와 독립된 표시축. spec-add·generic 어느 kind에도 실릴 수
+   *  있다 — 새 kind 값을 추가하지 않는 이유는 bridge.ts buildGateResultEvent 주석이 경계한 것과
+   *  동일(exhaustiveness 미검토 상속). 미지정/알 수 없는 도구면 null(app.tsx가 reason으로 폴백). */
+  preview: ToolCallPreview | null;
 }
 
 export interface Statusline {
@@ -90,7 +102,7 @@ export type TuiEvent =
   | { type: "TURN_START" }
   | { type: "TURN_END" }
   | { type: "GATE_RESULT"; status: "pass" | "block"; specCount: number; deferCount: number }
-  | { type: "APPROVAL_REQUESTED"; reason: string; kind?: "spec-add" | "generic" }
+  | { type: "APPROVAL_REQUESTED"; reason: string; kind?: "spec-add" | "generic"; preview?: ToolCallPreview }
   | { type: "APPROVAL_CASE_DERIVED"; caseText: string }
   | { type: "APPROVAL_SELECTION_MOVE"; direction: 1 | -1 }
   | { type: "APPROVAL_ANSWERED"; choice: ApprovalChoice }
@@ -142,7 +154,13 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
         ...state,
         gateStatus: "block",
         panel: "none",
-        approval: { reason: event.reason, kind: event.kind ?? "generic", derivedCase: null, selection: "y" },
+        approval: {
+          reason: event.reason,
+          kind: event.kind ?? "generic",
+          derivedCase: null,
+          selection: "y",
+          preview: event.preview ?? null,
+        },
       };
 
     case "APPROVAL_CASE_DERIVED":

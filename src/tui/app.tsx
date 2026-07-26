@@ -9,7 +9,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import type { GateDecision } from "../gate-core.js";
-import { createInitialState, reduce, type TuiState, type ApprovalChoice } from "./model.js";
+import { createInitialState, reduce, type TuiState, type ApprovalChoice, type ToolCallPreview } from "./model.js";
 import * as Editor from "./editor.js";
 import type { EditorState } from "./editor.js";
 import { classifyKey, type KeyRoutingContext } from "./keymap.js";
@@ -38,6 +38,7 @@ import {
   type TextSegment,
   type Tone,
 } from "./format.js";
+import { formatToolPreviewVisual } from "./diff.js";
 import {
   mapEngineMessageToTuiEvents,
   buildGateResultEvent,
@@ -386,10 +387,12 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     reason: string;
     repoId: string;
     resolve: (a: { choice: ApprovalChoice; editedText?: string }) => void;
+    // ST2-2/2-3(0.11.0) — canUseTool이 이미 들고 있는 원본 toolName/input을 그대로 실어둔다.
+    preview: ToolCallPreview;
   };
   const approvalQueue = useRef<QueuedApproval[]>([]);
   const activateApproval = useCallback((item: QueuedApproval) => {
-    dispatch({ type: "APPROVAL_REQUESTED", reason: item.reason, kind: item.ctx.kind });
+    dispatch({ type: "APPROVAL_REQUESTED", reason: item.reason, kind: item.ctx.kind, preview: item.preview });
     if (item.ctx.kind === "spec-add") {
       dispatch({ type: "APPROVAL_CASE_DERIVED", caseText: item.ctx.derivedCase });
     }
@@ -407,7 +410,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     return async (toolName, input, options) => {
       const ctx = classifyApprovalRequest(toolName, input as Record<string, unknown>);
       const answer = await new Promise<{ choice: ApprovalChoice; editedText?: string }>((resolve) => {
-        const item: QueuedApproval = { ctx, reason: options.decisionReason ?? "", repoId, resolve };
+        const item: QueuedApproval = {
+          ctx,
+          reason: options.decisionReason ?? "",
+          repoId,
+          resolve,
+          preview: { toolName, input: input as Record<string, unknown> },
+        };
         const wasEmpty = approvalQueue.current.length === 0;
         approvalQueue.current.push(item);
         // 큐가 비어있었을 때만 즉시 화면에 띄운다 — 이미 뭔가 대기 중이면 그게 응답될 때 이어서 연다.
@@ -1020,11 +1029,24 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // + 여백1 + 선택지1(편집 중엔 안내 1줄뿐). 접두어("gbc spec add " 등) 폭 오차 ±1행은 ChatBox
     // 외곽 overflow hidden이 방어한다(게이트줄이 잠시 잘리는 게 프레임 전체가 밀리는 것보다 낫다).
     const a = state.approval;
-    const previewSource = a.kind === "generic" ? a.reason : approvalEditing ? Editor.getText(approvalEditor) : a.derivedCase ?? "";
-    const previewVisual = wrapSegmentLine(
-      [{ text: tailLines(previewSource ?? "", approvalPreviewRows), tone: "plain" }],
-      chatInnerColumns,
-    ).length;
+    let previewVisual: number;
+    // ST2-3(0.11.0) — generic + preview 있음(Edit/Write/MultiEdit/Bash 실제 변경내용)이면 diff.ts
+    // formatToolPreviewVisual로 산정한다. spec-add는 기존대로(derivedCase가 preview보다 더 유용한
+    // 정보 — preview.toolName은 항상 "Bash"고 input.command는 원문 "gbc spec add \"...\"" 그 자체라
+    // derivedCase 추출문과 중복·열등하다). 0.10.3 이슈② 재발 지점(scope-critic 지적) — 이 계산과
+    // ApprovalBox.tsx의 실제 렌더가 반드시 **같은 함수**(formatToolPreviewVisual)를 호출해야 두 값이
+    // drift 없이 일치한다 — 각자 따로 wrap하면 예산과 실제 렌더가 어긋나 승인 선택지(y/n/e/d) 줄이
+    // (레이아웃상 가장 마지막이라 가장 먼저) 화면 밖으로 밀려날 수 있다. 반환 시각행수는
+    // approvalPreviewRows를 절대 넘지 않는다(diff.ts 자체 계약).
+    if (a.kind === "generic" && a.preview) {
+      previewVisual = 1 + formatToolPreviewVisual(a.preview.toolName, a.preview.input, approvalPreviewRows, chatInnerColumns).length; // +1 헤더줄("도구 실행 승인 요청 — X")
+    } else {
+      const previewSource = a.kind === "generic" ? a.reason : approvalEditing ? Editor.getText(approvalEditor) : a.derivedCase ?? "";
+      previewVisual = wrapSegmentLine(
+        [{ text: tailLines(previewSource ?? "", approvalPreviewRows), tone: "plain" }],
+        chatInnerColumns,
+      ).length;
+    }
     inputContentRows = 1 + previewVisual + (approvalEditing ? 1 : 3);
   } else {
     inputContentRows = 0; // 아래 inputLayout.lines.length로 확정 — 선언 순서상 임시값.
@@ -1161,6 +1183,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
               editing={approvalEditing}
               editText={Editor.getText(approvalEditor)}
               previewRows={approvalPreviewRows}
+              innerWidth={chatInnerColumns}
             />
           ) : (
             <>
