@@ -269,6 +269,13 @@ export function tailLines(text: string, maxLines: number): string {
  * 정렬 그대로 — 시안에 새 시각 요소가 없다). ⚠️ 반드시 innerWidth로 이미 wrap된 lines를 받는다
  * (wrap 전에 패딩하면 폭 계산이 깨진다 — ChatBox.tsx가 wrapSegmentLine 이후에 호출).
  */
+/** ST4-3(0.11.0) — 좁은 폭 강등 임계값. 대화 컬럼이 이보다 좁으면 우측 정렬 패딩이 텍스트보다
+ * 공백을 더 많이 차지해 가독성이 오히려 나빠진다(0.10.6 SIDEBAR_MIN_COLUMNS와 동일한 "정렬/장식을
+ * 포기하고 정보 밀도를 우선한다" 원칙) — 호출부(ChatBox.tsx)가 이 값 미만이면 decorateBubble 자체를
+ * 건너뛰고 기존 좌측정렬(❯/🐢 접두어)로 되돌린다. decorateBubble 자신은 이 판단을 하지 않는다 —
+ * ST4-2에서 이미 확정된 무조건 정렬 계약을 이번 SubTask가 깨지 않기 위함(호출부 판단으로 분리). */
+export const BUBBLE_MIN_INNER_COLUMNS = 30;
+
 export function decorateBubble(lines: TextSegment[][], role: EntryRole, innerWidth: number): TextSegment[][] {
   if (role !== "user") return lines;
   return lines.map((line) => {

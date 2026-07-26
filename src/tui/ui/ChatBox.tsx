@@ -15,7 +15,7 @@
 //    (섹션 높이 불변). 외곽 Box도 totalRows로 고정해 어떤 자식 성장도 프레임을 밀지 못한다.
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
-import { wrapSegmentLine, computeChatViewport, WELCOME_LINE, type TextSegment } from "../format.js";
+import { wrapSegmentLine, computeChatViewport, decorateBubble, BUBBLE_MIN_INNER_COLUMNS, WELCOME_LINE, type TextSegment } from "../format.js";
 import type { EntryRole } from "../scrollback.js";
 import { toneColor, BORDER_COLOR } from "./theme.js";
 
@@ -58,10 +58,18 @@ export function ChatBox({
   /** 하단 고정 영역: 입력창/승인박스 + 게이트줄 + statusline. */
   children: React.ReactNode;
 }) {
+  // ST4-3(0.11.0) — 말풍선 정렬(decorateBubble)은 반드시 wrapSegmentLine 직후에만 호출한다(ST4-2
+  // 계약 — wrap 전 패딩은 폭 계산이 깨진다). innerWidth가 BUBBLE_MIN_INNER_COLUMNS 미만이면 정렬
+  // 자체를 건너뛰어 기존 좌측정렬(❯/🐢 접두어)로 강등한다 — welcome 줄은 role이 없는 시스템 성격
+  // 문구라 애초에 정렬 대상이 아니다(변경 없음).
   const wrapped = useMemo(() => {
     const lines: TextSegment[][] = [];
     if (showWelcome) lines.push(...wrapSegmentLine([{ text: WELCOME_LINE, tone: "accent" }], innerWidth));
-    for (const e of entries) lines.push(...wrapSegmentLine(e.segments, innerWidth));
+    const bubbleEnabled = innerWidth >= BUBBLE_MIN_INNER_COLUMNS;
+    for (const e of entries) {
+      const w = wrapSegmentLine(e.segments, innerWidth);
+      lines.push(...(bubbleEnabled ? decorateBubble(w, e.role, innerWidth) : w));
+    }
     return lines;
   }, [entries, showWelcome, innerWidth]);
 
