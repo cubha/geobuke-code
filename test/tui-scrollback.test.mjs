@@ -12,15 +12,15 @@ test("getBuffer: 미존재 repo는 빈 배열(크래시 없음)", () => {
 
 test("appendText: 새 repo에 첫 엔트리 추가", () => {
   const buffers = {};
-  const next = appendText(buffers, "/repo/a", 1, "hello", "plain", 500);
-  assert.deepEqual(getBuffer(next, "/repo/a"), [{ id: 1, kind: "text", text: "hello", tone: "plain" }]);
+  const next = appendText(buffers, "/repo/a", 1, "hello", "plain", 500, "system");
+  assert.deepEqual(getBuffer(next, "/repo/a"), [{ id: 1, kind: "text", text: "hello", tone: "plain", role: "system" }]);
 });
 
 test("appendText: 비활성 repo(다른 repo가 활성이어도) 해당 repo 버퍼에 그대로 보존", () => {
   let buffers = {};
-  buffers = appendText(buffers, "/repo/a", 1, "a1", "plain", 500);
-  buffers = appendText(buffers, "/repo/b", 2, "b1", "plain", 500);
-  buffers = appendText(buffers, "/repo/a", 3, "a2", "plain", 500);
+  buffers = appendText(buffers, "/repo/a", 1, "a1", "plain", 500, "system");
+  buffers = appendText(buffers, "/repo/b", 2, "b1", "plain", 500, "system");
+  buffers = appendText(buffers, "/repo/a", 3, "a2", "plain", 500, "system");
   assert.deepEqual(getBuffer(buffers, "/repo/a").map((e) => e.text), ["a1", "a2"]);
   assert.deepEqual(getBuffer(buffers, "/repo/b").map((e) => e.text), ["b1"], "다른 repo append가 b를 건드리지 않는다");
 });
@@ -28,14 +28,14 @@ test("appendText: 비활성 repo(다른 repo가 활성이어도) 해당 repo 버
 test("appendSegments: segments variant 추가·조회", () => {
   const buffers = {};
   const segs = [{ text: "❯ ", tone: "accent" }, { text: "hi", tone: "plain" }];
-  const next = appendSegments(buffers, "/repo/a", 1, segs, 500);
-  assert.deepEqual(getBuffer(next, "/repo/a"), [{ id: 1, kind: "segments", segments: segs }]);
+  const next = appendSegments(buffers, "/repo/a", 1, segs, 500, "user");
+  assert.deepEqual(getBuffer(next, "/repo/a"), [{ id: 1, kind: "segments", segments: segs, role: "user" }]);
 });
 
 test("상한 트림: repo별 독립 — a가 상한을 넘겨 트림돼도 b는 무영향", () => {
   let buffers = {};
-  for (let i = 0; i < 5; i++) buffers = appendText(buffers, "/repo/a", i, `a${i}`, "plain", 3);
-  buffers = appendText(buffers, "/repo/b", 100, "b0", "plain", 3);
+  for (let i = 0; i < 5; i++) buffers = appendText(buffers, "/repo/a", i, `a${i}`, "plain", 3, "system");
+  buffers = appendText(buffers, "/repo/b", 100, "b0", "plain", 3, "system");
   const a = getBuffer(buffers, "/repo/a");
   assert.equal(a.length, 3, "상한 3을 넘지 않는다");
   assert.deepEqual(a.map((e) => e.text), ["a2", "a3", "a4"], "오래된 것부터 버리고 최신 3개만 남긴다");
@@ -43,9 +43,9 @@ test("상한 트림: repo별 독립 — a가 상한을 넘겨 트림돼도 b는 
 });
 
 test("불변성: append가 원본 buffers 객체·배열을 변이하지 않는다", () => {
-  const buffers = { "/repo/a": [{ id: 1, kind: "text", text: "a1", tone: "plain" }] };
+  const buffers = { "/repo/a": [{ id: 1, kind: "text", text: "a1", tone: "plain", role: "system" }] };
   const before = JSON.parse(JSON.stringify(buffers));
-  const next = appendText(buffers, "/repo/a", 2, "a2", "plain", 500);
+  const next = appendText(buffers, "/repo/a", 2, "a2", "plain", 500, "system");
   assert.deepEqual(buffers, before, "원본 buffers는 append 후에도 변하지 않는다");
   assert.notEqual(next, buffers, "새 객체를 반환한다");
   assert.equal(getBuffer(next, "/repo/a").length, 2);
@@ -53,6 +53,20 @@ test("불변성: append가 원본 buffers 객체·배열을 변이하지 않는�
 
 test("appendText: maxEntries<=0이어도 크래시 없이 빈 배열로 수렴", () => {
   let buffers = {};
-  buffers = appendText(buffers, "/repo/a", 1, "a1", "plain", 0);
+  buffers = appendText(buffers, "/repo/a", 1, "a1", "plain", 0, "system");
   assert.deepEqual(getBuffer(buffers, "/repo/a"), []);
+});
+
+// ── role(0.11.0 ST4-1) — 말풍선 UI(Option B, 사용자 승인)를 위한 발화자 구분. user=입력창에서
+// 보낸 프롬프트, assistant=🐢 응답 마크다운, system=게이트·세션 알림(정렬 대상 아님, 기존 그대로). ──
+
+test("appendText: role이 그대로 보존된다(user/assistant/system 3종)", () => {
+  let buffers = {};
+  buffers = appendText(buffers, "/repo/a", 1, "u", "plain", 500, "user");
+  buffers = appendText(buffers, "/repo/a", 2, "a", "plain", 500, "assistant");
+  buffers = appendText(buffers, "/repo/a", 3, "s", "plain", 500, "system");
+  assert.deepEqual(
+    getBuffer(buffers, "/repo/a").map((e) => e.role),
+    ["user", "assistant", "system"],
+  );
 });
