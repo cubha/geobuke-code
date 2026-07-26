@@ -154,6 +154,24 @@ test("formatGateLine: pass + 미스트리밍 — 'esc 중단' 없음", () => {
   assert.doesNotMatch(text, /esc 중단/);
 });
 
+test("formatStatusline: tokensMax>0 — 'N.Nk/Mk' 토큰 세그먼트가 맨 끝(가장 먼저 잘리는 자리)에 붙는다", () => {
+  const base = { dir: "~/w", branch: "main", dirty: false, model: "sonnet", usagePct: 0, costUsd: 0, lastTurnMs: 0, lastTtftMs: 0 };
+  const text = joinTextSegments(formatStatusline({ ...base, tokensUsed: 12345, tokensMax: 200000 }));
+  assert.match(text, /12\.3k\/200k$/, "가장 마지막 세그먼트여야 overflow 클램프에서 최우선으로 잘림");
+});
+
+test("formatStatusline: tokensUsed<1000 — 소수점 없이 그대로 표시", () => {
+  const base = { dir: "~/w", branch: "main", dirty: false, model: "sonnet", usagePct: 0, costUsd: 0, lastTurnMs: 0, lastTtftMs: 0 };
+  const text = joinTextSegments(formatStatusline({ ...base, tokensUsed: 420, tokensMax: 200000 }));
+  assert.match(text, /420\/200k/);
+});
+
+test("formatStatusline: tokensMax=0(아직 조회 전) — 토큰 세그먼트 없음(기존 계약 불변)", () => {
+  const base = { dir: "~/w", branch: "main", dirty: false, model: "sonnet", usagePct: 0, costUsd: 0, lastTurnMs: 0, lastTtftMs: 0, tokensUsed: 0, tokensMax: 0 };
+  const text = joinTextSegments(formatStatusline(base));
+  assert.doesNotMatch(text, /\/\d/, "토큰 형식(N/M) 세그먼트가 전혀 없어야 함");
+});
+
 test("formatGateLine: queueCount>0 — '대기 N건' 세그먼트가 esc 중단 뒤에 붙는다", () => {
   let s = createInitialState();
   s = reduce(s, { type: "TURN_START" });
