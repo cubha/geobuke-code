@@ -3,7 +3,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { ApprovalState, ApprovalChoice } from "../model.js";
 import { APPROVAL_CHOICES } from "../model.js";
-import { tailLines, abbreviateDir } from "../format.js";
+import { tailLines } from "../format.js";
 import { formatToolPreviewVisual } from "../diff.js";
 import { toneColor } from "./theme.js";
 
@@ -29,7 +29,6 @@ export function ApprovalBox({
   editText,
   previewRows = 6,
   innerWidth = 60,
-  activeTabId,
 }: {
   approval: ApprovalState;
   editing: boolean;
@@ -42,24 +41,16 @@ export function ApprovalBox({
    * 넘긴다. app.tsx(행수 예산 계산)와 이 렌더가 반드시 동일 함수·동일 폭을 써야 drift가 없다(Ink의
    * 암묵적 wrap에 맡기면 예산 계산과 실제 렌더가 어긋날 수 있다). 미지정 시 60(보수적 기본값). */
   innerWidth?: number;
-  /** 0.11.0 — security-auditor 지적(Task C 발행게이트 DEEP, Critical) 최소 완화. approval.repoId와
-   * 다르면 이 승인이 지금 보는 탭이 아닌 배경 탭의 요청임을 경고 표시한다 — canUseTool pause 자체는
-   * repoId 무관하게 뜨므로(0.10.0부터 존재하는 사전 결함, 근본수정은 배경 승인 지연/큐잉 아키텍처
-   * 변경이 필요해 별도 검토 대상), 최소한 오귀속을 사용자가 인지하고 n으로 거부할 수 있게 한다.
-   * 미지정 시 경고 없음(단독 렌더 테스트 등 activeTabId를 모르는 호출부 보수적 기본값). */
-  activeTabId?: string;
 }) {
   const labels = approval.kind === "spec-add" ? LABEL : GENERIC_LABEL;
-  const isBackgroundRepo = activeTabId !== undefined && approval.repoId !== activeTabId;
+  // D-6(잔여 근본수정) — activeTabId 비교+배경탭 경고 분기 제거. D-3이 activateApproval에
+  // repoId===activeTabId 가드를 걸어, 이 컴포넌트가 렌더하는 approval은 이제 항상 활성 탭 것임이
+  // 구조로 보장된다(model.ts ApprovalState.repoId 주석 참조) — 여기서 다시 비교하는 건 이미 불가능한
+  // 상태를 검사하는 죽은 코드였다(security-auditor Critical 최소완화 시절의 잔재).
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={isBackgroundRepo ? "red" : "yellow"} paddingX={1}>
+    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
       <Text color="yellow" bold>
         🐢 승인 대기
-        {isBackgroundRepo && (
-          <Text color="red" bold>
-            {" "}⚠️ 배경 탭({abbreviateDir(approval.repoId, 24)})
-          </Text>
-        )}
       </Text>
       {approval.kind === "generic" ? (
         approval.preview ? (

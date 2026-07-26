@@ -28,9 +28,14 @@ export interface ApprovalState {
    *  있다 — 새 kind 값을 추가하지 않는 이유는 bridge.ts buildGateResultEvent 주석이 경계한 것과
    *  동일(exhaustiveness 미검토 상속). 미지정/알 수 없는 도구면 null(app.tsx가 reason으로 폴백). */
   preview: ToolCallPreview | null;
-  /** 0.11.0 — security-auditor 지적(Task C 발행게이트 DEEP, Critical): 이 승인이 어느 repo의
-   *  세션에서 발생했는지. app.tsx가 활성탭과 비교해 다르면 경고 표시한다(ApprovalBox.tsx) — 근본
-   *  수정(배경 승인 지연·큐잉)은 아니고 최소 완화(오귀속 인지 가능하게)다. */
+  /** 0.11.0 — security-auditor 지적(Task C 발행게이트 DEEP, Critical)에서 시작해 D-3(잔여
+   *  근본수정)이 완결. 이 승인이 어느 repo의 세션에서 발생했는지. app.tsx의 activateApproval이
+   *  repoId===activeTabId일 때만 이 필드가 세팅된 APPROVAL_REQUESTED를 dispatch하므로(가드
+   *  자체가 activateApproval 안에 있다), TuiState.approval이 non-null인 한 이 값은 항상
+   *  activeTabId와 같다 — 배경 탭 오귀속은 구조적으로 불가능해졌다(과거엔 ApprovalBox.tsx가
+   *  런타임에 비교해 경고만 했다, D-6에서 그 분기 제거). 배경 탭 승인 건수 자체는 이 필드가 아니라
+   *  app.tsx의 approval-queue.ts 큐(QueuedApproval.repoId, 별개 타입)를 Sidebar.tsx가 세어
+   *  배지(D-5)로 보여준다. */
   repoId: string;
 }
 

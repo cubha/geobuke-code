@@ -1347,7 +1347,6 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
               editText={Editor.getText(approvalEditor)}
               previewRows={approvalPreviewRows}
               innerWidth={chatInnerColumns}
-              activeTabId={tabs.activeTabId}
             />
           ) : (
             <>

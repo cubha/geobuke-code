@@ -105,8 +105,10 @@ test("APPROVAL_REQUESTED: kind:'spec-add' 명시 시 approval.kind에 그대로 
 
 // security-auditor 지적(0.11.0 Task C 발행게이트 DEEP 스캔, Critical) — 승인 dispatch가 repoId를
 // 안 실어 백그라운드 탭의 승인이 활성탭 화면에 오귀속 표시됐다(GATE_RESULT는 이미 활성탭 격리인데
-// APPROVAL_REQUESTED만 비대칭). 근본(배경 승인을 지연/큐잉하는 아키텍처 변경)은 별도 검토 대상이라
-// 이번엔 최소 완화: approval에 repoId를 실어 최소한 사용자가 오귀속을 인지할 수 있게 한다.
+// APPROVAL_REQUESTED만 비대칭). repoId 필드 자체는 그때 최소 완화로 실렸고, 근본수정(app.tsx
+// activateApproval의 activeTabId 가드+repoId별 승인 큐)은 D-3(잔여 근본수정 배치)에서 완결됐다 —
+// 이 필드는 이제 dispatch 시점부터 구조적으로 activeTabId와 항상 일치한다(model.ts ApprovalState
+// JSDoc 참조).
 test("APPROVAL_REQUESTED: repoId가 approval.repoId에 그대로 실린다", () => {
   const s = reduce(createInitialState(), { type: "APPROVAL_REQUESTED", reason: "r", repoId: "/repo/other" });
   assert.equal(s.approval.repoId, "/repo/other");
