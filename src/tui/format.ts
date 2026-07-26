@@ -6,6 +6,7 @@
 import stringWidth from "string-width";
 import type { TuiState, Statusline } from "./model.js";
 import type { TabStatus } from "./tabs.js";
+import type { EntryRole } from "./scrollback.js";
 
 // ── 팔레트 & 마스코트 ──
 
@@ -260,6 +261,21 @@ export function tailLines(text: string, maxLines: number): string {
   const header = `… (+${omitted}줄 생략)`;
   if (keep === 0) return header; // slice(-0)은 전체 배열을 반환하는 함정 — keep=0은 별도 분기
   return `${header}\n${lines.slice(-keep).join("\n")}`;
+}
+
+/**
+ * ST4-2(0.11.0, Task C-4) — 말풍선 UI. 사용자가 아티팩트로 승인한 Option B(정렬만·장식 없음)를
+ * 그대로 구현한다: role="user"만 우측 정렬(줄 앞 공백 패딩), assistant/system은 항등(기존 좌측
+ * 정렬 그대로 — 시안에 새 시각 요소가 없다). ⚠️ 반드시 innerWidth로 이미 wrap된 lines를 받는다
+ * (wrap 전에 패딩하면 폭 계산이 깨진다 — ChatBox.tsx가 wrapSegmentLine 이후에 호출).
+ */
+export function decorateBubble(lines: TextSegment[][], role: EntryRole, innerWidth: number): TextSegment[][] {
+  if (role !== "user") return lines;
+  return lines.map((line) => {
+    const width = line.reduce((sum, s) => sum + stringWidth(s.text), 0);
+    const pad = innerWidth - width;
+    return pad > 0 ? [{ text: " ".repeat(pad), tone: "plain" as Tone }, ...line] : line;
+  });
 }
 
 // ── 시맨틱 톤 & 세그먼트 ──
