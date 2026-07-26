@@ -7,11 +7,13 @@
 // 따라서 이 파일은 gbc spec add/defer를 직접 실행하지 않는다 — "무엇을 할지"만 기술하고, 실제
 // addSpecCase/addDefer 호출과 engine.ts onMessage 배선은 이 파일을 소비하는 impure 글루(ST5)가 한다.
 //
-// usagePct(컨텍스트 사용량)는 의도적으로 다루지 않는다: agent-sdk의 컨텍스트 사용량 API가
-// `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`로 명시된 실험적 control-request라
-// 지금 배선하면 근거 없는 가정이 된다(형태 모름 → defer, scratch.md 기록).
-import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import type { TuiEvent, ApprovalChoice } from "./model.js";
+// ST5-2(0.11.0) — tokensUsed/tokensMax(컨텍스트 사용량)는 mapContextUsageToStatuslinePatch가 다룬다.
+// 위 usagePct는 여전히 미배선이다(SDK의 usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET
+// control-request 전용 — 형태가 안정되지 않아 근거 없는 가정이 된다). 그러나 getContextUsage()는
+// 별개의 **안정** API(sdk.d.ts, 실험 표기 없음)라 이 defer 근거가 적용되지 않는다 — 그 사이 statusline
+// usageBar는 항상 0%로 표시되고 있었다(만료된 defer 근거를 재확인 없이 방치한 사례, 실측 발견).
+import type { PermissionResult, SDKControlGetContextUsageResponse } from "@anthropic-ai/claude-agent-sdk";
+import type { TuiEvent, ApprovalChoice, Statusline } from "./model.js";
 import type { GateDecision } from "../gate-core.js";
 import type { EngineResult } from "../engine.js";
 import { classifySpawnPermissionError, NOT_INSTALLED_RE } from "./startup-diagnostics.js";
