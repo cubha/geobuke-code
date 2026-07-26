@@ -62,7 +62,7 @@ export function mapContextUsageToStatuslinePatch(
   usage: SDKControlGetContextUsageResponse | null,
 ): Partial<Statusline> {
   if (!usage) return {};
-  return { tokensUsed: usage.totalTokens, tokensMax: usage.maxTokens };
+  return { tokensUsed: usage.totalTokens, tokensMax: usage.maxTokens, usagePct: usage.percentage };
 }
 
 // ── GateDecision → TuiEvent (gate-sdk.ts의 onDecision seam이 넘겨주는 판정) ──
