@@ -92,9 +92,16 @@ export function readJsonArray<T>(path: string): T[] {
  * "새 완전한 내용" 둘 중 하나만 본다. temp 파일명에 pid를 넣어 서로 다른 프로세스가 동시에 써도
  * temp끼리 충돌하지 않는다(단일 프로세스 내부는 동기 실행이라 애초에 겹칠 수 없음).
  */
-export function writeJson(path: string, data: unknown): void {
+/**
+ * mode(옵션, security-auditor 지적·ST3-2) — 기본 생략 시 기존 동작 그대로(프로세스 umask, 보통
+ * 0644). prompt-history.ts처럼 파일 내용이 민감한(사용자 자유입력 원문) 호출부만 0o600을 명시한다 —
+ * repos.json 등 다른 소비자의 기본 권한은 이 옵션을 넘기지 않는 한 전혀 바뀌지 않는다. rename은
+ * 대상 파일이 없을 때 새 파일의 권한을 temp 파일 것 그대로 유지한다(POSIX) — writeFileSync의 mode는
+ * O_CREAT 시에만 적용되므로 temp 파일 생성 시점에 지정한다.
+ */
+export function writeJson(path: string, data: unknown, opts?: { mode?: number }): void {
   const tmpPath = join(dirname(path), `.${basenameOf(path)}.tmp-${process.pid}`);
-  writeFileSync(tmpPath, JSON.stringify(data, null, 2) + "\n", "utf8");
+  writeFileSync(tmpPath, JSON.stringify(data, null, 2) + "\n", opts?.mode !== undefined ? { encoding: "utf8", mode: opts.mode } : "utf8");
   renameSync(tmpPath, path);
 }
 

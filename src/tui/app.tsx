@@ -54,6 +54,7 @@ import {
 } from "./bridge.js";
 import { createEngineSessionWithResumeFallback, buildSessionOptionsForRepo, mapSdkMessage, type EngineSession } from "../engine.js";
 import { getLastSessionId, setLastSessionId } from "../session-map.js";
+import { loadPromptHistory, appendPromptHistory } from "../prompt-history.js";
 import { makeSdkPreToolUseHook } from "../gate-sdk.js";
 import { readSpecCases } from "../spec.js";
 import { activeDeferItems, addDefer } from "../defer.js";
@@ -192,6 +193,26 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 매 렌더 tabs.activeTabId 기준으로 다시 구한다(TAB_SWITCHED가 별도로 신경쓸 필요 없음 — tabs가
   // 바뀌면 자동으로 다른 repo의 버퍼를 가리킨다).
   const [editorStates, setEditorStates] = useState<Record<string, EditorState>>({});
+  const editorStatesRef = useRef(editorStates);
+  editorStatesRef.current = editorStates;
+  // ST3-2(0.11.0) — repoId가 editorStates에 아직 없을 때만(=이 세션에서 그 탭에 한 번도 안 쳤을
+  // 때만) 디스크의 영속 히스토리로 1회 시드한다. 이미 있으면(타이핑했거나 이미 시드됨) 절대 덮어쓰지
+  // 않는다 — 순수 파생값(editorState)이 아니라 여기서만 명시 호출해야 "매 렌더 파일 I/O" 결함
+  // 클래스(0.9.1 실사용자 보고)가 재발하지 않는다. 히스토리가 비어있으면 setState 자체를 생략해
+  // 불필요한 리렌더도 만들지 않는다.
+  const seedEditorHistory = useCallback((repoId: string) => {
+    if (editorStatesRef.current[repoId]) return;
+    const history = loadPromptHistory(repoId);
+    if (history.length === 0) return;
+    setEditorStates((prev) =>
+      prev[repoId] ? prev : Editor.setRepoEditorState(prev, repoId, { ...Editor.createInitialState(), history }),
+    );
+  }, []);
+  // switchToTab이 다른(비-cwd) 탭 진입 시 시드하므로, 마운트 시 시작 탭(cwd) 자체는 여기서 1회 시드.
+  // deps=[]는 의도(마운트 1회) — seedEditorHistory는 useCallback([])이라 참조가 안정적이다.
+  useEffect(() => {
+    seedEditorHistory(cwd);
+  }, []);
   // editor-keystroke 등 함수형 갱신(setEditorState((s) => ...))이 항상 "지금 활성탭"의 버퍼를 읽고
   // 쓰도록 감싼 헬퍼 — tabsRef.current(항상 최신)를 써서 setState 배치 중에도 어긋나지 않는다.
   const setEditorState = useCallback((updater: EditorState | ((s: EditorState) => EditorState)) => {
@@ -699,8 +720,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     (repoId: string) => {
       setTabs((prev) => setActiveTab(ensureTab(prev, repoId), repoId));
       dispatchTabSwitch(repoId);
+      seedEditorHistory(repoId); // ST3-2 — 이 repoId로 처음 들어온 경우에만 영속 히스토리 시드.
     },
-    [dispatchTabSwitch],
+    [dispatchTabSwitch, seedEditorHistory],
   );
 
   // ST11 — opt-out 시퀀스: 이 repo에 대기 중인 승인을 전부 거부로 플러시 → 세션 interrupt → close.
@@ -997,6 +1019,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         setEditorState((s) => Editor.commitSubmit(s).state);
         if (!text) return;
         const repoId = tabsRef.current.activeTabId;
+        // ST3-2 — 세션간 영속(로컬 편의기능, 실패해도 이번 턴 자체는 정상 진행 — setLastSessionId와
+        // 동일 관례). GBC_NO_PROMPT_HISTORY=1이면 prompt-history.ts 내부에서 이미 no-op.
+        try {
+          appendPromptHistory(repoId, text);
+        } catch {
+          // 로컬 편의기능 — 실패해도 이번 턴 자체는 이미 정상 진행됨.
+        }
         // ⚠️ state.streaming이 아니라 isRepoStreaming(tab status) — 이유는 interrupt-stream 주석과
         // 동일(탭을 이탈했다 복귀해도 정확). 진행 중이면 잃지 않고 대기열에 쌓는다(ST1-1 큐잉 —
         // 이전엔 이 조건에서 제출 자체가 조용히 버려졌다).
