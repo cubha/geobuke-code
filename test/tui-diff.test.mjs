@@ -3,7 +3,7 @@
 // 승인하는지 알 수 없었다 — bridge.ts classifyApprovalRequest는 spec-add만 특별취급했다).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatToolPreview } from "../dist/tui/diff.js";
+import { formatToolPreview, formatToolPreviewVisual } from "../dist/tui/diff.js";
 
 function texts(segLines) {
   return segLines.map((line) => line.map((s) => s.text).join(""));
@@ -33,14 +33,30 @@ test("formatToolPreview: Write — file_path + content head", () => {
   assert.deepEqual(t, ["new.txt", "line1", "line2", "line3"]);
 });
 
-test("formatToolPreview: MultiEdit — 'file_path — N건 편집' 요약 1줄", () => {
+// scope-critic 지적(Task C-2 검토) — "N건 편집" 요약 1줄만으로는 무엇이 바뀌는지 전혀 알 수 없다
+// (형태 known·역비용 낮음 판정, stub→제대로 개선). 첫 편집의 실제 diff를 보여주고 나머지는 카운트로.
+test("formatToolPreview: MultiEdit — file_path + 첫 편집 diff(−/+) + 나머지 건수 요약", () => {
   const out = formatToolPreview(
     "MultiEdit",
-    { file_path: "b.ts", edits: [{ old_string: "1", new_string: "2" }, { old_string: "3", new_string: "4" }] },
+    { file_path: "b.ts", edits: [{ old_string: "1", new_string: "2" }, { old_string: "3", new_string: "4" }, { old_string: "5", new_string: "6" }] },
     10,
   );
-  assert.equal(texts(out).length, 1);
-  assert.match(texts(out)[0], /b\.ts — 2건 편집/);
+  const t = texts(out);
+  assert.equal(t[0], "b.ts");
+  assert.equal(t[1], "− 1");
+  assert.equal(t[2], "+ 2");
+  assert.match(t[3], /…2건 추가 편집/);
+});
+
+test("formatToolPreview: MultiEdit — edits가 1건이면 '추가 편집' 요약 없음", () => {
+  const out = formatToolPreview("MultiEdit", { file_path: "b.ts", edits: [{ old_string: "1", new_string: "2" }] }, 10);
+  const t = texts(out);
+  assert.deepEqual(t, ["b.ts", "− 1", "+ 2"]);
+});
+
+test("formatToolPreview: MultiEdit — edits가 빈 배열이면 file_path만", () => {
+  const out = formatToolPreview("MultiEdit", { file_path: "b.ts", edits: [] }, 10);
+  assert.deepEqual(texts(out), ["b.ts"]);
 });
 
 test("formatToolPreview: Bash — command을 줄 단위 그대로", () => {
@@ -65,4 +81,30 @@ test("formatToolPreview: 알 수 없는 도구명 — 빈 배열(app.tsx가 기�
 
 test("formatToolPreview: Edit에서 file_path/old_string/new_string 누락 시 크래시 없이 빈 문자열로 취급", () => {
   assert.doesNotThrow(() => formatToolPreview("Edit", {}, 10));
+});
+
+// ── formatToolPreviewVisual (scope-critic 지적 — 논리줄 rowBudget과 폭 랩 후 시각행수가 어긋날 수
+// 있어, app.tsx(행수 예산 계산)와 ApprovalBox.tsx(실제 렌더)가 동일한 함수를 호출해 절대 drift가
+// 없게 한다. 최종 반환은 이미 폭으로 wrap된 시각행이며, 전체 개수가 rowBudget을 절대 넘지 않는다 —
+// 긴 diff 한 줄이 여러 시각행으로 wrap돼도 rowBudget을 초과해 승인 선택지 줄을 밀어내지 않는다). ──
+
+test("formatToolPreviewVisual: 좁은 폭에서 긴 줄이 wrap돼도 최종 시각행수가 rowBudget을 넘지 않는다", () => {
+  const out = formatToolPreviewVisual(
+    "Write",
+    { file_path: "x", content: "가나다라마바사아자차카타파하가나다라마바사아자차카타파하가나다라마바사아자차" }, // 폭 10에서 여러 줄로 wrap됨
+    5,
+    10,
+  );
+  assert.ok(out.length <= 5, `rowBudget=5인데 ${out.length}행 나옴`);
+});
+
+test("formatToolPreviewVisual: rowBudget 초과 시 마지막 행이 생략 마커", () => {
+  const out = formatToolPreviewVisual("Bash", { command: "1\n2\n3\n4\n5\n6\n7\n8" }, 4, 20);
+  assert.equal(out.length, 4);
+  assert.match(out[3].map((s) => s.text).join(""), /생략/);
+});
+
+test("formatToolPreviewVisual: 예산 내로 충분하면 truncate() 마커 없이 그대로", () => {
+  const out = formatToolPreviewVisual("Bash", { command: "echo hi" }, 10, 40);
+  assert.deepEqual(out.map((l) => l.map((s) => s.text).join("")), ["echo hi"]);
 });
