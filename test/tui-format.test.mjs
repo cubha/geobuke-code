@@ -31,6 +31,7 @@ import {
   computePreviewRowBudget,
   PREVIEW_RESERVED_ROWS,
   formatSidebarRepoPath,
+  formatApprovalBadge,
   formatReposPanelPath,
   computeFrameLayout,
   decorateBubble,
@@ -646,6 +647,29 @@ test("formatSidebarRepoPath: 일반 예산(23) 딱 맞으면 원본 유지, isSt
 test("formatSidebarRepoPath: 마지막 세그먼트 자체가 예산을 넘으면 세그먼트 꼬리만 남긴다(테두리 침범 0 계약)", () => {
   const out = formatSidebarRepoPath("/repo/" + "x".repeat(60), true);
   assert.ok(out.length <= 16, `16자 예산 초과: ${out.length}자`);
+});
+
+// D-5(잔여 근본수정) — 사이드바 승인 대기 배지. hasApproval=true면 배지 폭(5)만큼 예산이 줄어든다
+// (row 단위 조건부 예약, isStart와 동일 패턴 — 항상 예약하면 배지가 드문 상황에서도 매 row의
+// 경로 표시폭이 손해를 본다).
+test("formatSidebarRepoPath: hasApproval=true면 배지 예산(5)만큼 축약 임계값이 낮아진다", () => {
+  const p = "/mnt/d/workspace/notesx"; // 23자 — 일반 예산(23)엔 딱 맞지만 배지 예산(18)은 초과
+  assert.equal(formatSidebarRepoPath(p, false, false), p, "배지 없으면 기존과 동일");
+  assert.equal(formatSidebarRepoPath(p, false, true), "…/notesx", "배지 있으면 축약");
+});
+
+test("formatApprovalBadge: 0건이면 빈 문자열(배지 없음과 0건을 구분하지 않는다)", () => {
+  assert.equal(formatApprovalBadge(0), "");
+});
+
+test("formatApprovalBadge: 1~9건은 '[N]' 그대로 표시", () => {
+  assert.equal(formatApprovalBadge(1), " [1]");
+  assert.equal(formatApprovalBadge(9), " [9]");
+});
+
+test("formatApprovalBadge: 10건 이상은 '[9+]'로 상한 표시(폭 예산 고정 유지)", () => {
+  assert.equal(formatApprovalBadge(10), " [9+]");
+  assert.equal(formatApprovalBadge(42), " [9+]");
 });
 
 // ===== formatReposPanelPath — ⌃R 토글 ReposPanel도 동일 계열 오버플로(사이드바 수정 시 scope-critic
