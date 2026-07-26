@@ -437,7 +437,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   };
   const approvalQueue = useRef<QueuedApproval[]>([]);
   const activateApproval = useCallback((item: QueuedApproval) => {
-    dispatch({ type: "APPROVAL_REQUESTED", reason: item.reason, kind: item.ctx.kind, preview: item.preview });
+    dispatch({ type: "APPROVAL_REQUESTED", reason: item.reason, kind: item.ctx.kind, preview: item.preview, repoId: item.repoId });
     if (item.ctx.kind === "spec-add") {
       dispatch({ type: "APPROVAL_CASE_DERIVED", caseText: item.ctx.derivedCase });
     }
@@ -496,7 +496,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       if (repoId !== tabsRef.current.activeTabId) return;
       const specCount = readSpecCases(repoId).length;
       const deferCount = activeDeferItems(repoId).length;
-      dispatch(buildGateResultEvent(decision, specCount, deferCount));
+      dispatch(buildGateResultEvent(decision, specCount, deferCount, repoId));
     },
     [],
   );
@@ -1250,6 +1250,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
               editText={Editor.getText(approvalEditor)}
               previewRows={approvalPreviewRows}
               innerWidth={chatInnerColumns}
+              activeTabId={tabs.activeTabId}
             />
           ) : (
             <>

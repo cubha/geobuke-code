@@ -26,14 +26,18 @@ import {
 // (자체검토로 발견·수정). 그래서 아래 테스트는 decision.event에 deferCount를 아예 안 담아도
 // 함수가 인자로 받은 값을 그대로 쓰는지를 확인한다.
 
-test("buildGateResultEvent: kind=block → APPROVAL_REQUESTED(reason), specCount/deferCount 인자 무관", () => {
+test("buildGateResultEvent: kind=block → APPROVAL_REQUESTED(reason+repoId), specCount/deferCount 인자 무관", () => {
   const decision = { kind: "block", output: { mode: "exit-gate", permission: { decision: "ask", reason: "명세에 없는 파일 편집" } }, effects: {} };
-  assert.deepEqual(buildGateResultEvent(decision, 4, 1), { type: "APPROVAL_REQUESTED", reason: "명세에 없는 파일 편집" });
+  assert.deepEqual(buildGateResultEvent(decision, 4, 1, "/repo/a"), {
+    type: "APPROVAL_REQUESTED",
+    reason: "명세에 없는 파일 편집",
+    repoId: "/repo/a",
+  });
 });
 
 test("buildGateResultEvent: kind=pass → GATE_RESULT(status:pass, specCount/deferCount는 인자값 그대로)", () => {
   const decision = { kind: "pass", output: { mode: "exit-gate" }, effects: {} };
-  assert.deepEqual(buildGateResultEvent(decision, 4, 2), { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
+  assert.deepEqual(buildGateResultEvent(decision, 4, 2, "/repo/a"), { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
 });
 
 test("buildGateResultEvent: doc-skip/cached/bypass/fail-open/passthrough/block-repeat는 전부 pass로 뭉뚱그리고, deferCount는 인자값 그대로(event 미신뢰)", () => {
@@ -44,7 +48,7 @@ test("buildGateResultEvent: doc-skip/cached/bypass/fail-open/passthrough/block-r
   // 체크 없는 else 캐치올이 "검토된 결정"과 "우연한 상속"을 구분 못 하게 되므로, 목록에 명시해 잠근다.
   for (const kind of ["doc-skip", "cached", "bypass", "fail-open", "passthrough", "block-repeat"]) {
     const decision = { kind, output: { mode: "exit-silent" }, effects: {} }; // event 자체가 없음 — cached 등의 실제 형태
-    const ev = buildGateResultEvent(decision, 0, 3);
+    const ev = buildGateResultEvent(decision, 0, 3, "/repo/a");
     assert.equal(ev.type, "GATE_RESULT");
     assert.equal(ev.status, "pass");
     assert.equal(ev.deferCount, 3, `kind=${kind}에서도 인자로 받은 deferCount를 그대로 써야 함(event 결손 무관)`);

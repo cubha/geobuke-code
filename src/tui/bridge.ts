@@ -83,9 +83,11 @@ export function mapContextUsageToStatuslinePatch(
  * 카운트 모두 readSpecCases(cwd).length / activeDeferItems(cwd).length로 매번 새로 세는 것이 유일하게
  * 정확한 소스 — GateDecision의 event는 계측(events.jsonl) 목적이지 TUI 실시간 표시용이 아니다.
  */
-export function buildGateResultEvent(decision: GateDecision, specCount: number, deferCount: number): TuiEvent {
+export function buildGateResultEvent(decision: GateDecision, specCount: number, deferCount: number, repoId: string): TuiEvent {
   if (decision.kind === "block") {
-    return { type: "APPROVAL_REQUESTED", reason: decision.output.permission?.reason ?? "" };
+    // repoId(0.11.0, security-auditor 지적) — 이 함수의 유일한 호출부(app.tsx makeOnGateDecision)가
+    // 이미 repoId===activeTabId일 때만 호출하므로 여기선 그 값을 그대로 싣기만 한다(재검증 아님).
+    return { type: "APPROVAL_REQUESTED", reason: decision.output.permission?.reason ?? "", repoId };
   }
   return { type: "GATE_RESULT", status: "pass", specCount, deferCount };
 }

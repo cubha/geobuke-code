@@ -28,6 +28,10 @@ export interface ApprovalState {
    *  있다 — 새 kind 값을 추가하지 않는 이유는 bridge.ts buildGateResultEvent 주석이 경계한 것과
    *  동일(exhaustiveness 미검토 상속). 미지정/알 수 없는 도구면 null(app.tsx가 reason으로 폴백). */
   preview: ToolCallPreview | null;
+  /** 0.11.0 — security-auditor 지적(Task C 발행게이트 DEEP, Critical): 이 승인이 어느 repo의
+   *  세션에서 발생했는지. app.tsx가 활성탭과 비교해 다르면 경고 표시한다(ApprovalBox.tsx) — 근본
+   *  수정(배경 승인 지연·큐잉)은 아니고 최소 완화(오귀속 인지 가능하게)다. */
+  repoId: string;
 }
 
 export interface Statusline {
@@ -102,7 +106,9 @@ export type TuiEvent =
   | { type: "TURN_START" }
   | { type: "TURN_END" }
   | { type: "GATE_RESULT"; status: "pass" | "block"; specCount: number; deferCount: number }
-  | { type: "APPROVAL_REQUESTED"; reason: string; kind?: "spec-add" | "generic"; preview?: ToolCallPreview }
+  // repoId 필수(0.11.0, security-auditor 지적) — 옵셔널로 두면 실수로 누락한 호출부가 컴파일은
+  // 통과한 채 오귀속 결함을 그대로 재생산한다. kind/preview와 달리 안전한 생략 기본값이 없다.
+  | { type: "APPROVAL_REQUESTED"; reason: string; repoId: string; kind?: "spec-add" | "generic"; preview?: ToolCallPreview }
   | { type: "APPROVAL_CASE_DERIVED"; caseText: string }
   | { type: "APPROVAL_SELECTION_MOVE"; direction: 1 | -1 }
   | { type: "APPROVAL_ANSWERED"; choice: ApprovalChoice }
@@ -160,6 +166,7 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
           derivedCase: null,
           selection: "y",
           preview: event.preview ?? null,
+          repoId: event.repoId,
         },
       };
 
