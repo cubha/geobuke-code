@@ -187,7 +187,21 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   const stateRef = useRef<TuiState>(state);
   stateRef.current = state;
 
-  const [editorState, setEditorState] = useState<EditorState>(() => Editor.createInitialState());
+  // ST3-1(0.11.0) — repoId별로 격리된 에디터 상태(대기중 텍스트+프롬프트 히스토리). tabsRef 등과
+  // 동일한 "React state + ref 미러" 패턴 — editorState 자체는 파생값(아래)이라 별도 useEffect 없이
+  // 매 렌더 tabs.activeTabId 기준으로 다시 구한다(TAB_SWITCHED가 별도로 신경쓸 필요 없음 — tabs가
+  // 바뀌면 자동으로 다른 repo의 버퍼를 가리킨다).
+  const [editorStates, setEditorStates] = useState<Record<string, EditorState>>({});
+  // editor-keystroke 등 함수형 갱신(setEditorState((s) => ...))이 항상 "지금 활성탭"의 버퍼를 읽고
+  // 쓰도록 감싼 헬퍼 — tabsRef.current(항상 최신)를 써서 setState 배치 중에도 어긋나지 않는다.
+  const setEditorState = useCallback((updater: EditorState | ((s: EditorState) => EditorState)) => {
+    setEditorStates((prev) => {
+      const repoId = tabsRef.current.activeTabId;
+      const current = Editor.getRepoEditorState(prev, repoId);
+      const next = typeof updater === "function" ? (updater as (s: EditorState) => EditorState)(current) : updater;
+      return Editor.setRepoEditorState(prev, repoId, next);
+    });
+  }, []);
   const [approvalEditing, setApprovalEditing] = useState(false);
   const [approvalEditor, setApprovalEditor] = useState<EditorState>(() => Editor.createInitialState());
   // ST11 — opt-out y/n 확인 대기 중인 repoId(armed 아니면 null). 승인(state.approval)과는 별개
@@ -242,6 +256,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   const [tabs, setTabs] = useState(() => createTabRegistry(cwd));
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+
+  // ST3-1(0.11.0) — 활성탭 기준 파생 에디터 상태(editorStates 선언은 위쪽에 있다 — tabs가 이 아래서
+  // 선언되므로 여기서 조합). tabs가 바뀌면(TAB_SWITCHED 없이도, 단순 setActiveTab만으로) 자동으로
+  // 다른 repo의 버퍼를 가리킨다 — 렌더마다 재계산되는 순수 파생값이라 별도 동기화가 필요 없다.
+  const editorState = Editor.getRepoEditorState(editorStates, tabs.activeTabId);
 
   // ST1-1~1-4(0.11.0) — repoId별 제출 대기열(queue.ts). 진행중인 repo에 새 제출이 들어오면 여기
   // 쌓였다가 그 턴이 끝난 직후 순차 drain된다(소실 방지 — 이전엔 동시 submit() 이중발화였다).
@@ -964,11 +983,18 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       }
 
       case "editor-newline":
-        setEditorState(Editor.newline(editorState));
+        // scope-critic 지적(ST3-1) — 함수형 업데이터로 통일해, setEditorState 콜백이 항상 그 실행
+        // 시점의 최신 버퍼(s)를 기준으로 계산하게 한다(렌더 시점 스냅샷 editorState를 직접 넘기지
+        // 않음 — 이론상으로도 activeTabId 재조회 시점 불일치 여지를 원천 차단).
+        setEditorState((s) => Editor.newline(s));
         return;
       case "editor-submit": {
-        const { text, state: nextEditor } = Editor.commitSubmit(editorState);
-        setEditorState(nextEditor);
+        // text는 "사용자가 지금 화면에서 보고 입력한 내용"이라 렌더 시점 editorState에서 그대로
+        // 뽑는다(이건 본질적으로 스냅샷이어야 맞다 — 제출은 언제나 지금 보이는 입력을 대상으로 한다).
+        // 반면 저장(다음 편집 버퍼로 리셋+history append)은 함수형으로 다시 계산해, repoId 조회
+        // 시점과 실제 갱신 대상 버퍼가 항상 같은 순간의 것이게 한다(위 editor-newline과 동일 이유).
+        const { text } = Editor.commitSubmit(editorState);
+        setEditorState((s) => Editor.commitSubmit(s).state);
         if (!text) return;
         const repoId = tabsRef.current.activeTabId;
         // ⚠️ state.streaming이 아니라 isRepoStreaming(tab status) — 이유는 interrupt-stream 주석과

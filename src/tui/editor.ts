@@ -185,3 +185,19 @@ export function commitSubmit(state: EditorState): { text: string | null; state: 
   const history = text === last ? state.history : [...state.history, text];
   return { text, state: { ...createInitialState(), history } };
 }
+
+// ── ST3-1(0.11.0) — repoId별 격리(app.tsx가 EditorState를 App 전역 단일 인스턴스로 두면 탭 전환 시
+// 다른 repo의 프롬프트 히스토리가 그대로 보이는 교차오염이 생긴다). tabs.ts/queue.ts와 동일한
+// Record<repoId, T> 격리 규약 — 모든 연산이 지정 repoId 키만 손대고 다른 키는 물리적으로 불변.
+
+export function getRepoEditorState(states: Record<string, EditorState>, repoId: string): EditorState {
+  return states[repoId] ?? createInitialState();
+}
+
+export function setRepoEditorState(
+  states: Record<string, EditorState>,
+  repoId: string,
+  next: EditorState,
+): Record<string, EditorState> {
+  return { ...states, [repoId]: next };
+}
