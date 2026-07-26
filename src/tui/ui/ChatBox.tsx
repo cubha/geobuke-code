@@ -16,11 +16,16 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
 import { wrapSegmentLine, computeChatViewport, WELCOME_LINE, type TextSegment } from "../format.js";
+import type { EntryRole } from "../scrollback.js";
 import { toneColor, BORDER_COLOR } from "./theme.js";
 
 export interface ChatEntry {
   id: number;
   segments: TextSegment[];
+  /** ST4-1(0.11.0) — scrollback.ts ScrollEntry.role 그대로 전파. 이 SubTask에서는 타입만 흐르고
+   * 아직 렌더에 쓰이지 않는다(정렬 로직은 ST4-3이 배선) — role 자체는 이미 정확해야 다음 SubTask가
+   * 렌더링만 얹으면 되므로, 파이프라인 앞단(scrollback→ChatEntry)을 먼저 완전히 고정한다. */
+  role: EntryRole;
 }
 
 export function ChatBox({

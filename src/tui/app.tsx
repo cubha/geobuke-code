@@ -61,7 +61,7 @@ import { activeDeferItems, addDefer } from "../defer.js";
 import { loadRepos } from "../repos.js";
 import { createTabRegistry, ensureTab, removeTab, setActiveTab, updateTabStatus, isRepoStreaming } from "./tabs.js";
 import { createSubmitQueue, enqueue, dequeueNext, countFor, type SubmitQueue } from "./queue.js";
-import { appendText, appendSegments, getBuffer, type ScrollBuffers } from "./scrollback.js";
+import { appendText, appendSegments, getBuffer, type ScrollBuffers, type EntryRole } from "./scrollback.js";
 import { gbcDir } from "../store.js";
 import { nowIso } from "../time.js";
 import { Segments } from "./ui/Segments.js";
@@ -356,14 +356,19 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   }, [state.streaming]);
   // repoId 필수 인자화(0.10.4 ST2) — 어느 탭의 버퍼에 쌓을지 호출부가 항상 명시한다. CHAT_SCROLLBACK_
   // MAX_ENTRIES(SubTask1, 무한증식 방지)는 scrollback.ts appendText가 repo별 독립 적용한다.
-  const pushLine = useCallback((repoId: string, text: string, tone: Tone = "plain") => {
-    setScrollBuffers((buffers) => appendText(buffers, repoId, nextId.current++, text, tone, CHAT_SCROLLBACK_MAX_ENTRIES));
+  // role 기본값 "system"(0.11.0 ST4-1) — 이 함수의 기존 호출부 대다수(세션 종료 배너·중단 안내·
+  // 실패 메시지 등)가 게이트/시스템 알림이라, 명시 지정 없는 한 가장 안전한 기본값이다. 유일한
+  // 예외(assistant 마크다운 응답)는 makeHandleEngineMessage가 role:"assistant"를 명시한다.
+  const pushLine = useCallback((repoId: string, text: string, tone: Tone = "plain", role: EntryRole = "system") => {
+    setScrollBuffers((buffers) => appendText(buffers, repoId, nextId.current++, text, tone, CHAT_SCROLLBACK_MAX_ENTRIES, role));
   }, []);
 
   // 0.10.4 ST3 — 사용자 메시지 에코 전용(다중 톤 세그먼트). "❯ "만 accent, 본문은 plain — 예전엔
-  // 통째로 tone:"code"(cyan)라 표준 팔레트("녹색은 마커에만", theme.ts 원칙) 이탈이었다.
-  const pushSegments = useCallback((repoId: string, segments: TextSegment[]) => {
-    setScrollBuffers((buffers) => appendSegments(buffers, repoId, nextId.current++, segments, CHAT_SCROLLBACK_MAX_ENTRIES));
+  // 통째로 tone:"code"(cyan)라 표준 팔레트("녹색은 마커에만", theme.ts 원칙) 이탈이었다. role
+  // 기본값 "system"(0.11.0 ST4-1) — submit()의 사용자 프롬프트 에코만 role:"user"를 명시하고,
+  // 그 외 호출부(취소 안내 등, 사용자 발화가 아니라 그걸 다루는 시스템 메시지)는 기본값 유지.
+  const pushSegments = useCallback((repoId: string, segments: TextSegment[], role: EntryRole = "system") => {
+    setScrollBuffers((buffers) => appendSegments(buffers, repoId, nextId.current++, segments, CHAT_SCROLLBACK_MAX_ENTRIES, role));
   }, []);
 
   // ST12(0.10.0 A3b) — 크래시 덤프 4경로. 알트스크린(ST10)은 teardown 프레임을 보존하지 않는다
@@ -518,7 +523,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           if (!rec.text) continue;
           if (rec.kind === "assistant") {
             commitStream(repoId);
-            for (const seg of formatMarkdownLite(rec.text)) pushLine(repoId, seg.text, seg.tone);
+            for (const seg of formatMarkdownLite(rec.text)) pushLine(repoId, seg.text, seg.tone, "assistant");
           } else {
             pushLine(repoId, rec.text, "dim");
           }
@@ -571,10 +576,14 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 그 전제가 깨진다).
   const submit = useCallback(
     async (prompt: string, repoId: string) => {
-      pushSegments(repoId, [
-        { text: INPUT_PROMPT_PREFIX, tone: "accent" },
-        { text: prompt, tone: "plain" },
-      ]);
+      pushSegments(
+        repoId,
+        [
+          { text: INPUT_PROMPT_PREFIX, tone: "accent" },
+          { text: prompt, tone: "plain" },
+        ],
+        "user",
+      );
       if (repoId === tabsRef.current.activeTabId) {
         dispatch({ type: "TURN_START" });
         setScrollOffset(0); // SubTask3 — 새 제출 시 대화창 최하단으로 강제 복귀.
@@ -1147,7 +1156,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   const chatEntries = useMemo<ChatEntry[]>(
     () =>
       activeScrollBuffer.map((e) =>
-        e.kind === "segments" ? { id: e.id, segments: e.segments } : { id: e.id, segments: [{ text: e.text, tone: e.tone }] },
+        e.kind === "segments"
+          ? { id: e.id, segments: e.segments, role: e.role }
+          : { id: e.id, segments: [{ text: e.text, tone: e.tone }], role: e.role },
       ),
     [activeScrollBuffer],
   );
