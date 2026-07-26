@@ -56,7 +56,8 @@ import { makeSdkPreToolUseHook } from "../gate-sdk.js";
 import { readSpecCases } from "../spec.js";
 import { activeDeferItems, addDefer } from "../defer.js";
 import { loadRepos } from "../repos.js";
-import { createTabRegistry, ensureTab, removeTab, setActiveTab, updateTabStatus } from "./tabs.js";
+import { createTabRegistry, ensureTab, removeTab, setActiveTab, updateTabStatus, isRepoStreaming } from "./tabs.js";
+import { createSubmitQueue, enqueue, dequeueNext, countFor, type SubmitQueue } from "./queue.js";
 import { appendText, appendSegments, getBuffer, type ScrollBuffers } from "./scrollback.js";
 import { gbcDir } from "../store.js";
 import { nowIso } from "../time.js";
@@ -239,6 +240,14 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   const [tabs, setTabs] = useState(() => createTabRegistry(cwd));
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+
+  // ST1-1~1-4(0.11.0) — repoId별 제출 대기열(queue.ts). 진행중인 repo에 새 제출이 들어오면 여기
+  // 쌓였다가 그 턴이 끝난 직후 순차 drain된다(소실 방지 — 이전엔 동시 submit() 이중발화였다).
+  // isRepoStreaming과 동일하게 tabsRef 미러 패턴을 따른다: setSubmitQueue는 렌더(게이트줄 대기건수
+  // 표시)를 갱신하고, queueRef.current는 async 드레인 루프 안에서 항상 최신값을 읽기 위함이다.
+  const [submitQueue, setSubmitQueue] = useState<SubmitQueue>(() => createSubmitQueue());
+  const queueRef = useRef(submitQueue);
+  queueRef.current = submitQueue;
 
   // ST1(0.9.4 T1)→ST11(0.10.0 A3b): 세션 프로세스 재사용이 이제 repoId별로 여러 개 살아있을 수
   // 있다(opt-in 탭 = in-flight 탭만 상주). Map으로 전환 — buildSessionOptionsForRepo(ST2)가 cwd를
@@ -504,17 +513,24 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     [model, makeInkCanUseTool, makeOnGateDecision, makeHandleEngineMessage, pushLine],
   );
 
+  // ST1-3(0.11.0) — repoId를 tabsRef.current.activeTabId에서 암묵적으로 읽던 것을 명시 매개변수로
+  // 뺐다: 대기열 drain이 비활성(배경) repo에 대해서도 이 함수를 호출해야 하기 때문이다. 그 결과
+  // TURN_START/setScrollOffset(뷰 전환 효과)도 TURN_END(기존)와 동일하게 activeTabId 가드를
+  // 걸어야 한다 — 안 그러면 배경 탭 drain이 지금 보고 있는 다른 탭 화면을 스트리밍으로 뒤집는다
+  // (advisor 지적: 기존엔 submit()이 항상 활성탭에서만 불려 이 비대칭이 안전했지만, drain이 생기며
+  // 그 전제가 깨진다).
   const submit = useCallback(
-    async (prompt: string) => {
-      const repoId = tabsRef.current.activeTabId;
+    async (prompt: string, repoId: string) => {
       pushSegments(repoId, [
         { text: INPUT_PROMPT_PREFIX, tone: "accent" },
         { text: prompt, tone: "plain" },
       ]);
-      dispatch({ type: "TURN_START" });
-      setScrollOffset(0); // SubTask3 — 새 제출 시 대화창 최하단으로 강제 복귀.
+      if (repoId === tabsRef.current.activeTabId) {
+        dispatch({ type: "TURN_START" });
+        setScrollOffset(0); // SubTask3 — 새 제출 시 대화창 최하단으로 강제 복귀.
+      }
       // no-session/alive/dead → streaming(전부 유효 전이, tabs.ts TRANSITIONS) — opt-in 첫 제출·
-      // 후속 제출·재접속(respawn) 전부 이 한 줄로 커버된다.
+      // 후속 제출·재접속(respawn) 전부 이 한 줄로 커버된다. activeTabId 무관(배경 탭도 정확히 갱신).
       setTabs((prev) => updateTabStatus(prev, repoId, { status: "streaming" }));
       const turnStartedAt = Date.now(); // ST15(0.9.2) — statusline lastTurnMs 계산용
       try {
@@ -585,6 +601,24 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     [getOrCreateSession, pushLine, pushSegments, commitStream, slashSkills],
   );
 
+  // ST1-3(0.11.0) — submit() 종료 직후 그 repo의 대기열을 순차 drain한다. submit()이 이미 자신의
+  // 턴 전체(성공/실패/finally)를 기다린 뒤 반환하므로, 여기서 반복 호출하는 것이 "턴 종료 시 drain"과
+  // 동치다(submit 내부에 재귀로 넣지 않는 이유: submit을 "턴 하나 실행"이라는 단일 책임으로 유지하고,
+  // drain 루프는 while로 명시해 무한 재귀 콜스택 우려 자체를 없앤다).
+  const runTurnThenDrain = useCallback(
+    async (repoId: string, prompt: string) => {
+      await submit(prompt, repoId);
+      for (;;) {
+        const { next, queue } = dequeueNext(queueRef.current, repoId);
+        if (!next) return;
+        queueRef.current = queue;
+        setSubmitQueue(queue);
+        await submit(next.text, repoId);
+      }
+    },
+    [submit],
+  );
+
   // 리팩토링(2026-07-24) — switchToTab/optOutTab이 각각 독립적으로 복붙하던 "detectGit→
   // TAB_SWITCHED 디스패치→scrollOffset 리셋" 5줄 시퀀스를 공용 콜백으로 추출(R1 중복 제거).
   // 0.10.4 ST2(결함1) — 전환 안내 리셋 폐기(사용자 확정). per-repo 버퍼(scrollback.ts)가 그 탭의
@@ -601,6 +635,10 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         model: model ?? "",
         specCount: readSpecCases(repoId).length,
         deferCount: activeDeferItems(repoId).length,
+        // scope-critic 지적(ST1-3 후속) — 대기열 drain이 배경 탭에서도 실제로 진행중일 수 있게 됐다.
+        // 이 탭 자체의 status는 방금 setTabs(setActiveTab/ensureTab)로도 바뀌지 않으므로(activeTabId만
+        // 이동, 각 탭의 status는 그대로) tabsRef.current를 그대로 읽어도 정확하다.
+        streaming: isRepoStreaming(tabsRef.current, repoId),
       });
       setScrollOffset(0); // SubTask3 — 탭 전환 시 대화창 최하단으로.
     },
@@ -864,13 +902,39 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       case "sidebar-swallow":
         return;
 
-      // ST3(0.9.2)→ST1(0.9.4 T1로 대체) — 스트리밍 중일 때만 중단. 유휴 상태에서 Esc는 여전히 no-op
-      // (전역 종료 단축키 아님 — Ctrl+C 2단 확인종료가 그 역할). AbortController.abort() 대신
-      // EngineSession.interrupt()를 쓴다(ST0 스파이크 실측: SDK interrupt()는 non-blocking, throw 없이
-      // result{error_during_execution}으로 종료 — engine.ts buildEngineResultFromResult가 재해석).
-      case "interrupt-stream":
-        if (state.streaming) void sessionsRef.current.get(tabsRef.current.activeTabId)?.interrupt();
+      // ST3(0.9.2)→ST1(0.9.4 T1로 대체)→0.11.0(tab status 술어로 교체) — 스트리밍 중일 때만 중단.
+      // 유휴 상태에서 Esc는 여전히 no-op(전역 종료 단축키 아님 — Ctrl+C 2단 확인종료가 그 역할).
+      // AbortController.abort() 대신 EngineSession.interrupt()를 쓴다(ST0 스파이크 실측: SDK
+      // interrupt()는 non-blocking, throw 없이 result{error_during_execution}으로 종료 —
+      // engine.ts buildEngineResultFromResult가 재해석). ⚠️ state.streaming(활성탭 라이브 뷰)이 아니라
+      // isRepoStreaming(tab status)로 판정한다 — 탭을 이탈했다 복귀하면 진행중인데도 state.streaming이
+      // TAB_SWITCHED 재시드로 false가 되는 잠재결함(Esc 무음 no-op)이 있었다(advisor 지적, model.ts
+      // TAB_SWITCHED 주석 참조).
+      // ST1-4(0.11.0) — 진행 중단뿐 아니라 이 repo의 대기열도 함께 비운다: 중단된 턴 뒤에 밀린
+      // 대기 항목을 그대로 이어 보내면 사용자가 방금 취소한 의도와 어긋난다. 비운 원문은 소실이
+      // 아니라 스크롤백에 취소 표시로 에코한다(다시 타이핑할 필요 없이 위로 스크롤해 확인 가능).
+      case "interrupt-stream": {
+        const repoId = tabsRef.current.activeTabId;
+        if (isRepoStreaming(tabsRef.current, repoId)) {
+          void sessionsRef.current.get(repoId)?.interrupt();
+          let q = queueRef.current;
+          for (;;) {
+            const { next, queue } = dequeueNext(q, repoId);
+            if (!next) {
+              q = queue;
+              break;
+            }
+            pushSegments(repoId, [
+              { text: "🐢 취소됨: ", tone: "warn" },
+              { text: next.text, tone: "dim" },
+            ]);
+            q = queue;
+          }
+          queueRef.current = q;
+          setSubmitQueue(q);
+        }
         return;
+      }
 
       case "editor-newline":
         setEditorState(Editor.newline(editorState));
@@ -878,7 +942,18 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       case "editor-submit": {
         const { text, state: nextEditor } = Editor.commitSubmit(editorState);
         setEditorState(nextEditor);
-        if (text && !state.streaming) void submit(text);
+        if (!text) return;
+        const repoId = tabsRef.current.activeTabId;
+        // ⚠️ state.streaming이 아니라 isRepoStreaming(tab status) — 이유는 interrupt-stream 주석과
+        // 동일(탭을 이탈했다 복귀해도 정확). 진행 중이면 잃지 않고 대기열에 쌓는다(ST1-1 큐잉 —
+        // 이전엔 이 조건에서 제출 자체가 조용히 버려졌다).
+        if (isRepoStreaming(tabsRef.current, repoId)) {
+          const q = enqueue(queueRef.current, repoId, text);
+          queueRef.current = q;
+          setSubmitQueue(q);
+        } else {
+          void runTurnThenDrain(repoId, text);
+        }
         return;
       }
       case "editor-keystroke":
@@ -1104,7 +1179,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           {/* 게이트줄·상태줄 1행 클램프(0.10.3) — 좁은 대화 컬럼에서 세그먼트가 랩되며 +1행씩 자라
               박스 총높이 계약을 깨던 갈래 차단. 넘치는 꼬리는 잘리는 게 프레임 밀림보다 낫다. */}
           <Box height={1} overflow="hidden" flexShrink={0}>
-            <Segments segments={formatGateLine(state)} />
+            <Segments segments={formatGateLine(state, countFor(submitQueue, tabs.activeTabId))} />
           </Box>
           <Box height={1} overflow="hidden" flexShrink={0}>
             <Segments segments={formatStatusline(state.statusline)} />

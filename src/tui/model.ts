@@ -30,6 +30,10 @@ export interface Statusline {
   /** ST7(0.9.4 T1) — 마지막 턴의 첫 토큰까지 걸린 시간(ms, SDK result.ttft_ms). 0이면 아직 턴이
    *  없었거나 세션 재사용으로 체감 단축된 걸 실측할 값(성공기준 ⓐ) — 표시 생략 신호는 lastTurnMs와 동일. */
   lastTtftMs: number;
+  /** ST5-2(0.11.0) — SDK getContextUsage()의 totalTokens/maxTokens(안정 API, bridge.ts 매핑).
+   *  둘 다 0이면 아직 조회 전(표시 생략 신호 — lastTurnMs/lastTtftMs와 동일 관례). */
+  tokensUsed: number;
+  tokensMax: number;
 }
 
 export interface TuiState {
@@ -63,6 +67,8 @@ const DEFAULT_STATUSLINE: Statusline = {
   costUsd: 0,
   lastTurnMs: 0,
   lastTtftMs: 0,
+  tokensUsed: 0,
+  tokensMax: 0,
 };
 
 export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiState {
@@ -100,7 +106,12 @@ export type TuiEvent =
   // 설계 주석 참조), 다른 repo로 전환하면 그 뷰 전체를 새 탭 기준으로 다시 시드한다(스트리밍·승인·
   // 게이트 상태는 절대 이어받지 않는다 — 다른 세션의 진행 상태를 여기 남기면 그 자체가 교차오염
   // 표면이 된다). scrollback 초기화는 app.tsx 책임(이 reducer는 TuiState만 다룸).
-  | { type: "TAB_SWITCHED"; dir: string; branch: string; dirty: boolean; model: string; specCount: number; deferCount: number };
+  // 0.11.0(ST1-3 후속, scope-critic 지적) — streaming?는 대상 탭의 "지금 실제 진행중" 여부다.
+  // 제출 대기열(queue.ts) drain이 생기며 배경 탭도 실제로 스트리밍할 수 있게 됐는데, 이 필드 없이
+  // createInitialState로 재시드하면 그 탭으로 복귀해도 스피너가 안 보이는 정합성 결함이 생긴다.
+  // 생략 시 기존 계약(false)과 완전히 동일 — app.tsx가 tabsRef 기준 isRepoStreaming(tabs.ts)으로
+  // 계산해 넘긴다(이 reducer는 tabs 레지스트리를 직접 알지 못한다 — 여전히 순수 유지).
+  | { type: "TAB_SWITCHED"; dir: string; branch: string; dirty: boolean; model: string; specCount: number; deferCount: number; streaming?: boolean };
 
 function cycleChoice(current: ApprovalChoice, direction: 1 | -1): ApprovalChoice {
   const idx = APPROVAL_CHOICES.indexOf(current);
@@ -178,7 +189,13 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
       const base = createInitialState({ dir: event.dir, branch: event.branch, dirty: event.dirty, model: event.model });
       // titleMode는 세션 라이브 뷰가 아니라 사용자의 표시 형태 선택이라 탭 전환으로 되돌지 않는다
       // (specCount/deferCount 등 다른 필드와 달리 "새 탭 = 새 뷰" 계약 밖 — 위 클래스 주석 참조).
-      return { ...base, specCount: event.specCount, deferCount: event.deferCount, titleMode: state.titleMode };
+      return {
+        ...base,
+        specCount: event.specCount,
+        deferCount: event.deferCount,
+        titleMode: state.titleMode,
+        streaming: event.streaming ?? false,
+      };
     }
 
     default:

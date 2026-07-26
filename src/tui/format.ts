@@ -824,7 +824,10 @@ export function formatStatusline(data: Statusline, opts?: { dirWidth?: number })
 
 // ── 게이트 줄 ──
 
-export function formatGateLine(state: TuiState): TextSegment[] {
+/** ST1-4(0.11.0) — queueCount는 이 repo의 제출 대기열 건수(app.tsx queue.ts countFor). 생략/0이면
+ * 세그먼트 자체를 넣지 않아 기존 출력과 완전히 동일하다(대화 없는 화면에 빈 "대기 0건"이 뜨는
+ * 잡음을 피한다 — ttft_ms 생략 규약과 동일 정신). */
+export function formatGateLine(state: TuiState, queueCount = 0): TextSegment[] {
   // exitConfirmArmed(0.9.2 ST10)는 gateStatus/승인 상태와 무관하게 최우선 노출한다 — pushLine
   // 스크롤백은 후속 출력에 밀려나 사라지므로, 상시 노출 채널인 이 줄이 armed 여부의 유일하게
   // 신뢰 가능한 표시처다(scope-critic 발견, 2026-07-13 ST7-10 판정 DECISION_CHANGED:yes).
@@ -847,6 +850,7 @@ export function formatGateLine(state: TuiState): TextSegment[] {
     { text: `defer ${state.deferCount}`, tone: "dim" },
   ];
   if (state.streaming) segments.push({ text: "esc 중단", tone: "dim" });
+  if (queueCount > 0) segments.push({ text: `대기 ${queueCount}건`, tone: "dim" });
   segments.push(
     { text: state.panel === "metrics" ? "Alt+M 닫기" : "Alt+M 메트릭", tone: "dim" },
     { text: state.panel === "repos" ? "Alt+R 닫기" : "Alt+R repos", tone: "dim" },

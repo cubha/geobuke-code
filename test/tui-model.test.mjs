@@ -256,6 +256,19 @@ test("TAB_SWITCHED: 이전 탭의 streaming·approval·gateStatus·streamingText
   assert.equal(s.gateStatus, "idle");
 });
 
+test("TAB_SWITCHED: streaming 필드를 명시하면 그 값으로 시드된다(배경탭 drain 복귀 시 스피너 정합, scope-critic 지적)", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TAB_SWITCHED", dir: "/repo/b", branch: "", dirty: false, model: "", specCount: 0, deferCount: 0, streaming: true });
+  assert.equal(s.streaming, true, "대상 탭이 실제로 진행중이면 재시드 직후에도 스피너가 보여야 함");
+});
+
+test("TAB_SWITCHED: streaming 필드 생략 시 기존 계약(false)과 완전히 동일", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TURN_START" }); // 이전 탭에서 스트리밍 중이었어도
+  s = reduce(s, { type: "TAB_SWITCHED", dir: "/repo/b", branch: "", dirty: false, model: "", specCount: 0, deferCount: 0 });
+  assert.equal(s.streaming, false, "생략은 기존 회귀락과 동일하게 false로 리셋");
+});
+
 test("TAB_SWITCHED: titleMode는 전환 전 값을 그대로 보존(탭 전환으로 사용자 토글 선택이 되돌지 않음)", () => {
   let s = createInitialState();
   s = reduce(s, { type: "TOGGLE_TITLE" }); // mini로 전환
