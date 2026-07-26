@@ -154,6 +154,23 @@ test("formatGateLine: pass + 미스트리밍 — 'esc 중단' 없음", () => {
   assert.doesNotMatch(text, /esc 중단/);
 });
 
+test("formatGateLine: queueCount>0 — '대기 N건' 세그먼트가 esc 중단 뒤에 붙는다", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TURN_START" });
+  s = reduce(s, { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
+  const text = joinTextSegments(formatGateLine(s, 2));
+  assert.match(text, /esc 중단/);
+  assert.match(text, /대기 2건/);
+});
+
+test("formatGateLine: queueCount 생략 또는 0 — '대기' 세그먼트 없음(기존 계약 불변)", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TURN_START" });
+  s = reduce(s, { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
+  assert.doesNotMatch(joinTextSegments(formatGateLine(s)), /대기/);
+  assert.doesNotMatch(joinTextSegments(formatGateLine(s, 0)), /대기/);
+});
+
 test("formatGateLine: block(승인 대기) — BLOCK danger 세그먼트, canUseTool 일시정지 문구", () => {
   let s = createInitialState();
   s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "명세에 없는 파일 편집" });
