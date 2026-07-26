@@ -87,9 +87,9 @@ test("assistant/system/auth_status 등 result가 아닌 메시지는 빈 배열(
 // 있다 — engine.ts EngineSession.getContextUsage()가 실패를 이미 null로 흡수한다(fail-open). 이
 // 함수는 그 null을 다시 살펴 "표시할 값 없음"으로 변환할 뿐 자신이 try/catch할 게 없는 순수 매핑이다.
 
-test("mapContextUsageToStatuslinePatch: 정상 응답 → tokensUsed/tokensMax 패치", () => {
+test("mapContextUsageToStatuslinePatch: 정상 응답 → tokensUsed/tokensMax/usagePct 패치(SDK가 이미 계산한 percentage 그대로 사용)", () => {
   const usage = { totalTokens: 12345, maxTokens: 200000, percentage: 6.17 };
-  assert.deepEqual(mapContextUsageToStatuslinePatch(usage), { tokensUsed: 12345, tokensMax: 200000 });
+  assert.deepEqual(mapContextUsageToStatuslinePatch(usage), { tokensUsed: 12345, tokensMax: 200000, usagePct: 6.17 });
 });
 
 test("mapContextUsageToStatuslinePatch: null(세션 종료·오류) → 빈 패치(필드 생략, 0으로 덮어쓰지 않음 — ttft_ms 규약과 동일)", () => {
