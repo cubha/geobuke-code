@@ -3,7 +3,7 @@
 // 승인하는지 알 수 없었다 — bridge.ts classifyApprovalRequest는 spec-add만 특별취급했다).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatToolPreview, formatToolPreviewVisual } from "../dist/tui/diff.js";
+import { formatToolPreview, formatToolPreviewVisual, isToolPreviewSupported } from "../dist/tui/diff.js";
 
 function texts(segLines) {
   return segLines.map((line) => line.map((s) => s.text).join(""));
@@ -75,12 +75,27 @@ test("formatToolPreview: rowBudget<=0 — 빈 배열(예산 없음)", () => {
   assert.deepEqual(formatToolPreview("Bash", { command: "x" }, 0), []);
 });
 
-test("formatToolPreview: 알 수 없는 도구명 — 빈 배열(app.tsx가 기존 reason 표시로 폴백)", () => {
+test("formatToolPreview: 알 수 없는 도구명 — 빈 배열(app.tsx가 isToolPreviewSupported로 미리 걸러 preview 자체를 null로 둔다)", () => {
   assert.deepEqual(formatToolPreview("SomeUnknownTool", { x: 1 }, 10), []);
 });
 
 test("formatToolPreview: Edit에서 file_path/old_string/new_string 누락 시 크래시 없이 빈 문자열로 취급", () => {
   assert.doesNotThrow(() => formatToolPreview("Edit", {}, 10));
+});
+
+// §3-C(2026-07-27 /analyze 회귀수정) — 지원 도구 4종의 단일 소스. app.tsx가 이 함수로 미리 걸러야
+// 4종 밖 도구(WebFetch·MCP 등) 승인에서 reason 텍스트 폴백이 죽은 코드가 되지 않는다.
+test("isToolPreviewSupported: Edit/Write/MultiEdit/Bash는 true", () => {
+  assert.equal(isToolPreviewSupported("Edit"), true);
+  assert.equal(isToolPreviewSupported("Write"), true);
+  assert.equal(isToolPreviewSupported("MultiEdit"), true);
+  assert.equal(isToolPreviewSupported("Bash"), true);
+});
+
+test("isToolPreviewSupported: 그 외 도구명은 false", () => {
+  assert.equal(isToolPreviewSupported("WebFetch"), false);
+  assert.equal(isToolPreviewSupported("mcp__example__tool"), false);
+  assert.equal(isToolPreviewSupported(""), false);
 });
 
 // ── formatToolPreviewVisual (scope-critic 지적 — 논리줄 rowBudget과 폭 랩 후 시각행수가 어긋날 수

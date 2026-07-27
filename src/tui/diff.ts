@@ -1,7 +1,9 @@
 // 0.11.0 ST2-1 — 도구 승인 프롬프트의 실제 변경내용 미리보기(순수, 렌더-비의존). 지금까지 generic
 // canUseTool 승인(bridge.ts classifyApprovalRequest kind="generic")은 decisionReason 문구만 보여
 // 사용자가 무엇을 승인하는지 알 수 없었다 — Edit/Write/MultiEdit/Bash 4종만 다루고, 그 외 도구는
-// 빈 배열(app.tsx가 기존 reason 표시로 폴백한다, 이 파일은 그 폴백을 모른다).
+// 빈 배열이다. app.tsx는 isToolPreviewSupported(아래)로 미리 걸러 4종 밖 도구는 preview 자체를
+// null로 둬 기존 reason 텍스트 표시로 폴백한다(§3-C, 2026-07-27 /analyze 회귀수정 — app.tsx가
+// 도구 종류와 무관하게 preview를 항상 채우던 시절엔 이 폴백이 죽은 코드였다).
 import { wrapSegmentLine, type TextSegment, type Tone } from "./format.js";
 
 function seg(text: string, tone: Tone = "plain"): TextSegment[] {
@@ -67,6 +69,17 @@ function formatMultiEditPreview(input: Record<string, unknown>, rowBudget: numbe
 
 function formatBashPreview(input: Record<string, unknown>, rowBudget: number): TextSegment[][] {
   return truncate(splitLines(str(input, "command")).map((l) => seg(l, "plain")), rowBudget);
+}
+
+const PREVIEW_SUPPORTED_TOOLS = new Set(["Edit", "Write", "MultiEdit", "Bash"]);
+
+/** /analyze 요구사항검증(2026-07-27) 발견 회귀 §3-C — 이 파일 헤더 주석(4행)이 "그 외 도구는
+ * app.tsx가 기존 reason 표시로 폴백한다"고 주장했지만, app.tsx는 도구 종류와 무관하게 항상
+ * preview를 채워 그 폴백 분기가 죽은 코드였다(WebFetch·MCP 등 4종 밖 도구 승인 시 본문이 완전히
+ * 비어 렌더됨). app.tsx가 preview를 채우기 전에 먼저 이 함수로 지원 여부를 물어 널로 둘 수 있게
+ * 한다 — 지원 도구 목록(4종)의 단일 소스는 formatToolPreview의 switch문이다. */
+export function isToolPreviewSupported(toolName: string): boolean {
+  return PREVIEW_SUPPORTED_TOOLS.has(toolName);
 }
 
 export function formatToolPreview(

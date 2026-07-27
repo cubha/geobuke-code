@@ -38,7 +38,7 @@ import {
   type TextSegment,
   type Tone,
 } from "./format.js";
-import { formatToolPreviewVisual } from "./diff.js";
+import { formatToolPreviewVisual, isToolPreviewSupported } from "./diff.js";
 import {
   mapEngineMessageToTuiEvents,
   buildGateResultEvent,
@@ -60,7 +60,7 @@ import { readSpecCases } from "../spec.js";
 import { activeDeferItems, addDefer } from "../defer.js";
 import { loadRepos } from "../repos.js";
 import { createTabRegistry, ensureTab, removeTab, setActiveTab, updateTabStatus, isRepoStreaming } from "./tabs.js";
-import { createSubmitQueue, enqueue, dequeueNext, countFor, type SubmitQueue } from "./queue.js";
+import { createSubmitQueue, enqueue, dequeueNext, clearRepo, countFor, type SubmitQueue } from "./queue.js";
 import { createApprovalQueue, pushApproval, peekApproval, shiftApproval, countApprovalsFor, type ApprovalQueueState } from "./approval-queue.js";
 import { appendText, appendSegments, getBuffer, type ScrollBuffers, type EntryRole } from "./scrollback.js";
 import { gbcDir } from "../store.js";
@@ -434,7 +434,8 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     repoId: string;
     resolve: (a: { choice: ApprovalChoice; editedText?: string }) => void;
     // ST2-2/2-3(0.11.0) — canUseTool이 이미 들고 있는 원본 toolName/input을 그대로 실어둔다.
-    preview: ToolCallPreview;
+    // §3-C — isToolPreviewSupported가 지원 안 하는 도구는 null(reason 텍스트 폴백용, model.ts와 동일 계약).
+    preview: ToolCallPreview | null;
   };
   // D-2/D-3(잔여 근본수정) — approval-queue.ts로 repoId별 격리(직전엔 전체 세션 공유 단일 배열이라
   // repoId 필드는 태깅만 될 뿐 배경 탭 승인이 활성 탭 화면에 그대로 dispatch되던 Critical의
@@ -455,7 +456,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // reseedApprovalForTab(아래, repoId를 이미 신뢰할 수 있어 가드가 필요없고 오히려 방해가 되는
   // 경로) 둘이 공유한다.
   const dispatchApprovalActivation = useCallback((item: QueuedApproval) => {
-    dispatch({ type: "APPROVAL_REQUESTED", reason: item.reason, kind: item.ctx.kind, preview: item.preview, repoId: item.repoId });
+    dispatch({ type: "APPROVAL_REQUESTED", reason: item.reason, kind: item.ctx.kind, preview: item.preview ?? undefined, repoId: item.repoId });
     if (item.ctx.kind === "spec-add") {
       dispatch({ type: "APPROVAL_CASE_DERIVED", caseText: item.ctx.derivedCase });
     }
@@ -511,12 +512,16 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     return async (toolName, input, options) => {
       const ctx = classifyApprovalRequest(toolName, input as Record<string, unknown>);
       const answer = await new Promise<{ choice: ApprovalChoice; editedText?: string }>((resolve) => {
+        // §3-C(2026-07-27 /analyze 회귀수정) — 예전엔 도구 종류와 무관하게 preview를 항상 채워서,
+        // formatToolPreview가 빈 배열을 반환하는 4종 밖 도구(WebFetch·MCP 등)의 승인이 빈 본문으로
+        // 렌더됐다(ApprovalBox.tsx의 reason 텍스트 폴백 분기가 preview!==null이라 죽은 코드였음).
+        // 지원 도구만 preview를 채우고 그 외는 null로 둬 그 폴백을 되살린다.
         const item: QueuedApproval = {
           ctx,
           reason: options.decisionReason ?? "",
           repoId,
           resolve,
-          preview: { toolName, input: input as Record<string, unknown> },
+          preview: isToolPreviewSupported(toolName) ? { toolName, input: input as Record<string, unknown> } : null,
         };
         const wasEmpty = countApprovalsFor(approvalQueueRef.current, repoId) === 0;
         approvalQueueRef.current = pushApproval(approvalQueueRef.current, repoId, item);
@@ -737,6 +742,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         // 원문 노출되던 결함(2026-07-20 실기 재현)을 이 경로에도 배선. 0.10.4 ST2 — activeTabId
         // 가드 제거(pushLine이 repoId 버퍼에 직접 적재).
         pushLine(repoId, formatSessionStartFailure(String(e)), "danger");
+        // /analyze 요구사항검증(2026-07-27) 발견 회귀 §3-A — 662행이 try 진입 전 이미 status를
+        // "streaming"으로 세팅했는데, 여기(catch)는 그걸 되돌리지 않고 있었다. getOrCreateSession이
+        // 던지면(예: agent-sdk 스폰 EPERM) 이 repo가 isRepoStreaming()에서 영원히 true로 잡혀 이후
+        // 모든 제출이 큐잉만 되고 다시는 submit()이 안 불려 상태를 되돌릴 방법이 없었다(앱 재시작
+        // 전까지 그 탭 영구 먹통). SESSION_ENDED 분기(706행)와 대칭으로 "dead"로 되돌려 다음
+        // 제출이 새 세션 생성을 재시도하게 한다.
+        setTabs((prev) => updateTabStatus(prev, repoId, { status: "dead" }));
       } finally {
         if (repoId === tabsRef.current.activeTabId) {
           dispatch({ type: "TURN_END" });
@@ -828,6 +840,16 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       const flushedCount = drainApprovals(repoId, "n"); // D-3 — approval-queue.ts 기반으로 교체.
       if (flushedCount > 0 && repoId === tabsRef.current.activeTabId && stateRef.current.approval) {
         dispatch({ type: "APPROVAL_ANSWERED", choice: "n" });
+      }
+      // /analyze 요구사항검증(2026-07-27) 발견 회귀 §3-B — 승인 큐(위)는 이미 비웠는데 제출
+      // 큐(submitQueue)는 그대로 두고 있었다. 탭을 닫아도 그 repoId 아래 큐잉된 메시지가 고아로
+      // 남았다가, 같은 repoId가 나중에 다시 탭으로 열리면 무관한 새 제출의 드레인 루프가 과거
+      // 메시지를 사용자 모르게 재전송했다(유령 재전송). clearRepo는 이미 구현·테스트돼 있었으나
+      // 여기 배선이 빠져 있었다 — drainApprovals와 대칭으로 추가.
+      const clearedQueue = clearRepo(queueRef.current, repoId);
+      if (clearedQueue !== queueRef.current) {
+        queueRef.current = clearedQueue;
+        setSubmitQueue(clearedQueue);
       }
       const session = sessionsRef.current.get(repoId);
       if (session) {
