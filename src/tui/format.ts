@@ -243,17 +243,34 @@ export function computePreviewRowBudget(totalRows: number, reservedRows: number 
   return Math.max(3, totalRows - reservedRows);
 }
 
+/** 보안수정(2026-07-27, /ship 사전 QUICK 검토 Critical + scope-critic 범위확대 지적) — 게이트
+ * reason 문구·LLM derivedCase·편집중 텍스트는 전부 이 파일 밖(게이트 판정·LLM 응답 등) 원천에서
+ * 온다. ESC 등 C0/DEL/C1 제어문자를 제거해, 승인 프롬프트가 터미널 이스케이프로 조작되는 경로를
+ * 무력화한다(diff.ts의 도구 프리뷰 sanitizer와 동일 클래스 — tailLines를 거치는 모든 승인 텍스트
+ * 표면에 일괄 적용). 탭(0x09)·개행(0x0a)만 정상 콘텐츠로 보존 — **CR(0x0d)은 제외 대상이 아니다**
+ * (security-auditor DEEP 재검토 Critical, 2026-07-27: 첫 구현이 `\x0B\x0C` 뒤에 `\x0E`부터 이어
+ * `\x0D` 하나가 갭에 빠져 살아남았다 — ink가 CR을 가공 없이 그대로 흘려보내 같은 행 안에서 텍스트를
+ * 덮어써 화면 표시와 실제 문자열이 달라지는 동일 위협 클래스를 재현했다. 테스트도 이 구현 정규식을
+ * 그대로 복사해 검증했던 탓에 동어반복이 돼 갭을 못 잡았다 — 아래 테스트는 그 교훈으로 예상 출력값
+ * 직접 비교로 재작성).
+ */
+export function sanitizeControlChars(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g, "");
+}
+
 /**
  * 마지막 몇 줄만 남기고 잘림을 표시(순수). **계약: 잘렸을 때 반환값의 총 줄 수는 절대 maxLines를
  * 넘지 않는다** — 잘림 헤더("… (+N줄 생략)")도 예산 안에서 1줄을 소비한다(scope-critic 지적,
  * 헤더를 예산 밖에서 덧붙이면 호출부가 maxLines로 예약한 행수를 실제로는 넘겨 렌더해 이슈③(잔상)이
  * 재발한다). 논리 줄(개행) 기준이라 소프트랩(터미널 폭 초과로 한 논리줄이 화면 여러 행을 먹는
  * 경우)은 반영하지 않는다 — computePreviewRowBudget의 보수적 여유값이 이 오차를 흡수하는 걸
- * 전제한다(알려진 단순화).
+ * 전제한다(알려진 단순화). 반환 전 sanitizeControlChars를 거친다.
  */
 export function tailLines(text: string, maxLines: number): string {
   if (maxLines <= 0) return "";
   if (!text) return text;
+  text = sanitizeControlChars(text);
   const lines = text.split("\n");
   if (lines.length <= maxLines) return text;
   const keep = Math.max(0, maxLines - 1); // 헤더 1줄이 예산을 소비

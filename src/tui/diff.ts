@@ -4,10 +4,16 @@
 // 빈 배열이다. app.tsx는 isToolPreviewSupported(아래)로 미리 걸러 4종 밖 도구는 preview 자체를
 // null로 둬 기존 reason 텍스트 표시로 폴백한다(§3-C, 2026-07-27 /analyze 회귀수정 — app.tsx가
 // 도구 종류와 무관하게 preview를 항상 채우던 시절엔 이 폴백이 죽은 코드였다).
-import { wrapSegmentLine, type TextSegment, type Tone } from "./format.js";
+import { wrapSegmentLine, sanitizeControlChars, type TextSegment, type Tone } from "./format.js";
 
+/** 보안수정(2026-07-27, /ship 사전 QUICK 검토 Critical) — 이 파일이 렌더하는 텍스트는 도구
+ * 입력 원문(Write content·Edit old/new_string·Bash command 등, 모델이 외부에서 읽은 내용을
+ * 그대로 담을 수 있음)이다. sanitizeControlChars(format.ts — tailLines도 같은 이유로 공유)로
+ * ESC 등 제어문자를 제거해, ANSI 이스케이프로 승인 프롬프트의 y/n/e/d 선택지 줄을 가리거나
+ * 화면을 조작해 승인 판단을 오도하는 경로를 무력화한다.
+ */
 function seg(text: string, tone: Tone = "plain"): TextSegment[] {
-  return [{ text, tone }];
+  return [{ text: sanitizeControlChars(text), tone }];
 }
 
 function splitLines(text: string): string[] {

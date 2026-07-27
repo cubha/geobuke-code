@@ -109,9 +109,15 @@ test("formatToolPreview: Write content의 ESC(0x1b) 이스케이프 시퀀스가
 });
 
 test("formatToolPreview: Bash command의 캐리지리턴·기타 C0 제어문자가 제거된다", () => {
+  // 구현체와 동일한 정규식을 검증에 재사용하면 그 정규식 자체의 결함(예: CR 누락)을 못 잡는
+  // 동어반복이 된다(security-auditor DEEP 지적, 2026-07-27) — 기대 출력 문자열을 직접 명시한다.
   const out = formatToolPreview("Bash", { command: "echo hi\r\x07\x0bmore" }, 10);
-  const t = texts(out);
-  assert.ok(!/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/.test(t.join("")), `제어문자가 남아있음: ${JSON.stringify(t)}`);
+  assert.deepEqual(texts(out), ["echo himore"]);
+});
+
+test("formatToolPreview: Bash command의 캐리지리턴(CR) 단독도 제거된다(개행이 아니라 같은 줄 덮어쓰기라 특히 위험)", () => {
+  const out = formatToolPreview("Bash", { command: "a\rb" }, 10);
+  assert.deepEqual(texts(out), ["ab"]);
 });
 
 test("formatToolPreview: Edit old_string/new_string의 이스케이프도 제거되고 탭·개행은 보존", () => {

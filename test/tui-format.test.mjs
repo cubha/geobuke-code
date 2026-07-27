@@ -35,6 +35,7 @@ import {
   formatReposPanelPath,
   computeFrameLayout,
   decorateBubble,
+  sanitizeControlChars,
 } from "../dist/tui/format.js";
 import { createInitialState, reduce } from "../dist/tui/model.js";
 
@@ -601,6 +602,32 @@ test("tailLines: maxLines=1이면 헤더만(콘텐츠 0줄, 잘림 없는 것처
 test("tailLines: maxLines가 0 이하면 빈 문자열", () => {
   assert.equal(tailLines("a\nb", 0), "");
   assert.equal(tailLines("a\nb", -1), "");
+});
+
+// 보안수정(2026-07-27, /ship 사전 QUICK 검토 Critical + scope-critic 범위확대 지적) — 게이트
+// reason·LLM derivedCase는 diff.ts 밖(외부 원천)에서 온다. tailLines가 이들의 유일한 공통
+// 렌더 경유 지점이라 여기서도 sanitizeControlChars를 거쳐야 같은 취약점 클래스가 남지 않는다.
+test("sanitizeControlChars: ESC를 포함한 C0/DEL/C1 제어문자를 제거하고 탭·개행은 보존", () => {
+  assert.equal(sanitizeControlChars("safe\x1b[2J\x1b[31mtext"), "safe[2J[31mtext");
+  assert.equal(sanitizeControlChars("a\tb\nc"), "a\tb\nc");
+  assert.equal(sanitizeControlChars("x\x7fy\x9bz"), "xyz");
+});
+
+// security-auditor DEEP 재검토(2026-07-27) — 첫 구현 정규식이 `\x0B\x0C` 뒤 `\x0E`부터 이어써
+// CR(0x0d)이 갭에 빠져 살아남았었다. CR은 같은 렌더 행 안에서 커서를 0열로 되돌려 뒤 텍스트가
+// 앞 텍스트를 덮어쓰게 만들 수 있어(ink가 raw로 그대로 흘려보냄, 실측 확인) ESC와 동일한 위협
+// 클래스다. 개행(LF)과 인접한 값이라 특히 이런 오프바이원 갭에 취약 — 별도 전용 케이스로 고정.
+test("sanitizeControlChars: CR(0x0d) 단독도 제거된다(개행과 인접해 정규식 오프바이원에 취약한 값)", () => {
+  assert.equal(sanitizeControlChars("a\rb"), "ab");
+});
+
+test("tailLines: 반환값에 제어문자가 남지 않는다(잘리지 않는 경로·잘리는 경로 둘 다)", () => {
+  // 구현체와 동일한 정규식을 검증에 재사용하면 그 정규식 자체의 결함을 못 잡는 동어반복이 된다
+  // (security-auditor DEEP 지적, 2026-07-27) — 기대 출력 문자열을 직접 명시한다.
+  assert.equal(tailLines("safe\x1b[31mline", 5), "safe[31mline");
+  assert.equal(tailLines("safe\rline", 5), "safeline");
+  const long = tailLines("1\x1b[0m\n2\n3\x07\n4\n5", 2);
+  assert.equal(long, "… (+4줄 생략)\n5");
 });
 
 test("tailLines: 빈 문자열 입력은 빈 문자열 그대로", () => {
