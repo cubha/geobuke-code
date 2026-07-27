@@ -9,7 +9,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import type { GateDecision } from "../gate-core.js";
-import { createInitialState, reduce, type TuiState, type ApprovalChoice, type ToolCallPreview } from "./model.js";
+import { createInitialState, reduce, DEFAULT_STATUSLINE, type TuiState, type ApprovalChoice, type ToolCallPreview, type Statusline } from "./model.js";
 import * as Editor from "./editor.js";
 import type { EditorState } from "./editor.js";
 import { classifyKey, type KeyRoutingContext } from "./keymap.js";
@@ -196,6 +196,27 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   const [editorStates, setEditorStates] = useState<Record<string, EditorState>>({});
   const editorStatesRef = useRef(editorStates);
   editorStatesRef.current = editorStates;
+
+  // 2026-07-27(사용자 실사용 지적) — TuiState.statusline은 앱 전체에 하나뿐인 슬롯이라, 탭을
+  // 전환할 때마다 model.ts TAB_SWITCHED가 완전히 새 라이브 뷰로 재시드하면서 토큰 사용량·비용
+  // 등도 함께 0으로 지워졌다(editorStates/scrollBuffers/submitQueue 등은 이미 repoId별로 격리
+  // 돼있는데 statusline만 그 대우를 못 받았음). 같은 "React state + ref 미러" 패턴으로 repoId별
+  // 최종 관측값을 캐시해뒀다가 탭 복귀 시 TAB_SWITCHED의 statuslineSeed로 복원한다. optOutTab이
+  // 탭을 닫아도 이 캐시는 지우지 않는다 — scrollBuffers/editorStates(옆 주석 "이력을 그대로
+  // 보존하므로 지울 이유가 없다")와 동일한 선례: 같은 repoId가 재등록되면 지난 세션의 마지막
+  // 값이 그대로 유용하다(scope-critic 지적, 2026-07-27 — 의도 불명확이라 명시).
+  const [statuslineCache, setStatuslineCache] = useState<Record<string, Statusline>>({});
+  const statuslineCacheRef = useRef(statuslineCache);
+  statuslineCacheRef.current = statuslineCache;
+  const cacheStatuslinePatch = useCallback((repoId: string, patch: Partial<Statusline>) => {
+    // DEFAULT_STATUSLINE 기준 — stateRef.current.statusline(활성 탭 것)을 빌려쓰면 배경탭(repoId
+    // !== activeTabId)을 캐싱할 때 무관한 탭의 값이 섞여든다(아래 makeHandleEngineMessage 호출부는
+    // 활성 여부와 무관하게 항상 호출됨).
+    const prev = statuslineCacheRef.current[repoId] ?? DEFAULT_STATUSLINE;
+    const next = { ...statuslineCacheRef.current, [repoId]: { ...prev, ...patch } };
+    statuslineCacheRef.current = next;
+    setStatuslineCache(next);
+  }, []);
   // ST3-2(0.11.0) — repoId가 editorStates에 아직 없을 때만(=이 세션에서 그 탭에 한 번도 안 쳤을
   // 때만) 디스크의 영속 히스토리로 1회 시드한다. 이미 있으면(타이핑했거나 이미 시드됨) 절대 덮어쓰지
   // 않는다 — 순수 파생값(editorState)이 아니라 여기서만 명시 호출해야 "매 렌더 파일 I/O" 결함
@@ -581,8 +602,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         // 국한한다(교차오염 차단, 기존 설계 유지). 그러나 scrollback append는 활성 여부와 무관하게
         // 항상 실행해야 한다 — 예전엔 여기서 그냥 return해 배경 탭에 도착한 메시지가 어디에도
         // 기록되지 않고 영구 유실됐다(사외 실사용 보고 근본원인).
+        const engineEvents = mapEngineMessageToTuiEvents(msg);
+        // 2026-07-27 — costUsd/lastTtftMs(STATUSLINE_UPDATE, result 메시지)는 이전엔 배경탭이면
+        // 통째로 버려졌다(dispatch 자체가 activeTabId 가드 안에 있었음). 화면 dispatch는 여전히
+        // 활성 탭 한정이지만, 캐시는 항상 갱신해 다음에 이 탭으로 돌아왔을 때 최신값이 보이게 한다.
+        for (const ev of engineEvents) {
+          if (ev.type === "STATUSLINE_UPDATE") cacheStatuslinePatch(repoId, ev.patch);
+        }
         if (repoId === tabsRef.current.activeTabId) {
-          for (const ev of mapEngineMessageToTuiEvents(msg)) dispatch(ev);
+          for (const ev of engineEvents) dispatch(ev);
         }
         for (const rec of mapSdkMessage(msg)) {
           if (!rec.text) continue;
@@ -594,7 +622,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           }
         }
       },
-    [pushLine, scheduleStreamDelta, commitStream],
+    [pushLine, scheduleStreamDelta, commitStream, cacheStatuslinePatch],
   );
 
   // ST1(0.9.4 T1)→ST11(0.10.0 A3b) — repoId별로 세션을 지연 생성·재사용한다(sessionsRef Map). Enter/
@@ -759,19 +787,20 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           // 필드(branch·dirty·lastTurnMs) 갱신은 그대로 진행하고, 토큰 필드만 패치에서 생략돼
           // 직전 표시값이 유지된다(mapContextUsageToStatuslinePatch 계약).
           const usage = sessionForUsage ? await sessionForUsage.getContextUsage() : null;
-          dispatch({
-            type: "STATUSLINE_UPDATE",
-            patch: {
-              branch: g.branch,
-              dirty: g.dirty,
-              lastTurnMs: Date.now() - turnStartedAt,
-              ...mapContextUsageToStatuslinePatch(usage),
-            },
-          });
+          const patch = {
+            branch: g.branch,
+            dirty: g.dirty,
+            lastTurnMs: Date.now() - turnStartedAt,
+            ...mapContextUsageToStatuslinePatch(usage),
+          };
+          dispatch({ type: "STATUSLINE_UPDATE", patch });
+          // 2026-07-27 — 이 repo(항상 활성 탭, 위 if 가드)의 최신 statusline을 캐시해 탭 전환 시
+          // dispatchTabSwitch가 복원할 수 있게 한다(사용자 실사용 지적: 탭 전환마다 0%로 리셋됨).
+          cacheStatuslinePatch(repoId, patch);
         }
       }
     },
-    [getOrCreateSession, pushLine, pushSegments, commitStream, slashSkills, drainApprovals],
+    [getOrCreateSession, pushLine, pushSegments, commitStream, slashSkills, drainApprovals, cacheStatuslinePatch],
   );
 
   // ST1-3(0.11.0) — submit() 종료 직후 그 repo의 대기열을 순차 drain한다. submit()이 이미 자신의
@@ -812,6 +841,10 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         // 이 탭 자체의 status는 방금 setTabs(setActiveTab/ensureTab)로도 바뀌지 않으므로(activeTabId만
         // 이동, 각 탭의 status는 그대로) tabsRef.current를 그대로 읽어도 정확하다.
         streaming: isRepoStreaming(tabsRef.current, repoId),
+        // 2026-07-27 — 이 repo에서 마지막으로 관측된 statusline(없으면 undefined → reducer가 기본값
+        // 0으로 재시드, 기존 계약과 동일). branch/dirty/model은 위에서 이미 fresh하게 넘겼으므로
+        // reducer가 이 seed보다 그 값들을 우선한다(model.ts TAB_SWITCHED 주석 참조).
+        statuslineSeed: statuslineCacheRef.current[repoId],
       });
       setScrollOffset(0); // SubTask3 — 탭 전환 시 대화창 최하단으로.
       reseedApprovalForTab(repoId); // D-3 — 배경에서 쌓인 이 repo의 대기 승인을 재현.

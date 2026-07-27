@@ -344,10 +344,12 @@ const SKILLS = [
   { name: "gbc-mute", blurb: "리마인드 on/off" },
 ];
 
-test("formatWelcomeCard: 게이트 요약 2줄 + spec/defer 1줄 + 기본 스킬 섹션(헤딩+스킬수만큼) + 키맵 4줄", () => {
+test("formatWelcomeCard: 게이트 요약 2줄 + spec/defer 1줄 + 기본 스킬 섹션(헤딩+스킬수만큼) + 키맵 5줄", () => {
   const rows = formatWelcomeCard(8, 2, SKILLS);
   // 0.11.0(사용자 확정) — ⌃T 타이틀 토글 안내 1줄 추가(키맵 3→4).
-  assert.equal(rows.length, 2 + 1 + 1 + SKILLS.length + 4, "게이트요약2 + spec/defer1 + 스킬헤딩1 + 스킬3 + 키맵4");
+  // 2026-07-27 — "? 도움말"+"PgUp/PgDn 스크롤" 안내 1줄 추가(키맵 4→5, 사용자 실사용 지적:
+  // 도움말 진입 방법 자체가 안내된 적이 없었음).
+  assert.equal(rows.length, 2 + 1 + 1 + SKILLS.length + 5, "게이트요약2 + spec/defer1 + 스킬헤딩1 + 스킬3 + 키맵5");
   assert.match(joinTextSegments(rows[0]), /게이트 활성/);
   assert.match(joinTextSegments(rows[1]), /명세 없는 구현은 차단됩니다/);
   const line3 = joinTextSegments(rows[2]);
@@ -369,6 +371,9 @@ test("formatWelcomeCard: 게이트 요약 2줄 + spec/defer 1줄 + 기본 스킬
   assert.match(keymap3, /⌃C 종료\(2회\)/);
   const keymap4 = joinTextSegments(rows[10]);
   assert.match(keymap4, /Alt\+T 타이틀/);
+  const keymap5 = joinTextSegments(rows[11]);
+  assert.match(keymap5, /\? 도움말/);
+  assert.match(keymap5, /PgUp\/PgDn 스크롤/);
 });
 
 test("formatWelcomeCard: 스킬 이름 세그먼트는 accent 톤(패널 강조와 일관)", () => {
@@ -380,7 +385,7 @@ test("formatWelcomeCard: 스킬 이름 세그먼트는 accent 톤(패널 강조�
 
 test("formatWelcomeCard: 스킬 목록 비어있어도 헤딩+키맵은 유지(빈 목록 방어)", () => {
   const rows = formatWelcomeCard(0, 0, []);
-  assert.equal(rows.length, 2 + 1 + 1 + 0 + 4);
+  assert.equal(rows.length, 2 + 1 + 1 + 0 + 5);
 });
 
 test("formatWelcomeCard: 순수성 — 같은 입력엔 항상 같은 출력", () => {

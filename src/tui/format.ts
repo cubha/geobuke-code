@@ -706,6 +706,14 @@ export function formatWelcomeCard(specCount: number, deferCount: number, skills:
       { text: "⌃C 종료(2회)", tone: "dim" },
     ],
     [{ text: "Alt+T 타이틀 전환", tone: "dim" }], // 0.11.0 — full/mini 타이틀 토글(사용자 확정 2026-07-22).
+    // 2026-07-27(사용자 실사용 지적) — 이 카드가 키맵을 상세히 안내하면서도 정작 "더 많은 키맵을
+    // 보는 방법"(? 도움말)과 대화창 스크롤 방법이 빠져있었다. HelpPanel.tsx 자신도 "?"를
+    // 목록에 넣지만 그건 이미 ?를 눌러 도움말을 연 사람만 보는 순환 문제라 여기(첫 진입 화면)에도
+    // 노출한다.
+    [
+      { text: "? 도움말", tone: "dim" },
+      { text: "PgUp/PgDn 스크롤", tone: "dim" },
+    ],
   );
   return rows;
 }
