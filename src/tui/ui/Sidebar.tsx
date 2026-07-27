@@ -15,6 +15,7 @@ import {
   renderMascot,
   formatTabStatusGlyph,
   formatSidebarRepoPath,
+  formatApprovalBadge,
   computeSidebarWindow,
   SIDEBAR_COLUMNS,
   SIDEBAR_HEADER_LABEL,
@@ -39,6 +40,7 @@ export function Sidebar({
   focused = false,
   cursor = 0,
   showMascot = true,
+  approvalCounts,
 }: {
   cwd: string;
   tabs: TabRegistry;
@@ -53,6 +55,10 @@ export function Sidebar({
   /** 저높이 반응형 강등 1단(0.10.6 A2) — false면 마스코트를 그리지 않는다. 마스코트 30×16
    * 픽셀 자체는 불변(사용자 확정 디자인) — 숨김/표시만 여기서 제어한다. */
   showMascot?: boolean;
+  /** D-5(잔여 근본수정) — repoId별 승인 대기 건수. 0건인 repo는 키 자체가 없다(app.tsx가 이미
+   * 필터링). 배경 탭에서 승인이 쌓여도 activeTabId 가드(D-3) 때문에 화면엔 안 뜨므로, 사이드바
+   * 배지가 "이 탭에 답해야 할 게 있다"를 알리는 유일한 신호다. */
+  approvalCounts?: Record<string, number>;
 }) {
   const win = computeSidebarWindow(repos.length, cursor, SIDEBAR_MAX_VISIBLE_REPOS);
   const visible = repos.slice(win.start, win.end);
@@ -97,6 +103,11 @@ export function Sidebar({
             // 0.10.4 ST3 — cyan 폐기: 커서·활성 둘 다 accent(green)로 통일(theme.ts 원칙 준수).
             // 시각 구분은 prefix(▸ 커서 vs ❯ 활성)가 이미 맡고 있어 색상 통일로 정보 손실 없음.
             const rowColor = isCursor || isActive ? toneColor("accent") : undefined;
+            // D-5 — 배경 탭 승인은 activeTabId 가드(D-3) 때문에 애초에 화면에 안 뜬다. 이 배지가
+            // "이 탭에 답할 게 쌓여있다"를 알리는 유일한 신호라, 활성 탭(이미 ApprovalBox가 떠
+            // 있어 중복)만 빼고 전부에 표시한다.
+            const pendingApprovals = approvalCounts?.[r] ?? 0;
+            const hasApprovalBadge = pendingApprovals > 0 && !isActive;
             return (
               <Text key={r} color={rowColor}>
                 {prefix}
@@ -104,8 +115,9 @@ export function Sidebar({
                     레거시 터미널에서 동작하지 않는 거짓 안내였다, 0.10.3 이슈③). */}
                 <Text color="gray">{i < 9 ? ` ${i + 1} ` : "   "}</Text>
                 {glyph ? <Text color={toneColor(glyph.tone)}>{glyph.icon} </Text> : <Text color="gray">· </Text>}
-                {formatSidebarRepoPath(r, r === cwd)}
+                {formatSidebarRepoPath(r, r === cwd, hasApprovalBadge)}
                 {r === cwd ? <Text color="gray"> (시작)</Text> : null}
+                {hasApprovalBadge ? <Text color={toneColor("warn")}>{formatApprovalBadge(pendingApprovals)}</Text> : null}
               </Text>
             );
           })}

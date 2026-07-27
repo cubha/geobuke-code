@@ -12,6 +12,7 @@ import {
   updateTabStatus,
   getActiveTab,
   isValidTransition,
+  isRepoStreaming,
 } from "../dist/tui/tabs.js";
 
 test("createTabRegistry: 초기 repo 하나로 시작, activeTabId=그 repo, status=no-session", () => {
@@ -135,6 +136,30 @@ test("updateTabStatus: status 없는 patch(lastActivityAt만 갱신)는 전이 �
   assert.equal(r.tabs["/repo/a"].lastActivityAt, 12345);
   assert.equal(r.tabs["/repo/a"].status, "streaming", "status 미지정 patch는 status 불변");
   assert.equal(r.tabs["/repo/a"].sessionId, "sess-1", "무관 필드 보존");
+});
+
+test("isRepoStreaming: status가 streaming인 repo만 true, 그 외(alive/dead/no-session/awaiting-approval)는 false", () => {
+  let r = createTabRegistry("/repo/a");
+  assert.equal(isRepoStreaming(r, "/repo/a"), false, "no-session은 false");
+  r = updateTabStatus(r, "/repo/a", { status: "streaming" });
+  assert.equal(isRepoStreaming(r, "/repo/a"), true);
+  r = updateTabStatus(r, "/repo/a", { status: "alive" });
+  assert.equal(isRepoStreaming(r, "/repo/a"), false, "턴 종료 후 alive는 false");
+});
+
+test("isRepoStreaming: 탭 전환 후에도 비활성 탭의 status는 유지된다 — TuiState.streaming이 아니라 이 술어가 진짜 진행중 여부", () => {
+  let r = createTabRegistry("/repo/a");
+  r = ensureTab(r, "/repo/b");
+  r = updateTabStatus(r, "/repo/a", { status: "streaming" });
+  r = setActiveTab(r, "/repo/b");
+  assert.equal(r.activeTabId, "/repo/b", "포커스는 b로 이동");
+  assert.equal(isRepoStreaming(r, "/repo/a"), true, "a는 활성탭이 아니어도 여전히 진행중");
+  assert.equal(isRepoStreaming(r, "/repo/b"), false);
+});
+
+test("isRepoStreaming: 미등록 repoId는 false(존재하지 않는 탭 방어)", () => {
+  const r = createTabRegistry("/repo/a");
+  assert.equal(isRepoStreaming(r, "/repo/z"), false);
 });
 
 test("createTabRegistry/updateTabStatus는 입력을 변형하지 않는다(불변성 계약)", () => {

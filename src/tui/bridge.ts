@@ -7,11 +7,12 @@
 // 따라서 이 파일은 gbc spec add/defer를 직접 실행하지 않는다 — "무엇을 할지"만 기술하고, 실제
 // addSpecCase/addDefer 호출과 engine.ts onMessage 배선은 이 파일을 소비하는 impure 글루(ST5)가 한다.
 //
-// usagePct(컨텍스트 사용량)는 의도적으로 다루지 않는다: agent-sdk의 컨텍스트 사용량 API가
-// `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`로 명시된 실험적 control-request라
-// 지금 배선하면 근거 없는 가정이 된다(형태 모름 → defer, scratch.md 기록).
-import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import type { TuiEvent, ApprovalChoice } from "./model.js";
+// ST5-2(0.11.0) — tokensUsed/tokensMax(컨텍스트 사용량)는 mapContextUsageToStatuslinePatch가 다룬다.
+// D-1(2026-07-26) — usagePct도 이 함수가 함께 배선한다. SDK의 usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET
+// control-request는 여전히 형태 불안정이라 손대지 않지만, getContextUsage()는 별개의 **안정** API
+// (sdk.d.ts, 실험 표기 없음)이고 이미 percentage 필드를 직접 제공해 재계산 없이 그대로 전달한다.
+import type { PermissionResult, SDKControlGetContextUsageResponse } from "@anthropic-ai/claude-agent-sdk";
+import type { TuiEvent, ApprovalChoice, Statusline } from "./model.js";
 import type { GateDecision } from "../gate-core.js";
 import type { EngineResult } from "../engine.js";
 import { classifySpawnPermissionError, NOT_INSTALLED_RE } from "./startup-diagnostics.js";
@@ -50,6 +51,19 @@ export function mapEngineMessageToTuiEvents(msg: SdkMessageLike): TuiEvent[] {
   return [];
 }
 
+/**
+ * ST5-2(0.11.0) — engine.ts EngineSession.getContextUsage()의 응답을 STATUSLINE_UPDATE patch로
+ * 매핑한다. null(세션 종료·미지원·오류 — engine.ts가 이미 fail-open으로 흡수)이면 빈 패치를 반환해
+ * 필드를 아예 싣지 않는다 — 0으로 덮어써 직전 표시값을 지우지 않는다(mapEngineMessageToTuiEvents의
+ * ttft_ms 옵셔널 patch 규약과 동일 정신).
+ */
+export function mapContextUsageToStatuslinePatch(
+  usage: SDKControlGetContextUsageResponse | null,
+): Partial<Statusline> {
+  if (!usage) return {};
+  return { tokensUsed: usage.totalTokens, tokensMax: usage.maxTokens, usagePct: usage.percentage };
+}
+
 // ── GateDecision → TuiEvent (gate-sdk.ts의 onDecision seam이 넘겨주는 판정) ──
 
 /**
@@ -68,9 +82,11 @@ export function mapEngineMessageToTuiEvents(msg: SdkMessageLike): TuiEvent[] {
  * 카운트 모두 readSpecCases(cwd).length / activeDeferItems(cwd).length로 매번 새로 세는 것이 유일하게
  * 정확한 소스 — GateDecision의 event는 계측(events.jsonl) 목적이지 TUI 실시간 표시용이 아니다.
  */
-export function buildGateResultEvent(decision: GateDecision, specCount: number, deferCount: number): TuiEvent {
+export function buildGateResultEvent(decision: GateDecision, specCount: number, deferCount: number, repoId: string): TuiEvent {
   if (decision.kind === "block") {
-    return { type: "APPROVAL_REQUESTED", reason: decision.output.permission?.reason ?? "" };
+    // repoId(0.11.0, security-auditor 지적) — 이 함수의 유일한 호출부(app.tsx makeOnGateDecision)가
+    // 이미 repoId===activeTabId일 때만 호출하므로 여기선 그 값을 그대로 싣기만 한다(재검증 아님).
+    return { type: "APPROVAL_REQUESTED", reason: decision.output.permission?.reason ?? "", repoId };
   }
   return { type: "GATE_RESULT", status: "pass", specCount, deferCount };
 }

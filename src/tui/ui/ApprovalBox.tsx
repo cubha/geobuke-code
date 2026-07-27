@@ -4,6 +4,7 @@ import { Box, Text } from "ink";
 import type { ApprovalState, ApprovalChoice } from "../model.js";
 import { APPROVAL_CHOICES } from "../model.js";
 import { tailLines } from "../format.js";
+import { formatToolPreviewVisual } from "../diff.js";
 import { toneColor } from "./theme.js";
 
 const LABEL: Record<ApprovalChoice, string> = {
@@ -27,6 +28,7 @@ export function ApprovalBox({
   editing,
   editText,
   previewRows = 6,
+  innerWidth = 60,
 }: {
   approval: ApprovalState;
   editing: boolean;
@@ -35,17 +37,45 @@ export function ApprovalBox({
    * 같은 근본원인(alt-screen 동적영역 초과 시 ink 잔상)에 노출된다. app.tsx가 스트리밍 프리뷰와
    * 동일 예산(computePreviewRowBudget)을 넘겨준다 — 미지정(단독 렌더 테스트 등) 시 6줄 보수적 기본값. */
   previewRows?: number;
+  /** ST2-3(0.11.0, scope-critic 지적) — app.tsx의 chatInnerColumns를 그대로 받아 formatToolPreviewVisual에
+   * 넘긴다. app.tsx(행수 예산 계산)와 이 렌더가 반드시 동일 함수·동일 폭을 써야 drift가 없다(Ink의
+   * 암묵적 wrap에 맡기면 예산 계산과 실제 렌더가 어긋날 수 있다). 미지정 시 60(보수적 기본값). */
+  innerWidth?: number;
 }) {
   const labels = approval.kind === "spec-add" ? LABEL : GENERIC_LABEL;
+  // D-6(잔여 근본수정) — activeTabId 비교+배경탭 경고 분기 제거. D-3이 activateApproval에
+  // repoId===activeTabId 가드를 걸어, 이 컴포넌트가 렌더하는 approval은 이제 항상 활성 탭 것임이
+  // 구조로 보장된다(model.ts ApprovalState.repoId 주석 참조) — 여기서 다시 비교하는 건 이미 불가능한
+  // 상태를 검사하는 죽은 코드였다(security-auditor Critical 최소완화 시절의 잔재).
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
       <Text color="yellow" bold>
         🐢 승인 대기
       </Text>
       {approval.kind === "generic" ? (
-        <Text color="gray">
-          도구 실행 승인 요청{approval.reason ? ` — ${tailLines(approval.reason, previewRows)}` : ""}
-        </Text>
+        approval.preview ? (
+          // ST2-3(0.11.0) — Edit/Write/MultiEdit/Bash 실제 변경내용. spec-add(derivedCase 분기)가
+          // 아닌 generic 승인은 지금까지 decisionReason 문구뿐이라 무엇을 승인하는지 알 수 없었다.
+          <Box flexDirection="column">
+            <Text color="gray">도구 실행 승인 요청 — {approval.preview.toolName}</Text>
+            {formatToolPreviewVisual(approval.preview.toolName, approval.preview.input, previewRows, innerWidth).map((line, i) => (
+              // wrap="truncate" — formatToolPreviewVisual이 이미 innerWidth로 wrap을 마쳤으므로 이건
+              // Ink의 암묵적 재wrap을 막는 방어선이다(±오차로 한 글자가 넘쳐도 다음 행으로 밀리지
+              // 않고 잘린다 — 예산 계산과 실제 렌더가 절대 어긋나지 않게 하는 게 이 prop의 목적).
+              <Text key={i} wrap="truncate">
+                {line.map((seg, j) => (
+                  <Text key={j} color={toneColor(seg.tone)}>
+                    {seg.text}
+                  </Text>
+                ))}
+              </Text>
+            ))}
+          </Box>
+        ) : (
+          <Text color="gray">
+            도구 실행 승인 요청{approval.reason ? ` — ${tailLines(approval.reason, previewRows)}` : ""}
+          </Text>
+        )
       ) : approval.derivedCase === null ? (
         <Text color="gray">엔진이 차단 사유 수신 → 시나리오 도출 중…</Text>
       ) : editing ? (

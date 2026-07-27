@@ -4,7 +4,7 @@
 // cwd를 프로젝트 루트로 정정한다. read-only — mkdir 부작용은 여전히 gbcDir()가 담당(분리 유지).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawn } from "node:child_process";
@@ -117,6 +117,32 @@ test("writeJson: 성공 후 임시파일이 남지 않는다(디렉토리에 대
     writeJson(p, { a: 2 }); // 재작성도 임시파일을 안 남기는지
     const entries = readdirSync(root);
     assert.deepEqual(entries, ["data.json"], "temp 파일이 정리되지 않고 남으면 안 됨");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// security-auditor 지적(ST3-2) — prompt-history.json처럼 민감도 높은 파일은 opts.mode로 다른 로컬
+// 사용자의 읽기를 차단해야 한다. Windows는 POSIX 권한 비트를 그대로 매핑하지 않아 win32에서 스킵.
+test("writeJson: opts.mode 지정 시 그 권한으로 생성되고, 재작성(rename 교체) 후에도 유지된다", { skip: process.platform === "win32" }, () => {
+  const root = tmpRoot();
+  try {
+    const p = join(root, "secret.json");
+    writeJson(p, { a: 1 }, { mode: 0o600 });
+    assert.equal(statSync(p).mode & 0o777, 0o600);
+    writeJson(p, { a: 2 }, { mode: 0o600 }); // 재작성(temp+rename 교체)도 권한이 유지되는지
+    assert.equal(statSync(p).mode & 0o777, 0o600);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("writeJson: opts 생략 시 기존 동작 그대로(회귀 없음 — 다른 호출부의 기본 권한을 바꾸지 않는다)", () => {
+  const root = tmpRoot();
+  try {
+    const p = join(root, "data.json");
+    writeJson(p, { a: 1 });
+    assert.deepEqual(readJson(p, null), { a: 1 }, "mode 옵션 추가가 기존 무옵션 경로를 깨지 않아야 함");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

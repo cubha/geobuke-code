@@ -6,6 +6,7 @@
 import stringWidth from "string-width";
 import type { TuiState, Statusline } from "./model.js";
 import type { TabStatus } from "./tabs.js";
+import type { EntryRole } from "./scrollback.js";
 
 // ── 팔레트 & 마스코트 ──
 
@@ -242,17 +243,34 @@ export function computePreviewRowBudget(totalRows: number, reservedRows: number 
   return Math.max(3, totalRows - reservedRows);
 }
 
+/** 보안수정(2026-07-27, /ship 사전 QUICK 검토 Critical + scope-critic 범위확대 지적) — 게이트
+ * reason 문구·LLM derivedCase·편집중 텍스트는 전부 이 파일 밖(게이트 판정·LLM 응답 등) 원천에서
+ * 온다. ESC 등 C0/DEL/C1 제어문자를 제거해, 승인 프롬프트가 터미널 이스케이프로 조작되는 경로를
+ * 무력화한다(diff.ts의 도구 프리뷰 sanitizer와 동일 클래스 — tailLines를 거치는 모든 승인 텍스트
+ * 표면에 일괄 적용). 탭(0x09)·개행(0x0a)만 정상 콘텐츠로 보존 — **CR(0x0d)은 제외 대상이 아니다**
+ * (security-auditor DEEP 재검토 Critical, 2026-07-27: 첫 구현이 `\x0B\x0C` 뒤에 `\x0E`부터 이어
+ * `\x0D` 하나가 갭에 빠져 살아남았다 — ink가 CR을 가공 없이 그대로 흘려보내 같은 행 안에서 텍스트를
+ * 덮어써 화면 표시와 실제 문자열이 달라지는 동일 위협 클래스를 재현했다. 테스트도 이 구현 정규식을
+ * 그대로 복사해 검증했던 탓에 동어반복이 돼 갭을 못 잡았다 — 아래 테스트는 그 교훈으로 예상 출력값
+ * 직접 비교로 재작성).
+ */
+export function sanitizeControlChars(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g, "");
+}
+
 /**
  * 마지막 몇 줄만 남기고 잘림을 표시(순수). **계약: 잘렸을 때 반환값의 총 줄 수는 절대 maxLines를
  * 넘지 않는다** — 잘림 헤더("… (+N줄 생략)")도 예산 안에서 1줄을 소비한다(scope-critic 지적,
  * 헤더를 예산 밖에서 덧붙이면 호출부가 maxLines로 예약한 행수를 실제로는 넘겨 렌더해 이슈③(잔상)이
  * 재발한다). 논리 줄(개행) 기준이라 소프트랩(터미널 폭 초과로 한 논리줄이 화면 여러 행을 먹는
  * 경우)은 반영하지 않는다 — computePreviewRowBudget의 보수적 여유값이 이 오차를 흡수하는 걸
- * 전제한다(알려진 단순화).
+ * 전제한다(알려진 단순화). 반환 전 sanitizeControlChars를 거친다.
  */
 export function tailLines(text: string, maxLines: number): string {
   if (maxLines <= 0) return "";
   if (!text) return text;
+  text = sanitizeControlChars(text);
   const lines = text.split("\n");
   if (lines.length <= maxLines) return text;
   const keep = Math.max(0, maxLines - 1); // 헤더 1줄이 예산을 소비
@@ -260,6 +278,28 @@ export function tailLines(text: string, maxLines: number): string {
   const header = `… (+${omitted}줄 생략)`;
   if (keep === 0) return header; // slice(-0)은 전체 배열을 반환하는 함정 — keep=0은 별도 분기
   return `${header}\n${lines.slice(-keep).join("\n")}`;
+}
+
+/**
+ * ST4-2(0.11.0, Task C-4) — 말풍선 UI. 사용자가 아티팩트로 승인한 Option B(정렬만·장식 없음)를
+ * 그대로 구현한다: role="user"만 우측 정렬(줄 앞 공백 패딩), assistant/system은 항등(기존 좌측
+ * 정렬 그대로 — 시안에 새 시각 요소가 없다). ⚠️ 반드시 innerWidth로 이미 wrap된 lines를 받는다
+ * (wrap 전에 패딩하면 폭 계산이 깨진다 — ChatBox.tsx가 wrapSegmentLine 이후에 호출).
+ */
+/** ST4-3(0.11.0) — 좁은 폭 강등 임계값. 대화 컬럼이 이보다 좁으면 우측 정렬 패딩이 텍스트보다
+ * 공백을 더 많이 차지해 가독성이 오히려 나빠진다(0.10.6 SIDEBAR_MIN_COLUMNS와 동일한 "정렬/장식을
+ * 포기하고 정보 밀도를 우선한다" 원칙) — 호출부(ChatBox.tsx)가 이 값 미만이면 decorateBubble 자체를
+ * 건너뛰고 기존 좌측정렬(❯/🐢 접두어)로 되돌린다. decorateBubble 자신은 이 판단을 하지 않는다 —
+ * ST4-2에서 이미 확정된 무조건 정렬 계약을 이번 SubTask가 깨지 않기 위함(호출부 판단으로 분리). */
+export const BUBBLE_MIN_INNER_COLUMNS = 30;
+
+export function decorateBubble(lines: TextSegment[][], role: EntryRole, innerWidth: number): TextSegment[][] {
+  if (role !== "user") return lines;
+  return lines.map((line) => {
+    const width = line.reduce((sum, s) => sum + stringWidth(s.text), 0);
+    const pad = innerWidth - width;
+    return pad > 0 ? [{ text: " ".repeat(pad), tone: "plain" as Tone }, ...line] : line;
+  });
 }
 
 // ── 시맨틱 톤 & 세그먼트 ──
@@ -708,10 +748,25 @@ const SIDEBAR_REPO_PREFIX_COLUMNS = 7;
 const SIDEBAR_START_SUFFIX_COLUMNS = 7;
 
 /** 사이드바 repo 목록 한 줄에 들어가도록 경로를 폭 예산에 맞게 축약(순수). */
-export function formatSidebarRepoPath(path: string, isStart: boolean): string {
+// D-5(잔여 근본수정) — 승인 대기 배지(" [N]"/" [9+]") 최대폭. isStart와 동일하게 이 row에 배지가
+// 실제로 뜰 때만 예산에서 뺀다(항상 예약하면 배지가 드문 상황에서도 매 row 경로폭이 손해를 본다).
+const SIDEBAR_APPROVAL_BADGE_COLUMNS = 5;
+
+export function formatSidebarRepoPath(path: string, isStart: boolean, hasApproval = false): string {
   const budget =
-    SIDEBAR_INNER_COLUMNS - SIDEBAR_REPO_PREFIX_COLUMNS - (isStart ? SIDEBAR_START_SUFFIX_COLUMNS : 0);
+    SIDEBAR_INNER_COLUMNS -
+    SIDEBAR_REPO_PREFIX_COLUMNS -
+    (isStart ? SIDEBAR_START_SUFFIX_COLUMNS : 0) -
+    (hasApproval ? SIDEBAR_APPROVAL_BADGE_COLUMNS : 0);
   return abbreviateDir(path, budget);
+}
+
+/** 승인 대기 건수를 사이드바 배지 문구로. 0건이면 배지 자체가 없다는 뜻이라 빈 문자열(호출부가
+ * hasApproval 판정과 이 결과를 같은 조건 — count>0 — 으로 묶어 쓴다). 10건 이상은 "[9+]"로
+ * 상한해 SIDEBAR_APPROVAL_BADGE_COLUMNS 폭 예산이 실제 렌더에서도 항상 지켜지게 한다. */
+export function formatApprovalBadge(count: number): string {
+  if (count <= 0) return "";
+  return ` [${count > 9 ? "9+" : count}]`;
 }
 
 // ⌃R 토글 ReposPanel도 동일 계열 오버플로(사이드바 수정 시 scope-critic 지적, 2026-07-17).
@@ -819,12 +874,26 @@ export function formatStatusline(data: Statusline, opts?: { dirWidth?: number })
   if (data.lastTtftMs > 0) {
     segments.push({ text: `ttft ${(data.lastTtftMs / 1000).toFixed(1)}s`, tone: "dim" });
   }
+  // ST5-3(0.11.0) — 맨 끝에 붙인다: 이 줄은 height=1·overflow=hidden으로 클램프되므로(app.tsx 렌더
+  // 주석 "넘치는 꼬리는 잘리는 게 프레임 밀림보다 낫다"), 순서 자체가 좁은 폭 강등 우선순위다 —
+  // dir/branch/model/usageBar/cost보다 덜 중요한 토큰 정보가 가장 먼저 잘려나간다.
+  if (data.tokensMax > 0) {
+    segments.push({ text: `${formatTokenCount(data.tokensUsed)}/${formatTokenCount(data.tokensMax)}`, tone: "dim" });
+  }
   return segments;
+}
+
+function formatTokenCount(n: number): string {
+  if (n < 1000) return `${n}`;
+  return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
 }
 
 // ── 게이트 줄 ──
 
-export function formatGateLine(state: TuiState): TextSegment[] {
+/** ST1-4(0.11.0) — queueCount는 이 repo의 제출 대기열 건수(app.tsx queue.ts countFor). 생략/0이면
+ * 세그먼트 자체를 넣지 않아 기존 출력과 완전히 동일하다(대화 없는 화면에 빈 "대기 0건"이 뜨는
+ * 잡음을 피한다 — ttft_ms 생략 규약과 동일 정신). */
+export function formatGateLine(state: TuiState, queueCount = 0): TextSegment[] {
   // exitConfirmArmed(0.9.2 ST10)는 gateStatus/승인 상태와 무관하게 최우선 노출한다 — pushLine
   // 스크롤백은 후속 출력에 밀려나 사라지므로, 상시 노출 채널인 이 줄이 armed 여부의 유일하게
   // 신뢰 가능한 표시처다(scope-critic 발견, 2026-07-13 ST7-10 판정 DECISION_CHANGED:yes).
@@ -847,6 +916,7 @@ export function formatGateLine(state: TuiState): TextSegment[] {
     { text: `defer ${state.deferCount}`, tone: "dim" },
   ];
   if (state.streaming) segments.push({ text: "esc 중단", tone: "dim" });
+  if (queueCount > 0) segments.push({ text: `대기 ${queueCount}건`, tone: "dim" });
   segments.push(
     { text: state.panel === "metrics" ? "Alt+M 닫기" : "Alt+M 메트릭", tone: "dim" },
     { text: state.panel === "repos" ? "Alt+R 닫기" : "Alt+R repos", tone: "dim" },

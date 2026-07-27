@@ -31,8 +31,11 @@ import {
   computePreviewRowBudget,
   PREVIEW_RESERVED_ROWS,
   formatSidebarRepoPath,
+  formatApprovalBadge,
   formatReposPanelPath,
   computeFrameLayout,
+  decorateBubble,
+  sanitizeControlChars,
 } from "../dist/tui/format.js";
 import { createInitialState, reduce } from "../dist/tui/model.js";
 
@@ -152,6 +155,41 @@ test("formatGateLine: pass + 미스트리밍 — 'esc 중단' 없음", () => {
   s = reduce(s, { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
   const text = joinTextSegments(formatGateLine(s));
   assert.doesNotMatch(text, /esc 중단/);
+});
+
+test("formatStatusline: tokensMax>0 — 'N.Nk/Mk' 토큰 세그먼트가 맨 끝(가장 먼저 잘리는 자리)에 붙는다", () => {
+  const base = { dir: "~/w", branch: "main", dirty: false, model: "sonnet", usagePct: 0, costUsd: 0, lastTurnMs: 0, lastTtftMs: 0 };
+  const text = joinTextSegments(formatStatusline({ ...base, tokensUsed: 12345, tokensMax: 200000 }));
+  assert.match(text, /12\.3k\/200k$/, "가장 마지막 세그먼트여야 overflow 클램프에서 최우선으로 잘림");
+});
+
+test("formatStatusline: tokensUsed<1000 — 소수점 없이 그대로 표시", () => {
+  const base = { dir: "~/w", branch: "main", dirty: false, model: "sonnet", usagePct: 0, costUsd: 0, lastTurnMs: 0, lastTtftMs: 0 };
+  const text = joinTextSegments(formatStatusline({ ...base, tokensUsed: 420, tokensMax: 200000 }));
+  assert.match(text, /420\/200k/);
+});
+
+test("formatStatusline: tokensMax=0(아직 조회 전) — 토큰 세그먼트 없음(기존 계약 불변)", () => {
+  const base = { dir: "~/w", branch: "main", dirty: false, model: "sonnet", usagePct: 0, costUsd: 0, lastTurnMs: 0, lastTtftMs: 0, tokensUsed: 0, tokensMax: 0 };
+  const text = joinTextSegments(formatStatusline(base));
+  assert.doesNotMatch(text, /\/\d/, "토큰 형식(N/M) 세그먼트가 전혀 없어야 함");
+});
+
+test("formatGateLine: queueCount>0 — '대기 N건' 세그먼트가 esc 중단 뒤에 붙는다", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TURN_START" });
+  s = reduce(s, { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
+  const text = joinTextSegments(formatGateLine(s, 2));
+  assert.match(text, /esc 중단/);
+  assert.match(text, /대기 2건/);
+});
+
+test("formatGateLine: queueCount 생략 또는 0 — '대기' 세그먼트 없음(기존 계약 불변)", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TURN_START" });
+  s = reduce(s, { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
+  assert.doesNotMatch(joinTextSegments(formatGateLine(s)), /대기/);
+  assert.doesNotMatch(joinTextSegments(formatGateLine(s, 0)), /대기/);
 });
 
 test("formatGateLine: block(승인 대기) — BLOCK danger 세그먼트, canUseTool 일시정지 문구", () => {
@@ -501,6 +539,43 @@ test("computeContentColumns: 사이드바 포함 100열 터미널이 워드마�
 // <Static>은 뷰포트 초과 시 이전 프레임을 못 지워 잔상이 쌓인다(tmux 실측: "안녕하세요" 8회 중복).
 // 표준형(Claude Code 본체·gemini-cli MaxSizedBox 동일 패턴): 마지막 N줄만 남기고 잘림을 표시. ──
 
+// ── decorateBubble(0.11.0 ST4-2, Task C-4) — 사용자 승인 Option B(정렬만·장식 없음) 확정 반영.
+// role="user"만 우측 정렬(줄 앞 공백 패딩), assistant/system은 항등(기존 좌측정렬 그대로 — 시안에
+// 새 장식 요소 없음). 반드시 innerWidth로 이미 wrap된 lines를 받는다(wrap 전 패딩은 폭 계산이 깨짐). ──
+
+test("decorateBubble: role=user — 각 줄 앞에 공백을 채워 우측 정렬한다", () => {
+  const lines = [[{ text: "hi", tone: "plain" }]];
+  const out = decorateBubble(lines, "user", 10);
+  assert.equal(out[0].map((s) => s.text).join(""), " ".repeat(8) + "hi");
+  assert.equal(stringWidth(out[0].map((s) => s.text).join("")), 10, "총 표시폭은 innerWidth와 같아야 함");
+});
+
+test("decorateBubble: role=assistant/system — 항등(무변경, Option B는 장식 없음)", () => {
+  const lines = [[{ text: "hi", tone: "plain" }], [{ text: "there", tone: "dim" }]];
+  assert.deepEqual(decorateBubble(lines, "assistant", 10), lines);
+  assert.deepEqual(decorateBubble(lines, "system", 10), lines);
+});
+
+test("decorateBubble: role=user — 줄 표시폭이 innerWidth 이상이면 패딩 없이 그대로(음수 패딩 방지)", () => {
+  const lines = [[{ text: "이미 폭을 꽉 채운 긴 줄", tone: "plain" }]];
+  const out = decorateBubble(lines, "user", 5);
+  assert.deepEqual(out, lines);
+});
+
+test("decorateBubble: role=user — 멀티라인(wrap된 여러 줄) 각각 독립적으로 우측 정렬", () => {
+  const lines = [[{ text: "ab", tone: "plain" }], [{ text: "cdef", tone: "plain" }]];
+  const out = decorateBubble(lines, "user", 6);
+  assert.equal(out[0].map((s) => s.text).join(""), "    ab");
+  assert.equal(out[1].map((s) => s.text).join(""), "  cdef");
+});
+
+test("decorateBubble: role=user — 패딩 세그먼트는 tone:plain(장식색 없음 — Option B)", () => {
+  const out = decorateBubble([[{ text: "x", tone: "accent" }]], "user", 5);
+  assert.equal(out[0][0].tone, "plain");
+  assert.equal(out[0][1].text, "x");
+  assert.equal(out[0][1].tone, "accent", "원본 세그먼트 톤은 보존");
+});
+
 test("tailLines: 줄 수가 상한 이하면 원문 그대로(자르지 않음)", () => {
   assert.equal(tailLines("a\nb\nc", 5), "a\nb\nc");
   assert.equal(tailLines("a\nb\nc", 3), "a\nb\nc");
@@ -527,6 +602,32 @@ test("tailLines: maxLines=1이면 헤더만(콘텐츠 0줄, 잘림 없는 것처
 test("tailLines: maxLines가 0 이하면 빈 문자열", () => {
   assert.equal(tailLines("a\nb", 0), "");
   assert.equal(tailLines("a\nb", -1), "");
+});
+
+// 보안수정(2026-07-27, /ship 사전 QUICK 검토 Critical + scope-critic 범위확대 지적) — 게이트
+// reason·LLM derivedCase는 diff.ts 밖(외부 원천)에서 온다. tailLines가 이들의 유일한 공통
+// 렌더 경유 지점이라 여기서도 sanitizeControlChars를 거쳐야 같은 취약점 클래스가 남지 않는다.
+test("sanitizeControlChars: ESC를 포함한 C0/DEL/C1 제어문자를 제거하고 탭·개행은 보존", () => {
+  assert.equal(sanitizeControlChars("safe\x1b[2J\x1b[31mtext"), "safe[2J[31mtext");
+  assert.equal(sanitizeControlChars("a\tb\nc"), "a\tb\nc");
+  assert.equal(sanitizeControlChars("x\x7fy\x9bz"), "xyz");
+});
+
+// security-auditor DEEP 재검토(2026-07-27) — 첫 구현 정규식이 `\x0B\x0C` 뒤 `\x0E`부터 이어써
+// CR(0x0d)이 갭에 빠져 살아남았었다. CR은 같은 렌더 행 안에서 커서를 0열로 되돌려 뒤 텍스트가
+// 앞 텍스트를 덮어쓰게 만들 수 있어(ink가 raw로 그대로 흘려보냄, 실측 확인) ESC와 동일한 위협
+// 클래스다. 개행(LF)과 인접한 값이라 특히 이런 오프바이원 갭에 취약 — 별도 전용 케이스로 고정.
+test("sanitizeControlChars: CR(0x0d) 단독도 제거된다(개행과 인접해 정규식 오프바이원에 취약한 값)", () => {
+  assert.equal(sanitizeControlChars("a\rb"), "ab");
+});
+
+test("tailLines: 반환값에 제어문자가 남지 않는다(잘리지 않는 경로·잘리는 경로 둘 다)", () => {
+  // 구현체와 동일한 정규식을 검증에 재사용하면 그 정규식 자체의 결함을 못 잡는 동어반복이 된다
+  // (security-auditor DEEP 지적, 2026-07-27) — 기대 출력 문자열을 직접 명시한다.
+  assert.equal(tailLines("safe\x1b[31mline", 5), "safe[31mline");
+  assert.equal(tailLines("safe\rline", 5), "safeline");
+  const long = tailLines("1\x1b[0m\n2\n3\x07\n4\n5", 2);
+  assert.equal(long, "… (+4줄 생략)\n5");
 });
 
 test("tailLines: 빈 문자열 입력은 빈 문자열 그대로", () => {
@@ -573,6 +674,29 @@ test("formatSidebarRepoPath: 일반 예산(23) 딱 맞으면 원본 유지, isSt
 test("formatSidebarRepoPath: 마지막 세그먼트 자체가 예산을 넘으면 세그먼트 꼬리만 남긴다(테두리 침범 0 계약)", () => {
   const out = formatSidebarRepoPath("/repo/" + "x".repeat(60), true);
   assert.ok(out.length <= 16, `16자 예산 초과: ${out.length}자`);
+});
+
+// D-5(잔여 근본수정) — 사이드바 승인 대기 배지. hasApproval=true면 배지 폭(5)만큼 예산이 줄어든다
+// (row 단위 조건부 예약, isStart와 동일 패턴 — 항상 예약하면 배지가 드문 상황에서도 매 row의
+// 경로 표시폭이 손해를 본다).
+test("formatSidebarRepoPath: hasApproval=true면 배지 예산(5)만큼 축약 임계값이 낮아진다", () => {
+  const p = "/mnt/d/workspace/notesx"; // 23자 — 일반 예산(23)엔 딱 맞지만 배지 예산(18)은 초과
+  assert.equal(formatSidebarRepoPath(p, false, false), p, "배지 없으면 기존과 동일");
+  assert.equal(formatSidebarRepoPath(p, false, true), "…/notesx", "배지 있으면 축약");
+});
+
+test("formatApprovalBadge: 0건이면 빈 문자열(배지 없음과 0건을 구분하지 않는다)", () => {
+  assert.equal(formatApprovalBadge(0), "");
+});
+
+test("formatApprovalBadge: 1~9건은 '[N]' 그대로 표시", () => {
+  assert.equal(formatApprovalBadge(1), " [1]");
+  assert.equal(formatApprovalBadge(9), " [9]");
+});
+
+test("formatApprovalBadge: 10건 이상은 '[9+]'로 상한 표시(폭 예산 고정 유지)", () => {
+  assert.equal(formatApprovalBadge(10), " [9+]");
+  assert.equal(formatApprovalBadge(42), " [9+]");
 });
 
 // ===== formatReposPanelPath — ⌃R 토글 ReposPanel도 동일 계열 오버플로(사이드바 수정 시 scope-critic

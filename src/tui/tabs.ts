@@ -86,3 +86,13 @@ export function updateTabStatus(registry: TabRegistry, repoId: string, patch: Pa
 export function getActiveTab(registry: TabRegistry): TabState {
   return registry.tabs[registry.activeTabId];
 }
+
+/**
+ * 0.11.0 — repoId의 "지금 진행중" 여부를 tab status에서 직접 판정한다(권위 술어). TuiState.streaming은
+ * 활성탭 라이브 뷰만 표현하고 TAB_SWITCHED가 streaming:false로 재시드하므로(model.ts), 탭을 이탈했다가
+ * 복귀하면 실제로는 진행중인데도 state.streaming이 false로 보인다 — app.tsx의 editor-submit(동시 제출
+ * 방지)·interrupt-stream(Esc 중단) 판정은 이 함수로 대체해야 한다. 미등록 repoId는 false(방어).
+ */
+export function isRepoStreaming(registry: TabRegistry, repoId: string): boolean {
+  return registry.tabs[repoId]?.status === "streaming";
+}

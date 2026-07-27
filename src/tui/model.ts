@@ -9,6 +9,14 @@ export type ApprovalChoice = "y" | "n" | "e" | "d";
 
 export const APPROVAL_CHOICES: readonly ApprovalChoice[] = ["y", "n", "e", "d"];
 
+/** ST2-2(0.11.0) — canUseTool 원본 toolName/input을 그대로 담는다(포맷팅은 렌더 시점, app.tsx가
+ *  diff.ts formatToolPreview로 그때의 rowBudget에 맞춰 수행 — 승인 요청 시점엔 터미널 크기에 따른
+ *  예산을 알 수 없다). */
+export interface ToolCallPreview {
+  toolName: string;
+  input: Record<string, unknown>;
+}
+
 export interface ApprovalState {
   reason: string;
   /** spec-add = 에이전트의 Bash("gbc spec add ...") 자기발화 승인(e/d 유효) · generic = 그 외 도구
@@ -16,6 +24,19 @@ export interface ApprovalState {
   kind: "spec-add" | "generic";
   derivedCase: string | null;
   selection: ApprovalChoice;
+  /** ST2-2(0.11.0) — kind(승인 의미론)와 독립된 표시축. spec-add·generic 어느 kind에도 실릴 수
+   *  있다 — 새 kind 값을 추가하지 않는 이유는 bridge.ts buildGateResultEvent 주석이 경계한 것과
+   *  동일(exhaustiveness 미검토 상속). 미지정/알 수 없는 도구면 null(app.tsx가 reason으로 폴백). */
+  preview: ToolCallPreview | null;
+  /** 0.11.0 — security-auditor 지적(Task C 발행게이트 DEEP, Critical)에서 시작해 D-3(잔여
+   *  근본수정)이 완결. 이 승인이 어느 repo의 세션에서 발생했는지. app.tsx의 activateApproval이
+   *  repoId===activeTabId일 때만 이 필드가 세팅된 APPROVAL_REQUESTED를 dispatch하므로(가드
+   *  자체가 activateApproval 안에 있다), TuiState.approval이 non-null인 한 이 값은 항상
+   *  activeTabId와 같다 — 배경 탭 오귀속은 구조적으로 불가능해졌다(과거엔 ApprovalBox.tsx가
+   *  런타임에 비교해 경고만 했다, D-6에서 그 분기 제거). 배경 탭 승인 건수 자체는 이 필드가 아니라
+   *  app.tsx의 approval-queue.ts 큐(QueuedApproval.repoId, 별개 타입)를 Sidebar.tsx가 세어
+   *  배지(D-5)로 보여준다. */
+  repoId: string;
 }
 
 export interface Statusline {
@@ -30,6 +51,10 @@ export interface Statusline {
   /** ST7(0.9.4 T1) — 마지막 턴의 첫 토큰까지 걸린 시간(ms, SDK result.ttft_ms). 0이면 아직 턴이
    *  없었거나 세션 재사용으로 체감 단축된 걸 실측할 값(성공기준 ⓐ) — 표시 생략 신호는 lastTurnMs와 동일. */
   lastTtftMs: number;
+  /** ST5-2(0.11.0) — SDK getContextUsage()의 totalTokens/maxTokens(안정 API, bridge.ts 매핑).
+   *  둘 다 0이면 아직 조회 전(표시 생략 신호 — lastTurnMs/lastTtftMs와 동일 관례). */
+  tokensUsed: number;
+  tokensMax: number;
 }
 
 export interface TuiState {
@@ -63,6 +88,8 @@ const DEFAULT_STATUSLINE: Statusline = {
   costUsd: 0,
   lastTurnMs: 0,
   lastTtftMs: 0,
+  tokensUsed: 0,
+  tokensMax: 0,
 };
 
 export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiState {
@@ -84,7 +111,9 @@ export type TuiEvent =
   | { type: "TURN_START" }
   | { type: "TURN_END" }
   | { type: "GATE_RESULT"; status: "pass" | "block"; specCount: number; deferCount: number }
-  | { type: "APPROVAL_REQUESTED"; reason: string; kind?: "spec-add" | "generic" }
+  // repoId 필수(0.11.0, security-auditor 지적) — 옵셔널로 두면 실수로 누락한 호출부가 컴파일은
+  // 통과한 채 오귀속 결함을 그대로 재생산한다. kind/preview와 달리 안전한 생략 기본값이 없다.
+  | { type: "APPROVAL_REQUESTED"; reason: string; repoId: string; kind?: "spec-add" | "generic"; preview?: ToolCallPreview }
   | { type: "APPROVAL_CASE_DERIVED"; caseText: string }
   | { type: "APPROVAL_SELECTION_MOVE"; direction: 1 | -1 }
   | { type: "APPROVAL_ANSWERED"; choice: ApprovalChoice }
@@ -100,7 +129,12 @@ export type TuiEvent =
   // 설계 주석 참조), 다른 repo로 전환하면 그 뷰 전체를 새 탭 기준으로 다시 시드한다(스트리밍·승인·
   // 게이트 상태는 절대 이어받지 않는다 — 다른 세션의 진행 상태를 여기 남기면 그 자체가 교차오염
   // 표면이 된다). scrollback 초기화는 app.tsx 책임(이 reducer는 TuiState만 다룸).
-  | { type: "TAB_SWITCHED"; dir: string; branch: string; dirty: boolean; model: string; specCount: number; deferCount: number };
+  // 0.11.0(ST1-3 후속, scope-critic 지적) — streaming?는 대상 탭의 "지금 실제 진행중" 여부다.
+  // 제출 대기열(queue.ts) drain이 생기며 배경 탭도 실제로 스트리밍할 수 있게 됐는데, 이 필드 없이
+  // createInitialState로 재시드하면 그 탭으로 복귀해도 스피너가 안 보이는 정합성 결함이 생긴다.
+  // 생략 시 기존 계약(false)과 완전히 동일 — app.tsx가 tabsRef 기준 isRepoStreaming(tabs.ts)으로
+  // 계산해 넘긴다(이 reducer는 tabs 레지스트리를 직접 알지 못한다 — 여전히 순수 유지).
+  | { type: "TAB_SWITCHED"; dir: string; branch: string; dirty: boolean; model: string; specCount: number; deferCount: number; streaming?: boolean };
 
 function cycleChoice(current: ApprovalChoice, direction: 1 | -1): ApprovalChoice {
   const idx = APPROVAL_CHOICES.indexOf(current);
@@ -131,7 +165,14 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
         ...state,
         gateStatus: "block",
         panel: "none",
-        approval: { reason: event.reason, kind: event.kind ?? "generic", derivedCase: null, selection: "y" },
+        approval: {
+          reason: event.reason,
+          kind: event.kind ?? "generic",
+          derivedCase: null,
+          selection: "y",
+          preview: event.preview ?? null,
+          repoId: event.repoId,
+        },
       };
 
     case "APPROVAL_CASE_DERIVED":
@@ -178,7 +219,13 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
       const base = createInitialState({ dir: event.dir, branch: event.branch, dirty: event.dirty, model: event.model });
       // titleMode는 세션 라이브 뷰가 아니라 사용자의 표시 형태 선택이라 탭 전환으로 되돌지 않는다
       // (specCount/deferCount 등 다른 필드와 달리 "새 탭 = 새 뷰" 계약 밖 — 위 클래스 주석 참조).
-      return { ...base, specCount: event.specCount, deferCount: event.deferCount, titleMode: state.titleMode };
+      return {
+        ...base,
+        specCount: event.specCount,
+        deferCount: event.deferCount,
+        titleMode: state.titleMode,
+        streaming: event.streaming ?? false,
+      };
     }
 
     default:

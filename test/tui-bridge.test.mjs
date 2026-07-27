@@ -16,6 +16,7 @@ import {
   formatResumeFallbackBanner,
   formatCrashDump,
   formatSessionStartFailure,
+  mapContextUsageToStatuslinePatch,
   DeltaAssembler,
 } from "../dist/tui/bridge.js";
 
@@ -25,14 +26,18 @@ import {
 // (자체검토로 발견·수정). 그래서 아래 테스트는 decision.event에 deferCount를 아예 안 담아도
 // 함수가 인자로 받은 값을 그대로 쓰는지를 확인한다.
 
-test("buildGateResultEvent: kind=block → APPROVAL_REQUESTED(reason), specCount/deferCount 인자 무관", () => {
+test("buildGateResultEvent: kind=block → APPROVAL_REQUESTED(reason+repoId), specCount/deferCount 인자 무관", () => {
   const decision = { kind: "block", output: { mode: "exit-gate", permission: { decision: "ask", reason: "명세에 없는 파일 편집" } }, effects: {} };
-  assert.deepEqual(buildGateResultEvent(decision, 4, 1), { type: "APPROVAL_REQUESTED", reason: "명세에 없는 파일 편집" });
+  assert.deepEqual(buildGateResultEvent(decision, 4, 1, "/repo/a"), {
+    type: "APPROVAL_REQUESTED",
+    reason: "명세에 없는 파일 편집",
+    repoId: "/repo/a",
+  });
 });
 
 test("buildGateResultEvent: kind=pass → GATE_RESULT(status:pass, specCount/deferCount는 인자값 그대로)", () => {
   const decision = { kind: "pass", output: { mode: "exit-gate" }, effects: {} };
-  assert.deepEqual(buildGateResultEvent(decision, 4, 2), { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
+  assert.deepEqual(buildGateResultEvent(decision, 4, 2, "/repo/a"), { type: "GATE_RESULT", status: "pass", specCount: 4, deferCount: 2 });
 });
 
 test("buildGateResultEvent: doc-skip/cached/bypass/fail-open/passthrough/block-repeat는 전부 pass로 뭉뚱그리고, deferCount는 인자값 그대로(event 미신뢰)", () => {
@@ -43,7 +48,7 @@ test("buildGateResultEvent: doc-skip/cached/bypass/fail-open/passthrough/block-r
   // 체크 없는 else 캐치올이 "검토된 결정"과 "우연한 상속"을 구분 못 하게 되므로, 목록에 명시해 잠근다.
   for (const kind of ["doc-skip", "cached", "bypass", "fail-open", "passthrough", "block-repeat"]) {
     const decision = { kind, output: { mode: "exit-silent" }, effects: {} }; // event 자체가 없음 — cached 등의 실제 형태
-    const ev = buildGateResultEvent(decision, 0, 3);
+    const ev = buildGateResultEvent(decision, 0, 3, "/repo/a");
     assert.equal(ev.type, "GATE_RESULT");
     assert.equal(ev.status, "pass");
     assert.equal(ev.deferCount, 3, `kind=${kind}에서도 인자로 받은 deferCount를 그대로 써야 함(event 결손 무관)`);
@@ -75,6 +80,20 @@ test("assistant/system/auth_status 등 result가 아닌 메시지는 빈 배열(
   assert.deepEqual(mapEngineMessageToTuiEvents({ type: "system", subtype: "init" }), []);
   assert.deepEqual(mapEngineMessageToTuiEvents({ type: "auth_status" }), []);
   assert.deepEqual(mapEngineMessageToTuiEvents({ type: "stream_event" }), []);
+});
+
+// ── mapContextUsageToStatuslinePatch (ST5-2, 0.11.0) ──
+// getContextUsage()는 SDK 안정 API지만 세션 상태(종료·control-request 미지원 등)에 따라 null일 수
+// 있다 — engine.ts EngineSession.getContextUsage()가 실패를 이미 null로 흡수한다(fail-open). 이
+// 함수는 그 null을 다시 살펴 "표시할 값 없음"으로 변환할 뿐 자신이 try/catch할 게 없는 순수 매핑이다.
+
+test("mapContextUsageToStatuslinePatch: 정상 응답 → tokensUsed/tokensMax/usagePct 패치(SDK가 이미 계산한 percentage 그대로 사용)", () => {
+  const usage = { totalTokens: 12345, maxTokens: 200000, percentage: 6.17 };
+  assert.deepEqual(mapContextUsageToStatuslinePatch(usage), { tokensUsed: 12345, tokensMax: 200000, usagePct: 6.17 });
+});
+
+test("mapContextUsageToStatuslinePatch: null(세션 종료·오류) → 빈 패치(필드 생략, 0으로 덮어쓰지 않음 — ttft_ms 규약과 동일)", () => {
+  assert.deepEqual(mapContextUsageToStatuslinePatch(null), {});
 });
 
 // ── classifyApprovalRequest ──
