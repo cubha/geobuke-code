@@ -98,6 +98,29 @@ test("isToolPreviewSupported: 그 외 도구명은 false", () => {
   assert.equal(isToolPreviewSupported(""), false);
 });
 
+// 보안수정(2026-07-27, /ship 사전 QUICK 검토 Critical) — 도구 입력 원문(외부에서 온 파일 콘텐츠·
+// bash 명령 등)이 가공 없이 승인 프롬프트에 렌더되면, ANSI 이스케이프가 섞여 있을 때 y/n/e/d
+// 선택지 줄을 가리거나 화면을 조작해 사용자가 무엇을 승인하는지 오판하게 만들 수 있다.
+test("formatToolPreview: Write content의 ESC(0x1b) 이스케이프 시퀀스가 제거된다", () => {
+  const out = formatToolPreview("Write", { file_path: "a.txt", content: "safe\x1b[2J\x1b[31mDANGER" }, 10);
+  const t = texts(out);
+  assert.ok(!t.some((line) => line.includes("\x1b")), `ESC가 남아있음: ${JSON.stringify(t)}`);
+  assert.ok(t.some((line) => line.includes("safe") && line.includes("DANGER")));
+});
+
+test("formatToolPreview: Bash command의 캐리지리턴·기타 C0 제어문자가 제거된다", () => {
+  const out = formatToolPreview("Bash", { command: "echo hi\r\x07\x0bmore" }, 10);
+  const t = texts(out);
+  assert.ok(!/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/.test(t.join("")), `제어문자가 남아있음: ${JSON.stringify(t)}`);
+});
+
+test("formatToolPreview: Edit old_string/new_string의 이스케이프도 제거되고 탭·개행은 보존", () => {
+  const out = formatToolPreview("Edit", { file_path: "a.ts", old_string: "a\x1b[0mb", new_string: "c\tд" }, 10);
+  const t = texts(out);
+  assert.ok(!t.some((line) => line.includes("\x1b")));
+  assert.ok(t.some((line) => line.includes("\t")), "탭 문자는 보존돼야 함");
+});
+
 // ── formatToolPreviewVisual (scope-critic 지적 — 논리줄 rowBudget과 폭 랩 후 시각행수가 어긋날 수
 // 있어, app.tsx(행수 예산 계산)와 ApprovalBox.tsx(실제 렌더)가 동일한 함수를 호출해 절대 drift가
 // 없게 한다. 최종 반환은 이미 폭으로 wrap된 시각행이며, 전체 개수가 rowBudget을 절대 넘지 않는다 —
