@@ -2,6 +2,25 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.11.0] - 2026-07-27
+
+**in-flight 큐잉·diff 프리뷰·prompt history 영속화·statusline 토큰·말풍선 UI(Task C) + 승인 오귀속 근본수정(Task D) + `/analyze` 요구사항 재검증 회귀 3건 수정**
+
+### Added
+- **in-flight 제출 큐잉** — 스트리밍 중인 repo에 새 프롬프트를 제출하면 소실되지 않고 repoId별 대기열(`queue.ts`)에 쌓여 턴 종료 후 순차 처리된다. 대기 건수를 입력창 하단에 표시하고, Esc로 대기열 전체를 취소하며 취소된 원문을 스크롤백에 에코한다. streaming 판정을 전역 `state.streaming`에서 tab status(`isRepoStreaming`) 기준으로 교체해 탭 이탈 후 복귀해도 진행중인 턴을 정확히 인식한다.
+- **도구 승인 diff 프리뷰** — Edit/Write/MultiEdit/Bash 도구 승인 요청에 실제 변경내용(diff/헤드/명령어) 미리보기를 표시한다(`diff.ts` 신규). 이전엔 승인 사유 문구만 보여 무엇을 승인하는지 알 수 없었다.
+- **prompt history 영속화** — 프롬프트 히스토리를 repoId별로 격리하고 `~/.gbc/prompt-history.json`에 원자쓰기로 영속화한다(repo당 최근 100건, `GBC_NO_PROMPT_HISTORY`로 opt-out).
+- **statusline 토큰 사용량 표시** — `12.3k/200k` 형태로 컨텍스트 사용량을 병기하고 좁은 폭에서는 강등한다. SDK `getContextUsage()`의 `percentage`를 그대로 사용(재계산 없음).
+- **채팅 말풍선 UI** — 사용자 메시지를 우측 정렬 말풍선으로 표시, 좁은 폭/저높이에서는 접두어 표시로 강등한다.
+- **사이드바 승인 대기 배지** — 배경 탭에 승인 대기가 쌓이면 사이드바 탭 행에 건수 배지를 표시한다.
+
+### Fixed
+- **승인 오귀속 근본수정** — 다른 탭에서 온 도구 승인이 현재 활성 탭에 잘못 표시되던 결함을 근본수정. `approval-queue.ts`(신규)로 승인 큐를 repoId별로 완전히 격리하고, `activateApproval`에 `activeTabId` 가드를 걸어 표시되는 승인이 항상 활성 탭 것임을 구조적으로 보장한다.
+- **세션 사망 시 pending 승인 leak** — 세션이 스스로 죽을 때(`onEnded`) 그 repo에 대기 중이던 승인이 아무도 처리하지 않아 영구 대기하던 결함을 `drainApprovals` 유니버설 drain(제출 반환 직후·`onEnded`·탭 종료 3지점)으로 근본수정.
+- **`/analyze` 요구사항 재검증에서 발견된 회귀 3건**: ① 세션 생성 실패 시 탭 상태가 "streaming"에 영구 고착돼 해당 repo가 앱 재시작 전까지 먹통이 되던 결함, ② 탭 종료 시 제출 큐가 정리되지 않아 같은 repo 재등록 시 과거 메시지가 사용자 모르게 재전송되던 결함, ③ Edit/Write/MultiEdit/Bash 외 도구(WebFetch·MCP 등) 승인 시 본문이 완전히 비어 렌더되던 결함.
+
+검증: `verify.sh --full` 851/851 · scope-critic 다수 라운드(모두 반영) · security-auditor DEEP 발행게이트(Task C/D/후속수정 각 Crit0) · `/analyze` 요구사항표 22항목 전량 재검증(FAIL 0). hook 계약 무변경 = 재init 불요.
+
 ## [0.10.6] - 2026-07-24
 
 **필드 하드닝: 저높이/저폭 반응형 강등 + events.jsonl 로테이션 + useInput 순수화** — 0.10.5 이월항목 4그룹 중 A(반응형+로테이션)와 B(useInput 분해)를 하나로 묶어 발행한다(사용자 지시로 0.10.7 분리 대신 0.10.6 동승).
