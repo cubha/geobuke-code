@@ -63,6 +63,11 @@ export interface TuiState {
    *  full(압축 워드마크 7행)↔mini(1행)로 사용자가 ⌃T(TOGGLE_TITLE)로 직접 고른다. 세션 한정 —
    *  영속화하지 않는다(재실행 시 항상 full로 시작). */
   titleMode: "full" | "mini";
+  /** 0.11.1 — 포커스 모드(사이드바 강제 숨김, Alt+F/Ctrl+F). titleMode와 동일 성격의 "세션 중
+   *  사용자 표시 형태 선택"이라 탭 전환(TAB_SWITCHED)으로 되돌지 않는다. 실제 사이드바 숨김은
+   *  computeResponsiveLayout의 showSidebar 판정에 이 값을 AND로 얹는 쪽(app.tsx)이 담당 — 이
+   *  reducer는 on/off 상태만 순수하게 추적한다. */
+  focusMode: boolean;
   streaming: boolean;
   gateStatus: "idle" | "pass" | "block";
   specCount: number;
@@ -97,6 +102,7 @@ export const DEFAULT_STATUSLINE: Statusline = {
 export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiState {
   return {
     titleMode: "full",
+    focusMode: false,
     streaming: false,
     gateStatus: "idle",
     specCount: 0,
@@ -127,6 +133,7 @@ export type TuiEvent =
   | { type: "STREAM_DELTA"; text: string }
   | { type: "STREAM_COMMIT" }
   | { type: "TOGGLE_TITLE" }
+  | { type: "TOGGLE_FOCUS" }
   // 0.10.0 A3b ST11 — 활성 탭 전환. TuiState는 "지금 포커스된 탭의 라이브 뷰"만 표현하므로(tabs.ts
   // 설계 주석 참조), 다른 repo로 전환하면 그 뷰 전체를 새 탭 기준으로 다시 시드한다(스트리밍·승인·
   // 게이트 상태는 절대 이어받지 않는다 — 다른 세션의 진행 상태를 여기 남기면 그 자체가 교차오염
@@ -230,6 +237,9 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
     case "TOGGLE_TITLE":
       return { ...state, titleMode: state.titleMode === "full" ? "mini" : "full" };
 
+    case "TOGGLE_FOCUS":
+      return { ...state, focusMode: !state.focusMode };
+
     case "TAB_SWITCHED": {
       // createInitialState를 그대로 재사용해 "새 탭 = 완전히 새 라이브 뷰" 계약을 한 곳에서만
       // 정의한다(App 마운트 시드 로직과 동일 조립 방식 — app.tsx가 중복 구현하지 않음).
@@ -249,6 +259,7 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
         specCount: event.specCount,
         deferCount: event.deferCount,
         titleMode: state.titleMode,
+        focusMode: state.focusMode,
         streaming: event.streaming ?? false,
       };
     }
