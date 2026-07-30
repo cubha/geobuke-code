@@ -2,6 +2,21 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.11.1] - 2026-07-30
+
+**포커스 모드(Alt+F) + statusline repo별 영속화·웰컴카드 도움말 힌트·대화창 UX 최종안(A+D)**
+
+### Added
+- **포커스 모드(Alt+F, Ctrl+F 폴백)** — tmux `prefix+z`(pane zoom)와 동일 원리로 사이드바를 강제 숨겨 대화창이 전체 폭을 쓴다. alt-screen 2컬럼 레이아웃에서 여러 줄짜리 응답을 드래그 선택하면 중간 줄들이 사이드바까지 포함한 전체 폭으로 선택되던 문제(터미널 네이티브 동작)의 해법. 기존 `computeResponsiveLayout`의 `showSidebar` 저폭 자동강등 인프라를 그대로 재사용(새 폭 계산 없음). `?` 도움말과 게이트줄(활성 중 상시 노출, `exitConfirmArmed`와 동일 패턴)에 안내를 추가했다.
+- **대화창 UX 최종안 A+D** — 턴 경계(user↔응답측 카테고리 전환)에만 여백을 넣고(A), 응답 연속 구간의 첫 시각행만 accent 톤으로 승격한다(D). braintrust 5렌즈 검토로 확정 — 매 줄 좌측 마커바(C)는 system 로그가 assistant 문단보다 실측상 압도적으로 많아 신호가 소음이 된다는 이유로 전원 기각됐다.
+- **웰컴카드 `?`/`PgUp` 힌트** — 키맵을 상세히 안내하면서도 정작 도움말 진입 방법(`?`)과 대화창 스크롤(`PgUp`/`PgDn`) 자체는 안내한 적이 없던 구현 갭을 메웠다.
+
+### Fixed
+- **statusline repo별 영속화** — 탭 전환 시 컨텍스트 사용률·비용·턴 소요시간이 0으로 리셋되던 결함. repo별 statusline 캐시를 신설해 복원한다(branch/dirty/model은 always-fresh로 이벤트 자신의 값이 항상 이긴다).
+- **Tab 미아 사이드바 포커스** — 포커스 모드 활성 중(사이드바가 안 보이는 상태)에도 `Tab`이 무조건 `sidebar-focus-toggle`을 발동시켜, 보이지 않는 사이드바에 포커스가 남아 이후 타이핑이 조용히 삼켜지던 결함을 근본수정(scope-critic 발견).
+
+검증: `verify.sh --full` 882/882 · scope-critic 4/4 SubTask 통과(1건 실결함 포착·수정) · security-auditor QUICK(Crit0/Warn0/Info0). hook 계약 무변경 = 재init 불요.
+
 ## [0.11.0] - 2026-07-27
 
 **in-flight 큐잉·diff 프리뷰·prompt history 영속화·statusline 토큰·말풍선 UI(Task C) + 승인 오귀속 근본수정(Task D) + `/analyze` 요구사항 재검증 회귀 3건 수정**
