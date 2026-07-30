@@ -182,6 +182,13 @@ test("Alt+M/R/S/T → toggle-panel/toggle-title", () => {
   assert.deepEqual(classifyKey("t", key({ ctrl: true }), ctx()), { type: "toggle-title" });
 });
 
+// 0.11.1 — 포커스 모드(사이드바 강제 숨김) 토글. Alt+M/R/S/T와 동일 6단(승인·패널열림보다 먼저,
+// 별도 우선순위 신설 불필요 — 기존 패널토글류와 성격이 같다).
+test("Alt+F/Ctrl+F → toggle-focus", () => {
+  assert.deepEqual(classifyKey("f", key({ meta: true }), ctx()), { type: "toggle-focus" });
+  assert.deepEqual(classifyKey("f", key({ ctrl: true }), ctx()), { type: "toggle-focus" });
+});
+
 // ── 7단: '?' 도움말(에디터 빈 상태 한정) ──
 
 test("'?'(에디터 비어있음) → toggle-panel help", () => {
