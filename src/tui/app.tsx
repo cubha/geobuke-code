@@ -1059,6 +1059,17 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         // 아티팩트 a9ee1e59 — A안(full) 기본, B안(mini)은 이 단축키로만 진입.
         dispatch({ type: "TOGGLE_TITLE" });
         return;
+      case "toggle-focus":
+        // 0.11.1 — 포커스 모드(사이드바 강제 숨김, tmux prefix+z와 동일 원리). 시안 아티팩트
+        // 58ba5d18 — alt-screen 2컬럼 구조에서 여러 줄 드래그 선택이 사이드바까지 오염되는 문제의
+        // 해법. showSidebar 게이팅(위 렌더 계산)이 이 값을 읽는다.
+        // 지금 켜지는 참(state.focusMode가 아직 false)이면 사이드바 포커스도 함께 해제한다 —
+        // 아니면 Tab으로 미리 포커스해둔 상태가 화면에서 사라진 사이드바에 그대로 남아 12단
+        // 라우팅(sidebar-swallow)이 그 뒤 타이핑을 조용히 삼키는 미아 포커스가 된다(승인 프롬프트
+        // 뜰 때 자동 해제하는 기존 SubTask5 관례와 동일 취지).
+        if (!state.focusMode) setSidebarFocused(false);
+        dispatch({ type: "TOGGLE_FOCUS" });
+        return;
 
       case "panel-close":
         dispatch({ type: "CLOSE_PANEL" });
@@ -1098,8 +1109,12 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         return;
 
       // SubTask5(0.10.1) — 사이드바 repos 키보드 내비게이션(Tab 포커스 토글).
+      // 0.11.1(scope-critic 지적) — focusMode 활성 중(사이드바 자체가 안 보임)엔 Tab을 삼킨다.
+      // 가드 없으면 사이드바가 보이지 않는 채로 sidebarFocused만 true가 돼(classifyKey는 focusMode를
+      // 모르는 순수 함수라 11단에서 무조건 토글) 12단이 그 뒤 모든 타이핑을 조용히 삼키는 미아
+      // 포커스가 된다 — 화면에 아무 단서도 없어 사용자가 원인을 알 길이 없다.
       case "sidebar-focus-toggle":
-        setSidebarFocused((f) => !f);
+        if (!state.focusMode) setSidebarFocused((f) => !f);
         return;
       // ⌃1..9 직행 단축키(tab-switch-direct)와 달리 이 경로는 창이 스크롤돼 9번째 이후로 밀린 repo도
       // 커서로 닿을 수 있다 — Sidebar.tsx computeSidebarWindow가 같은 전역 인덱스를 쓴다.
@@ -1229,10 +1244,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   }, [approvalQueue, repos]);
   const chatHeaderRows = computeHeaderRows(frameLayout.innerColumns, responsiveLayout.effectiveTitleMode);
   const chatTotalRows = computeChatRegionRows(rows, frameLayout.bandRows, chatHeaderRows);
-  const sidebarColumns = responsiveLayout.showSidebar ? SIDEBAR_COLUMNS : 0;
+  // 0.11.1 — 포커스 모드(Alt+F). computeResponsiveLayout의 저폭 자동강등(showSidebar)과 사용자의
+  // 수동 강제숨김(state.focusMode)은 서로 다른 축이라 여기서 AND로 합류한다 — 강등 판정 자체(폭
+  // 계산)는 그대로 두고 "보일지"만 이 값 하나로 대신한다. tmux prefix+z와 동일하게 사용자가
+  // 명시적으로 켠 것은 화면이 넓어져도 자동으로 되돌지 않는다.
+  const showSidebar = responsiveLayout.showSidebar && !state.focusMode;
+  const sidebarColumns = showSidebar ? SIDEBAR_COLUMNS : 0;
   const chatOuterColumns = Math.max(
     0,
-    computeContentColumns(frameLayout.innerColumns, sidebarColumns) - (responsiveLayout.showSidebar ? CHAT_COLUMN_GAP : 0),
+    computeContentColumns(frameLayout.innerColumns, sidebarColumns) - (showSidebar ? CHAT_COLUMN_GAP : 0),
   );
   const chatInnerColumns = Math.max(1, chatOuterColumns - 4); // ChatBox 테두리2+paddingX(1×2)
   // 입력창(또는 승인박스)이 실제로 차지할 행수 — 프롬프트("❯ ")·커서(█)까지 포함해 에디터 텍스트를
@@ -1293,7 +1313,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // 있다"를 전제로 위로 이동량을 계산하는데, 우리 레이아웃은 출력이 터미널 행수를 정확히 채우는
     // 정적 설계라 커서가 최하단 행에서 클램프돼 전제가 1행 깨진다 — 실측 y=33 vs 실제 입력행 34.
     setCursorPosition({
-      x: frameLayout.gutterColumns + sidebarColumns + (responsiveLayout.showSidebar ? CHAT_COLUMN_GAP : 0) + 2 + 2 + inputLayout.caretCol,
+      x: frameLayout.gutterColumns + sidebarColumns + (showSidebar ? CHAT_COLUMN_GAP : 0) + 2 + 2 + inputLayout.caretCol,
       y: frameLayout.bandRows + chatHeaderRows + 2 + chatViewportRows + 1 + dropdownRows + inputLayout.caretRow + 1,
     });
   } else {
@@ -1356,7 +1376,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
             성격). ChatBox가 이미 쓰는 최종 방어선(콘텐츠 영역 고정+클리핑)을 여기도 적용해, 예산을
             살짝 벗어나도 사이드바 테두리가 프레임 밖으로 넘쳐 옆 대화 컬럼을 침범하는 대신 박스
             안에서 조용히 잘리게 한다. */}
-        {responsiveLayout.showSidebar && (
+        {showSidebar && (
           <Box flexDirection="column" flexShrink={0} height={chatTotalRows} overflow="hidden">
             <WelcomeCard specCount={state.specCount} deferCount={state.deferCount} skills={cardSkills} />
             <Sidebar cwd={cwd} tabs={tabs} repos={repos} focused={sidebarFocused} cursor={sidebarCursor} showMascot={responsiveLayout.showMascot} approvalCounts={approvalCounts} />

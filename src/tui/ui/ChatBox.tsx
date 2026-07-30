@@ -13,9 +13,19 @@
 //  - 스피너는 항상 예약된 인디케이터 행(1행)에 병합 표시된다(추가 행 0).
 //  - 콘텐츠 영역은 height 고정+overflow hidden — panelNode가 길면 잘리고 짧으면 빈 공간 유지
 //    (섹션 높이 불변). 외곽 Box도 totalRows로 고정해 어떤 자식 성장도 프레임을 밀지 못한다.
-import React, { useMemo } from "react";
+import React, { useMemo, useRef } from "react";
 import { Box, Text } from "ink";
-import { wrapSegmentLine, computeChatViewport, decorateBubble, BUBBLE_MIN_INNER_COLUMNS, WELCOME_LINE, type TextSegment } from "../format.js";
+import {
+  wrapSegmentLine,
+  computeChatViewport,
+  decorateBubble,
+  BUBBLE_MIN_INNER_COLUMNS,
+  WELCOME_LINE,
+  isTurnSpacerBoundary,
+  isAssistantRunLead,
+  accentFirstVisualLine,
+  type TextSegment,
+} from "../format.js";
 import type { EntryRole } from "../scrollback.js";
 import { toneColor, BORDER_COLOR } from "./theme.js";
 
@@ -62,24 +72,57 @@ export function ChatBox({
   // 계약 — wrap 전 패딩은 폭 계산이 깨진다). innerWidth가 BUBBLE_MIN_INNER_COLUMNS 미만이면 정렬
   // 자체를 건너뛰어 기존 좌측정렬(❯/🐢 접두어)로 강등한다 — welcome 줄은 role이 없는 시스템 성격
   // 문구라 애초에 정렬 대상이 아니다(변경 없음).
+  // 대화창 UX 최종안 A(턴 경계 여백)+D(응답 첫줄 accent) — braintrust 5렌즈 검토 확정
+  // (아티팩트 57640b3c, 2026-07-27). prevRole을 루프 안에서 추적해 entries 배열 자체를 사전
+  // 가공하지 않는다 — 스페이서는 빈 시각행([])을 lines에 끼워넣기만 하면 되고(render는 이미
+  // line.length===0을 공백 1행으로 처리, L120 참조), accent 승격은 wrapSegmentLine 직후(폭
+  // 재계산 없이 색만)·decorateBubble 이전(둘은 서로 다른 role 대상이라 순서 무관)에 적용한다.
   const wrapped = useMemo(() => {
     const lines: TextSegment[][] = [];
     if (showWelcome) lines.push(...wrapSegmentLine([{ text: WELCOME_LINE, tone: "accent" }], innerWidth));
     const bubbleEnabled = innerWidth >= BUBBLE_MIN_INNER_COLUMNS;
+    let prevRole: EntryRole | undefined;
     for (const e of entries) {
-      const w = wrapSegmentLine(e.segments, innerWidth);
+      if (isTurnSpacerBoundary(prevRole, e.role)) lines.push([]);
+      let w = wrapSegmentLine(e.segments, innerWidth);
+      if (isAssistantRunLead(prevRole, e.role)) w = accentFirstVisualLine(w);
       lines.push(...(bubbleEnabled ? decorateBubble(w, e.role, innerWidth) : w));
+      prevRole = e.role;
     }
     return lines;
   }, [entries, showWelcome, innerWidth]);
 
+  // 스트리밍 프리뷰는 accent 승격 대상에서는 제외한다(scope-critic 검토로 확정) — 색은 wrap에
+  // 영향 없어 리플로우가 아니지만, 생성 중인 텍스트의 색이 눈앞에서 바뀌는 건 별개로 산만하다.
+  // 반면 **스페이서(여백)는 스트리밍 시작 시점에 미리 반영한다** — scope-critic 1차 지적: 커밋
+  // 전까지 여백 없이 붙여두면, 커밋 순간 entries의 첫 assistant 엔트리가 새로 스페이서를 만들어
+  // 그 위 내용이 갑자기 1행 밀려 보이는 리플로우가 생긴다(색과 달리 여백은 행수 자체를 바꾸므로
+  // D의 "리플로우 없음" 보장 밖이다).
+  //
+  // 스페이서 여부는 스트리밍 "시작 순간"에 고정한다 — entries를 그대로 매 렌더 재조회하면
+  // scope-critic 2차 지적대로 **진동**이 생긴다: 스트리밍이 user 엔트리 직후 곧바로 시작돼
+  // 스페이서 있음으로 잡혔다가, 도중에 시스템 로그(Read/Write 등)가 도착해 entries 마지막이
+  // system으로 바뀌면(같은 "response" 카테고리) 스페이서 없음으로 재판정되어 이미 화면에 떠 있던
+  // 여백이 스트리밍 중에 사라지는 식이다. streamSpacerRef가 "이번 스트리밍 세션에서 결정된 값"을
+  // 고정해, streamingText가 비었다가(idle) 다시 채워질 때(새 세션 시작)만 재계산한다 — 이 repo의
+  // 기존 관례(app.tsx의 statuslineCacheRef 등 useState+useRef 미러)와 동일한 "렌더 중 ref 갱신"
+  // 패턴이라 새 기법이 아니다.
+  //
   // 스트리밍 프리뷰도 동일한 표시폭 랩을 거쳐야 행수 계산이 정확하다 — 구 tailLines(논리줄 기준)는
   // 소프트랩 오차를 보수적 여유값에 떠넘겼는데, 그 여유값(PREVIEW_RESERVED_ROWS)이 대화창 박스
   // 예산과 이중계산되며 초과의 주범이 됐다.
-  const streamWrapped = useMemo(
-    () => (streamingText ? wrapSegmentLine([{ text: streamingText, tone: "plain" }], innerWidth) : []),
-    [streamingText, innerWidth],
-  );
+  const streamSpacerRef = useRef<boolean | null>(null);
+  if (!streamingText) {
+    streamSpacerRef.current = null;
+  } else if (streamSpacerRef.current === null) {
+    const lastRole = entries.length > 0 ? entries[entries.length - 1].role : undefined;
+    streamSpacerRef.current = isTurnSpacerBoundary(lastRole, "assistant");
+  }
+  const streamWrapped = useMemo(() => {
+    if (!streamingText) return [];
+    const lines = wrapSegmentLine([{ text: streamingText, tone: "plain" }], innerWidth);
+    return streamSpacerRef.current ? [[], ...lines] : lines;
+  }, [streamingText, innerWidth]);
 
   const contentRows = Math.max(1, viewportRows);
   const total = wrapped.length + streamWrapped.length;
