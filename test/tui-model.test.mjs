@@ -16,6 +16,13 @@ test("createInitialState: titleMode=full·gateStatus=idle·panel=none·approval=
   assert.equal(s.deferCount, 0);
 });
 
+// 0.11.1 — 포커스 모드(사이드바 강제 숨김). titleMode와 동일하게 "세션 중 사용자의 표시 형태
+// 선택"이라 기본값 false·TAB_SWITCHED로 되돌지 않는다.
+test("createInitialState: focusMode=false(기본)", () => {
+  const s = createInitialState();
+  assert.equal(s.focusMode, false);
+});
+
 test("createInitialState(seed): statusline 시드값 병합", () => {
   const s = createInitialState({ dir: "~/workspace/geobuke-code", model: "sonnet" });
   assert.equal(s.statusline.dir, "~/workspace/geobuke-code");
@@ -73,6 +80,22 @@ test("TOGGLE_TITLE: TURN_START·TURN_END 등 무관 이벤트로 되돌지 않�
   s = reduce(s, { type: "TURN_START" });
   s = reduce(s, { type: "TURN_END" });
   assert.equal(s.titleMode, "mini");
+});
+
+test("TOGGLE_FOCUS: false↔true 토글", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TOGGLE_FOCUS" });
+  assert.equal(s.focusMode, true);
+  s = reduce(s, { type: "TOGGLE_FOCUS" });
+  assert.equal(s.focusMode, false);
+});
+
+test("TOGGLE_FOCUS: TURN_START·TURN_END 등 무관 이벤트로 되돌지 않는다", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TOGGLE_FOCUS" });
+  s = reduce(s, { type: "TURN_START" });
+  s = reduce(s, { type: "TURN_END" });
+  assert.equal(s.focusMode, true);
 });
 
 test("GATE_RESULT: gateStatus·spec/defer 카운트 갱신, streaming은 무변경", () => {
@@ -298,6 +321,13 @@ test("TAB_SWITCHED: titleMode는 전환 전 값을 그대로 보존(탭 전환�
   s = reduce(s, { type: "TOGGLE_TITLE" }); // mini로 전환
   s = reduce(s, { type: "TAB_SWITCHED", dir: "/repo/b", branch: "", dirty: false, model: "", specCount: 0, deferCount: 0 });
   assert.equal(s.titleMode, "mini");
+});
+
+test("TAB_SWITCHED: focusMode도 titleMode와 동일하게 전환 전 값을 그대로 보존한다", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TOGGLE_FOCUS" }); // true로 전환
+  s = reduce(s, { type: "TAB_SWITCHED", dir: "/repo/b", branch: "", dirty: false, model: "", specCount: 0, deferCount: 0 });
+  assert.equal(s.focusMode, true);
 });
 
 // 2026-07-27 — statuslineSeed: 탭 복귀 시 그 repo에서 마지막으로 관측된 토큰 사용량 등을 복원한다
