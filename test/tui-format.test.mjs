@@ -807,6 +807,34 @@ test("computeFrameLayout: 경계(80×30)에서 innerRows = 28", () => {
   assert.equal(computeFrameLayout(80, 30).innerRows, 28);
 });
 
+// ── 0.11.2 포커스 모드 크롬 제거(B안, 시안 aef53edb) ──
+// 드래그 선택이 대화 행마다 '++'(거터)를 물어오던 것이 사용자 실사용 결함 보고의 핵심이었다.
+// 새 레이아웃 계산 없이 기존 저해상도 비활성 경로를 그대로 태운다.
+
+test("computeFrameLayout: focusMode면 크기가 충분해도 비활성(외부 '+' 프레임 전체 생략)", () => {
+  const layout = computeFrameLayout(140, 44, true);
+  assert.equal(layout.enabled, false);
+  assert.equal(layout.bandRows, 0);
+  assert.equal(layout.gutterColumns, 0);
+});
+
+test("computeFrameLayout: focusMode 비활성 반환은 저해상도 비활성과 같은 형태(경로 재사용 — 새 분기 없음)", () => {
+  // 같은 (columns, rows)에 대해 "저해상도라 비활성"과 "포커스라 비활성"의 결과가 완전히 같아야
+  // 한다 — 다르면 두 비활성 경로가 갈라진 것이고, 그 순간 프레임 관련 산술이 이원화된다.
+  assert.deepEqual(computeFrameLayout(70, 20, true), computeFrameLayout(70, 20, false));
+});
+
+test("computeFrameLayout: focusMode면 innerColumns/innerRows가 전체 폭·행 그대로(대화 컬럼이 거터 몫까지 회수)", () => {
+  const layout = computeFrameLayout(140, 44, true);
+  assert.equal(layout.innerColumns, 140);
+  assert.equal(layout.innerRows, 44);
+});
+
+test("computeFrameLayout: focusMode 기본값 false — 기존 호출부(2인자)는 동작 무변경", () => {
+  assert.deepEqual(computeFrameLayout(140, 44), computeFrameLayout(140, 44, false));
+  assert.equal(computeFrameLayout(140, 44).enabled, true);
+});
+
 // ── computeHeaderRows (0.11.0 고정 레이아웃 — 타이틀 상시+⌃T 토글) ──
 
 test("computeHeaderRows: full+워드마크 폭이면 7행(워드마크6+태그라인1, 압축 — 여백행 없음)", () => {
