@@ -63,6 +63,11 @@ export interface TuiState {
    *  full(압축 워드마크 7행)↔mini(1행)로 사용자가 ⌃T(TOGGLE_TITLE)로 직접 고른다. 세션 한정 —
    *  영속화하지 않는다(재실행 시 항상 full로 시작). */
   titleMode: "full" | "mini";
+  /** 0.11.1 — 포커스 모드(사이드바 강제 숨김, Alt+F/Ctrl+F). titleMode와 동일 성격의 "세션 중
+   *  사용자 표시 형태 선택"이라 탭 전환(TAB_SWITCHED)으로 되돌지 않는다. 실제 사이드바 숨김은
+   *  computeResponsiveLayout의 showSidebar 판정에 이 값을 AND로 얹는 쪽(app.tsx)이 담당 — 이
+   *  reducer는 on/off 상태만 순수하게 추적한다. */
+  focusMode: boolean;
   streaming: boolean;
   gateStatus: "idle" | "pass" | "block";
   specCount: number;
@@ -79,7 +84,9 @@ export interface TuiState {
   streamingText: string;
 }
 
-const DEFAULT_STATUSLINE: Statusline = {
+// export(2026-07-27) — app.tsx의 repoId별 statusline 캐시가 "이 repo를 아직 한 번도 캐시한 적
+// 없을 때"의 병합 기준값으로 쓴다(활성 탭의 현재 값을 빌려쓰면 배경탭 캐싱 시 무관한 값이 섞인다).
+export const DEFAULT_STATUSLINE: Statusline = {
   dir: "",
   branch: "",
   dirty: false,
@@ -95,6 +102,7 @@ const DEFAULT_STATUSLINE: Statusline = {
 export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiState {
   return {
     titleMode: "full",
+    focusMode: false,
     streaming: false,
     gateStatus: "idle",
     specCount: 0,
@@ -125,6 +133,7 @@ export type TuiEvent =
   | { type: "STREAM_DELTA"; text: string }
   | { type: "STREAM_COMMIT" }
   | { type: "TOGGLE_TITLE" }
+  | { type: "TOGGLE_FOCUS" }
   // 0.10.0 A3b ST11 — 활성 탭 전환. TuiState는 "지금 포커스된 탭의 라이브 뷰"만 표현하므로(tabs.ts
   // 설계 주석 참조), 다른 repo로 전환하면 그 뷰 전체를 새 탭 기준으로 다시 시드한다(스트리밍·승인·
   // 게이트 상태는 절대 이어받지 않는다 — 다른 세션의 진행 상태를 여기 남기면 그 자체가 교차오염
@@ -134,7 +143,22 @@ export type TuiEvent =
   // createInitialState로 재시드하면 그 탭으로 복귀해도 스피너가 안 보이는 정합성 결함이 생긴다.
   // 생략 시 기존 계약(false)과 완전히 동일 — app.tsx가 tabsRef 기준 isRepoStreaming(tabs.ts)으로
   // 계산해 넘긴다(이 reducer는 tabs 레지스트리를 직접 알지 못한다 — 여전히 순수 유지).
-  | { type: "TAB_SWITCHED"; dir: string; branch: string; dirty: boolean; model: string; specCount: number; deferCount: number; streaming?: boolean };
+  // statuslineSeed(2026-07-27) — 그 repo에서 마지막으로 관측된 statusline(app.tsx의 repoId별
+  // 캐시, 이 reducer는 캐시 저장소를 모른다 — 여전히 순수)을 넘기면 tokensUsed 등 "그 턴에서만
+  // 갱신되는" 필드가 매 탭전환마다 0으로 리셋되지 않는다. branch/dirty/model은 이 이벤트 자신의
+  // 필드가 항상 이겨야 한다(git 상태는 always-fresh — 캐시가 stale할 수 있으므로 아래 reduce에서
+  // 순서로 강제한다).
+  | {
+      type: "TAB_SWITCHED";
+      dir: string;
+      branch: string;
+      dirty: boolean;
+      model: string;
+      specCount: number;
+      deferCount: number;
+      streaming?: boolean;
+      statuslineSeed?: Partial<Statusline>;
+    };
 
 function cycleChoice(current: ApprovalChoice, direction: 1 | -1): ApprovalChoice {
   const idx = APPROVAL_CHOICES.indexOf(current);
@@ -213,10 +237,21 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
     case "TOGGLE_TITLE":
       return { ...state, titleMode: state.titleMode === "full" ? "mini" : "full" };
 
+    case "TOGGLE_FOCUS":
+      return { ...state, focusMode: !state.focusMode };
+
     case "TAB_SWITCHED": {
       // createInitialState를 그대로 재사용해 "새 탭 = 완전히 새 라이브 뷰" 계약을 한 곳에서만
       // 정의한다(App 마운트 시드 로직과 동일 조립 방식 — app.tsx가 중복 구현하지 않음).
-      const base = createInitialState({ dir: event.dir, branch: event.branch, dirty: event.dirty, model: event.model });
+      // statuslineSeed를 먼저 펼치고 이벤트 자신의 dir/branch/dirty/model로 덮어쓴다 — 캐시가
+      // 담고 있을 수 있는 stale한 branch/dirty/model보다 항상 방금 조회한 값이 이겨야 한다.
+      const base = createInitialState({
+        ...event.statuslineSeed,
+        dir: event.dir,
+        branch: event.branch,
+        dirty: event.dirty,
+        model: event.model,
+      });
       // titleMode는 세션 라이브 뷰가 아니라 사용자의 표시 형태 선택이라 탭 전환으로 되돌지 않는다
       // (specCount/deferCount 등 다른 필드와 달리 "새 탭 = 새 뷰" 계약 밖 — 위 클래스 주석 참조).
       return {
@@ -224,6 +259,7 @@ export function reduce(state: TuiState, event: TuiEvent): TuiState {
         specCount: event.specCount,
         deferCount: event.deferCount,
         titleMode: state.titleMode,
+        focusMode: state.focusMode,
         streaming: event.streaming ?? false,
       };
     }

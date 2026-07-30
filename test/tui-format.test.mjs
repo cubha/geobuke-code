@@ -36,6 +36,9 @@ import {
   computeFrameLayout,
   decorateBubble,
   sanitizeControlChars,
+  isTurnSpacerBoundary,
+  isAssistantRunLead,
+  accentFirstVisualLine,
 } from "../dist/tui/format.js";
 import { createInitialState, reduce } from "../dist/tui/model.js";
 
@@ -244,6 +247,29 @@ test("formatGateLine: exitConfirmArmed=true + BLOCK(승인 대기) 동시 상태
   assert.ok(segs.some((seg) => seg.text.includes("BLOCK")));
 });
 
+// 0.11.1 — 포커스 모드 활성 중엔 사이드바가 사라져 HelpPanel 안내도 함께 가려지므로, exitConfirmArmed와
+// 동일하게 게이트줄이 유일한 상시 노출 채널이다.
+test("formatGateLine: focusMode=true — 'Alt+F 포커스 해제' 상시 노출", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TOGGLE_FOCUS" });
+  const text = joinTextSegments(formatGateLine(s));
+  assert.match(text, /Alt\+F 포커스 해제/);
+});
+
+test("formatGateLine: focusMode=false(기본) — 포커스 세그먼트 없음", () => {
+  const text = joinTextSegments(formatGateLine(createInitialState()));
+  assert.doesNotMatch(text, /포커스 해제/);
+});
+
+test("formatGateLine: focusMode=true + BLOCK(승인 대기) 동시 상태에서도 포커스 세그먼트가 노출된다", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "TOGGLE_FOCUS" });
+  s = reduce(s, { type: "APPROVAL_REQUESTED", reason: "명세에 없는 파일 편집" });
+  const text = joinTextSegments(formatGateLine(s));
+  assert.match(text, /Alt\+F 포커스 해제/);
+  assert.match(text, /BLOCK/);
+});
+
 // ── 경량 마크다운/diff ──
 
 test("formatMarkdownLite: 헤딩은 #제거+accent, 일반 텍스트는 plain", () => {
@@ -344,10 +370,12 @@ const SKILLS = [
   { name: "gbc-mute", blurb: "리마인드 on/off" },
 ];
 
-test("formatWelcomeCard: 게이트 요약 2줄 + spec/defer 1줄 + 기본 스킬 섹션(헤딩+스킬수만큼) + 키맵 4줄", () => {
+test("formatWelcomeCard: 게이트 요약 2줄 + spec/defer 1줄 + 기본 스킬 섹션(헤딩+스킬수만큼) + 키맵 5줄", () => {
   const rows = formatWelcomeCard(8, 2, SKILLS);
   // 0.11.0(사용자 확정) — ⌃T 타이틀 토글 안내 1줄 추가(키맵 3→4).
-  assert.equal(rows.length, 2 + 1 + 1 + SKILLS.length + 4, "게이트요약2 + spec/defer1 + 스킬헤딩1 + 스킬3 + 키맵4");
+  // 2026-07-27 — "? 도움말"+"PgUp/PgDn 스크롤" 안내 1줄 추가(키맵 4→5, 사용자 실사용 지적:
+  // 도움말 진입 방법 자체가 안내된 적이 없었음).
+  assert.equal(rows.length, 2 + 1 + 1 + SKILLS.length + 5, "게이트요약2 + spec/defer1 + 스킬헤딩1 + 스킬3 + 키맵5");
   assert.match(joinTextSegments(rows[0]), /게이트 활성/);
   assert.match(joinTextSegments(rows[1]), /명세 없는 구현은 차단됩니다/);
   const line3 = joinTextSegments(rows[2]);
@@ -369,6 +397,9 @@ test("formatWelcomeCard: 게이트 요약 2줄 + spec/defer 1줄 + 기본 스킬
   assert.match(keymap3, /⌃C 종료\(2회\)/);
   const keymap4 = joinTextSegments(rows[10]);
   assert.match(keymap4, /Alt\+T 타이틀/);
+  const keymap5 = joinTextSegments(rows[11]);
+  assert.match(keymap5, /\? 도움말/);
+  assert.match(keymap5, /PgUp\/PgDn 스크롤/);
 });
 
 test("formatWelcomeCard: 스킬 이름 세그먼트는 accent 톤(패널 강조와 일관)", () => {
@@ -380,7 +411,7 @@ test("formatWelcomeCard: 스킬 이름 세그먼트는 accent 톤(패널 강조�
 
 test("formatWelcomeCard: 스킬 목록 비어있어도 헤딩+키맵은 유지(빈 목록 방어)", () => {
   const rows = formatWelcomeCard(0, 0, []);
-  assert.equal(rows.length, 2 + 1 + 1 + 0 + 4);
+  assert.equal(rows.length, 2 + 1 + 1 + 0 + 5);
 });
 
 test("formatWelcomeCard: 순수성 — 같은 입력엔 항상 같은 출력", () => {
@@ -789,4 +820,89 @@ test("computeHeaderRows: full+좁은폭이면 태그라인 1행 폴백", () => {
 test("computeHeaderRows: mini는 폭 무관 1행", () => {
   assert.equal(computeHeaderRows(136, "mini"), 1);
   assert.equal(computeHeaderRows(60, "mini"), 1);
+});
+
+// ── 대화창 UX 최종안 A(턴 경계 여백)+D(응답 첫줄 accent) — braintrust 5렌즈 검토 확정
+// (아티팩트 57640b3c, 2026-07-27). C(매 줄 마커바)는 실사용 밀도(system 로그가 assistant 문단보다
+// 압도적으로 많음)+스트리밍 리플로우 문제로 4개 렌즈 전원 기각. 카테고리는 user vs 비user(assistant+
+// system 통합) — "단순 role 변경"이 아니라 이 카테고리 전환만 턴 경계로 본다(같은 턴 안의
+// assistant↔system 교차 — 예: "## 판단" 다음 "Read routes/index.ts" — 는 경계가 아니다). ──
+
+test("isTurnSpacerBoundary: user → 비user(assistant/system) 전환은 경계", () => {
+  assert.equal(isTurnSpacerBoundary("user", "assistant"), true);
+  assert.equal(isTurnSpacerBoundary("user", "system"), true);
+});
+
+test("isTurnSpacerBoundary: 비user → user 전환도 경계(양방향)", () => {
+  assert.equal(isTurnSpacerBoundary("assistant", "user"), true);
+  assert.equal(isTurnSpacerBoundary("system", "user"), true);
+});
+
+test("isTurnSpacerBoundary: assistant↔system은 경계 아님(같은 턴 내 툴로그 교차, 매 role변경이 아님)", () => {
+  assert.equal(isTurnSpacerBoundary("assistant", "system"), false);
+  assert.equal(isTurnSpacerBoundary("system", "assistant"), false);
+});
+
+test("isTurnSpacerBoundary: 동일 role 연속은 경계 아님", () => {
+  assert.equal(isTurnSpacerBoundary("user", "user"), false);
+  assert.equal(isTurnSpacerBoundary("assistant", "assistant"), false);
+  assert.equal(isTurnSpacerBoundary("system", "system"), false);
+});
+
+test("isTurnSpacerBoundary: prevRole 미지정(최초 엔트리)은 경계 아님(웰컴 카드 직후 첫 줄에 여백 없음)", () => {
+  assert.equal(isTurnSpacerBoundary(undefined, "user"), false);
+  assert.equal(isTurnSpacerBoundary(undefined, "assistant"), false);
+});
+
+test("isAssistantRunLead: assistant 연속 구간의 첫 엔트리만 true", () => {
+  assert.equal(isAssistantRunLead("system", "assistant"), true);
+  assert.equal(isAssistantRunLead("user", "assistant"), true);
+  assert.equal(isAssistantRunLead(undefined, "assistant"), true);
+});
+
+test("isAssistantRunLead: assistant 연속 구간의 두 번째 이후 엔트리는 false(중복 강조 방지)", () => {
+  assert.equal(isAssistantRunLead("assistant", "assistant"), false);
+});
+
+test("isAssistantRunLead: role이 assistant가 아니면 항상 false", () => {
+  assert.equal(isAssistantRunLead("assistant", "system"), false);
+  assert.equal(isAssistantRunLead("assistant", "user"), false);
+  assert.equal(isAssistantRunLead(undefined, "system"), false);
+});
+
+test("accentFirstVisualLine: 첫 시각행의 plain 세그먼트만 accent로 승격", () => {
+  const lines = [
+    [{ text: "완료했습니다", tone: "plain" }],
+    [{ text: "추가했어요", tone: "plain" }],
+  ];
+  const out = accentFirstVisualLine(lines);
+  assert.equal(out[0][0].tone, "accent");
+  assert.equal(out[1][0].tone, "plain", "두 번째 시각행은 손대지 않는다");
+});
+
+test("accentFirstVisualLine: 이미 의미있는 톤(헤딩=accent·코드펜스=dim 등)은 덮지 않는다", () => {
+  const lines = [[{ text: "## 판단", tone: "accent" }]];
+  assert.deepEqual(accentFirstVisualLine(lines), lines);
+  const dimLines = [[{ text: "```ts", tone: "dim" }]];
+  assert.deepEqual(accentFirstVisualLine(dimLines), dimLines);
+});
+
+test("accentFirstVisualLine: 첫 시각행에 여러 세그먼트가 섞여 있어도 plain만 개별 승격", () => {
+  const out = accentFirstVisualLine([[
+    { text: "a", tone: "plain" },
+    { text: "b", tone: "danger" },
+  ]]);
+  assert.equal(out[0][0].tone, "accent");
+  assert.equal(out[0][1].tone, "danger");
+});
+
+test("accentFirstVisualLine: 빈 배열 입력은 그대로", () => {
+  assert.deepEqual(accentFirstVisualLine([]), []);
+});
+
+test("accentFirstVisualLine: 원본 배열을 변형하지 않는다(불변 갱신)", () => {
+  const original = [[{ text: "x", tone: "plain" }]];
+  const snapshot = JSON.parse(JSON.stringify(original));
+  accentFirstVisualLine(original);
+  assert.deepEqual(original, snapshot);
 });

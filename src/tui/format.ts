@@ -706,6 +706,14 @@ export function formatWelcomeCard(specCount: number, deferCount: number, skills:
       { text: "⌃C 종료(2회)", tone: "dim" },
     ],
     [{ text: "Alt+T 타이틀 전환", tone: "dim" }], // 0.11.0 — full/mini 타이틀 토글(사용자 확정 2026-07-22).
+    // 2026-07-27(사용자 실사용 지적) — 이 카드가 키맵을 상세히 안내하면서도 정작 "더 많은 키맵을
+    // 보는 방법"(? 도움말)과 대화창 스크롤 방법이 빠져있었다. HelpPanel.tsx 자신도 "?"를
+    // 목록에 넣지만 그건 이미 ?를 눌러 도움말을 연 사람만 보는 순환 문제라 여기(첫 진입 화면)에도
+    // 노출한다.
+    [
+      { text: "? 도움말", tone: "dim" },
+      { text: "PgUp/PgDn 스크롤", tone: "dim" },
+    ],
   );
   return rows;
 }
@@ -898,10 +906,15 @@ export function formatGateLine(state: TuiState, queueCount = 0): TextSegment[] {
   // 스크롤백은 후속 출력에 밀려나 사라지므로, 상시 노출 채널인 이 줄이 armed 여부의 유일하게
   // 신뢰 가능한 표시처다(scope-critic 발견, 2026-07-13 ST7-10 판정 DECISION_CHANGED:yes).
   const armedSeg: TextSegment[] = state.exitConfirmArmed ? [{ text: "⌃C 한 번 더=종료", tone: "warn" }] : [];
+  // 0.11.1 — 포커스 모드(사이드바 강제 숨김) 활성 중엔 그 자체가 유일한 표시처(사이드바가 사라져
+  // HelpPanel의 상시 안내도 가려짐)라 exitConfirmArmed와 동일하게 gateStatus/승인 상태와 무관하게
+  // 항상 노출한다 — "빠져나가는 법"이 화면 밖으로 나가는 일이 없어야 한다.
+  const focusSeg: TextSegment[] = state.focusMode ? [{ text: "Alt+F 포커스 해제", tone: "accent" }] : [];
 
   if (state.gateStatus === "block" && state.approval) {
     return [
       ...armedSeg,
+      ...focusSeg,
       { text: "🐢 BLOCK", tone: "danger" },
       { text: "승인 대기 중 — 엔진 일시정지 (canUseTool)", tone: "dim" },
     ];
@@ -922,7 +935,47 @@ export function formatGateLine(state: TuiState, queueCount = 0): TextSegment[] {
     { text: state.panel === "repos" ? "Alt+R 닫기" : "Alt+R repos", tone: "dim" },
     { text: state.panel === "skills" ? "Alt+S 닫기" : "Alt+S skills", tone: "dim" },
   );
-  return [...armedSeg, ...segments];
+  return [...armedSeg, ...focusSeg, ...segments];
+}
+
+// ── 대화창 UX A(턴 경계 여백)+D(응답 첫줄 accent) — braintrust 5렌즈 검토 확정
+// (아티팩트 57640b3c, 2026-07-27). 사용자가 미학적으로 선호한 C(매 줄 마커바)는 4개 렌즈 전원
+// 기각: 실측상 system 로그(툴 실행 결과 등)가 assistant 문단보다 압도적으로 많아 "user 아니면
+// 전부 마커"는 화면 대부분에 마커가 붙어 신호가 소음이 되고, 스트리밍 완료 시점에 마커 유무로
+// 리플로우가 매 응답마다 발생한다. 대신 이미 formatMarkdownLite가 헤딩에 쓰던 accent 톤을
+// assistant 첫 줄로 확장(D)해 새 글리프·폭 재계산·리플로우 없이 "방금 답한 새 턴" 신호를 만들고,
+// 여백(A)은 단순 role 변경이 아니라 user↔비user(assistant+system 통합) 카테고리 전환에만 넣는다
+// — 같은 턴 안에서 assistant 문단과 system 툴로그가 교차해도(예: "## 판단" 다음 "Read x.ts")
+// 여백이 끼지 않아야 실제 제출(submit) 단위 턴 경계와 일치한다.
+
+/** 카테고리: user는 그 자체로 하나, assistant+system은 "응답측"으로 묶는다(같은 턴 안의
+ * assistant↔system 교차를 경계로 오인하지 않기 위함). */
+function turnCategory(role: EntryRole): "user" | "response" {
+  return role === "user" ? "user" : "response";
+}
+
+/** entries 루프에서 이 엔트리 앞에 빈 시각행(스페이서)을 넣을지 판정한다(순수). 최초 엔트리
+ * (prevRole 미지정)는 항상 false — 웰컴 카드 직후 첫 줄에 불필요한 여백이 생기지 않는다. */
+export function isTurnSpacerBoundary(prevRole: EntryRole | undefined, role: EntryRole): boolean {
+  if (prevRole === undefined) return false;
+  return turnCategory(prevRole) !== turnCategory(role);
+}
+
+/** 이 엔트리가 assistant 연속 구간의 시작(=새 응답의 첫 엔트리)인지 판정한다(순수). 같은 구간의
+ * 두 번째 이후 엔트리는 false — 응답 전체가 아니라 그 시작 신호 1곳에만 강조가 필요하다. */
+export function isAssistantRunLead(prevRole: EntryRole | undefined, role: EntryRole): boolean {
+  return role === "assistant" && prevRole !== "assistant";
+}
+
+/** wrapSegmentLine 출력(시각행 배열)의 첫 시각행만 plain→accent로 승격한다(순수, 불변 갱신).
+ * formatMarkdownLite가 이미 배정한 의미있는 톤(헤딩=accent·코드펜스=dim/code·diff=danger 등)은
+ * 덮지 않는다 — 목적은 "새 턴 신호"지 색 자체가 아니므로, 이미 다른 의미로 색이 쓰인 줄까지
+ * 강제로 바꾸면 그 의미가 사라진다. wrap 이후(시각행 단위) 호출 전제 — 폭 재계산 없음. */
+export function accentFirstVisualLine(lines: TextSegment[][]): TextSegment[][] {
+  if (lines.length === 0) return lines;
+  const [first, ...rest] = lines;
+  const accented = first.map((seg) => (seg.tone === "plain" ? { ...seg, tone: "accent" as Tone } : seg));
+  return [accented, ...rest];
 }
 
 // ── 경량 마크다운/diff (ink-markdown 3년 방치 — 최소 자체구현) ──

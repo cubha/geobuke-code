@@ -11,6 +11,7 @@ const SHORTCUT_ROWS: readonly [string, string][] = [
   ["Alt+R", "repos 패널(↑/↓·Enter)"],
   ["Alt+S", "skills 패널"],
   ["Alt+T", "타이틀 full/mini 전환"],
+  ["Alt+F", "포커스 모드(사이드바 숨김/복귀)"],
   ["Tab", "사이드바 포커스 토글"],
   ["PgUp/PgDn", "대화창 스크롤"],
   ["Esc", "스트리밍 중단 · 패널/드롭다운 닫기"],

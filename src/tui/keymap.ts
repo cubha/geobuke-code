@@ -47,6 +47,7 @@ export type KeyAction =
   | { type: "approval-swallow" }
   | { type: "toggle-panel"; panel: "metrics" | "repos" | "skills" | "help" }
   | { type: "toggle-title" }
+  | { type: "toggle-focus" }
   | { type: "panel-close" }
   | { type: "repos-panel-cursor"; direction: -1 | 1 }
   | { type: "repos-panel-select" }
@@ -113,6 +114,10 @@ export function classifyKey(input: string, key: Key, ctx: KeyRoutingContext): Ke
   if ((key.ctrl || key.meta) && input === "r") return { type: "toggle-panel", panel: "repos" };
   if ((key.ctrl || key.meta) && input === "s") return { type: "toggle-panel", panel: "skills" };
   if ((key.ctrl || key.meta) && input === "t") return { type: "toggle-title" };
+  // 0.11.1 — 포커스 모드(사이드바 강제 숨김, tmux prefix+z와 동일 원리). 기존 패널토글류와 동일
+  // 6단에 둔다 — 승인·opt-out보다 뒤지만 도움말('?')·패널열림·스크롤보다는 앞서야 패널이 열려있는
+  // 중에도 사이드바 표시 여부를 즉시 바꿀 수 있다(다른 토글 3종과 동일 우선순위 성격).
+  if ((key.ctrl || key.meta) && input === "f") return { type: "toggle-focus" };
 
   // 7단 — '?' 도움말(에디터가 비어있을 때만 — 아니면 일반 문자로 낙하해 아래 폴백에 잡힌다).
   if (input === "?" && ctx.editorEmpty) return { type: "toggle-panel", panel: "help" };

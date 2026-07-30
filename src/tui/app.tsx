@@ -9,7 +9,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import type { GateDecision } from "../gate-core.js";
-import { createInitialState, reduce, type TuiState, type ApprovalChoice, type ToolCallPreview } from "./model.js";
+import { createInitialState, reduce, DEFAULT_STATUSLINE, type TuiState, type ApprovalChoice, type ToolCallPreview, type Statusline } from "./model.js";
 import * as Editor from "./editor.js";
 import type { EditorState } from "./editor.js";
 import { classifyKey, type KeyRoutingContext } from "./keymap.js";
@@ -196,6 +196,27 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   const [editorStates, setEditorStates] = useState<Record<string, EditorState>>({});
   const editorStatesRef = useRef(editorStates);
   editorStatesRef.current = editorStates;
+
+  // 2026-07-27(사용자 실사용 지적) — TuiState.statusline은 앱 전체에 하나뿐인 슬롯이라, 탭을
+  // 전환할 때마다 model.ts TAB_SWITCHED가 완전히 새 라이브 뷰로 재시드하면서 토큰 사용량·비용
+  // 등도 함께 0으로 지워졌다(editorStates/scrollBuffers/submitQueue 등은 이미 repoId별로 격리
+  // 돼있는데 statusline만 그 대우를 못 받았음). 같은 "React state + ref 미러" 패턴으로 repoId별
+  // 최종 관측값을 캐시해뒀다가 탭 복귀 시 TAB_SWITCHED의 statuslineSeed로 복원한다. optOutTab이
+  // 탭을 닫아도 이 캐시는 지우지 않는다 — scrollBuffers/editorStates(옆 주석 "이력을 그대로
+  // 보존하므로 지울 이유가 없다")와 동일한 선례: 같은 repoId가 재등록되면 지난 세션의 마지막
+  // 값이 그대로 유용하다(scope-critic 지적, 2026-07-27 — 의도 불명확이라 명시).
+  const [statuslineCache, setStatuslineCache] = useState<Record<string, Statusline>>({});
+  const statuslineCacheRef = useRef(statuslineCache);
+  statuslineCacheRef.current = statuslineCache;
+  const cacheStatuslinePatch = useCallback((repoId: string, patch: Partial<Statusline>) => {
+    // DEFAULT_STATUSLINE 기준 — stateRef.current.statusline(활성 탭 것)을 빌려쓰면 배경탭(repoId
+    // !== activeTabId)을 캐싱할 때 무관한 탭의 값이 섞여든다(아래 makeHandleEngineMessage 호출부는
+    // 활성 여부와 무관하게 항상 호출됨).
+    const prev = statuslineCacheRef.current[repoId] ?? DEFAULT_STATUSLINE;
+    const next = { ...statuslineCacheRef.current, [repoId]: { ...prev, ...patch } };
+    statuslineCacheRef.current = next;
+    setStatuslineCache(next);
+  }, []);
   // ST3-2(0.11.0) — repoId가 editorStates에 아직 없을 때만(=이 세션에서 그 탭에 한 번도 안 쳤을
   // 때만) 디스크의 영속 히스토리로 1회 시드한다. 이미 있으면(타이핑했거나 이미 시드됨) 절대 덮어쓰지
   // 않는다 — 순수 파생값(editorState)이 아니라 여기서만 명시 호출해야 "매 렌더 파일 I/O" 결함
@@ -581,8 +602,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         // 국한한다(교차오염 차단, 기존 설계 유지). 그러나 scrollback append는 활성 여부와 무관하게
         // 항상 실행해야 한다 — 예전엔 여기서 그냥 return해 배경 탭에 도착한 메시지가 어디에도
         // 기록되지 않고 영구 유실됐다(사외 실사용 보고 근본원인).
+        const engineEvents = mapEngineMessageToTuiEvents(msg);
+        // 2026-07-27 — costUsd/lastTtftMs(STATUSLINE_UPDATE, result 메시지)는 이전엔 배경탭이면
+        // 통째로 버려졌다(dispatch 자체가 activeTabId 가드 안에 있었음). 화면 dispatch는 여전히
+        // 활성 탭 한정이지만, 캐시는 항상 갱신해 다음에 이 탭으로 돌아왔을 때 최신값이 보이게 한다.
+        for (const ev of engineEvents) {
+          if (ev.type === "STATUSLINE_UPDATE") cacheStatuslinePatch(repoId, ev.patch);
+        }
         if (repoId === tabsRef.current.activeTabId) {
-          for (const ev of mapEngineMessageToTuiEvents(msg)) dispatch(ev);
+          for (const ev of engineEvents) dispatch(ev);
         }
         for (const rec of mapSdkMessage(msg)) {
           if (!rec.text) continue;
@@ -594,7 +622,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           }
         }
       },
-    [pushLine, scheduleStreamDelta, commitStream],
+    [pushLine, scheduleStreamDelta, commitStream, cacheStatuslinePatch],
   );
 
   // ST1(0.9.4 T1)→ST11(0.10.0 A3b) — repoId별로 세션을 지연 생성·재사용한다(sessionsRef Map). Enter/
@@ -759,19 +787,20 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           // 필드(branch·dirty·lastTurnMs) 갱신은 그대로 진행하고, 토큰 필드만 패치에서 생략돼
           // 직전 표시값이 유지된다(mapContextUsageToStatuslinePatch 계약).
           const usage = sessionForUsage ? await sessionForUsage.getContextUsage() : null;
-          dispatch({
-            type: "STATUSLINE_UPDATE",
-            patch: {
-              branch: g.branch,
-              dirty: g.dirty,
-              lastTurnMs: Date.now() - turnStartedAt,
-              ...mapContextUsageToStatuslinePatch(usage),
-            },
-          });
+          const patch = {
+            branch: g.branch,
+            dirty: g.dirty,
+            lastTurnMs: Date.now() - turnStartedAt,
+            ...mapContextUsageToStatuslinePatch(usage),
+          };
+          dispatch({ type: "STATUSLINE_UPDATE", patch });
+          // 2026-07-27 — 이 repo(항상 활성 탭, 위 if 가드)의 최신 statusline을 캐시해 탭 전환 시
+          // dispatchTabSwitch가 복원할 수 있게 한다(사용자 실사용 지적: 탭 전환마다 0%로 리셋됨).
+          cacheStatuslinePatch(repoId, patch);
         }
       }
     },
-    [getOrCreateSession, pushLine, pushSegments, commitStream, slashSkills, drainApprovals],
+    [getOrCreateSession, pushLine, pushSegments, commitStream, slashSkills, drainApprovals, cacheStatuslinePatch],
   );
 
   // ST1-3(0.11.0) — submit() 종료 직후 그 repo의 대기열을 순차 drain한다. submit()이 이미 자신의
@@ -812,6 +841,10 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         // 이 탭 자체의 status는 방금 setTabs(setActiveTab/ensureTab)로도 바뀌지 않으므로(activeTabId만
         // 이동, 각 탭의 status는 그대로) tabsRef.current를 그대로 읽어도 정확하다.
         streaming: isRepoStreaming(tabsRef.current, repoId),
+        // 2026-07-27 — 이 repo에서 마지막으로 관측된 statusline(없으면 undefined → reducer가 기본값
+        // 0으로 재시드, 기존 계약과 동일). branch/dirty/model은 위에서 이미 fresh하게 넘겼으므로
+        // reducer가 이 seed보다 그 값들을 우선한다(model.ts TAB_SWITCHED 주석 참조).
+        statuslineSeed: statuslineCacheRef.current[repoId],
       });
       setScrollOffset(0); // SubTask3 — 탭 전환 시 대화창 최하단으로.
       reseedApprovalForTab(repoId); // D-3 — 배경에서 쌓인 이 repo의 대기 승인을 재현.
@@ -1026,6 +1059,17 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         // 아티팩트 a9ee1e59 — A안(full) 기본, B안(mini)은 이 단축키로만 진입.
         dispatch({ type: "TOGGLE_TITLE" });
         return;
+      case "toggle-focus":
+        // 0.11.1 — 포커스 모드(사이드바 강제 숨김, tmux prefix+z와 동일 원리). 시안 아티팩트
+        // 58ba5d18 — alt-screen 2컬럼 구조에서 여러 줄 드래그 선택이 사이드바까지 오염되는 문제의
+        // 해법. showSidebar 게이팅(위 렌더 계산)이 이 값을 읽는다.
+        // 지금 켜지는 참(state.focusMode가 아직 false)이면 사이드바 포커스도 함께 해제한다 —
+        // 아니면 Tab으로 미리 포커스해둔 상태가 화면에서 사라진 사이드바에 그대로 남아 12단
+        // 라우팅(sidebar-swallow)이 그 뒤 타이핑을 조용히 삼키는 미아 포커스가 된다(승인 프롬프트
+        // 뜰 때 자동 해제하는 기존 SubTask5 관례와 동일 취지).
+        if (!state.focusMode) setSidebarFocused(false);
+        dispatch({ type: "TOGGLE_FOCUS" });
+        return;
 
       case "panel-close":
         dispatch({ type: "CLOSE_PANEL" });
@@ -1065,8 +1109,12 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         return;
 
       // SubTask5(0.10.1) — 사이드바 repos 키보드 내비게이션(Tab 포커스 토글).
+      // 0.11.1(scope-critic 지적) — focusMode 활성 중(사이드바 자체가 안 보임)엔 Tab을 삼킨다.
+      // 가드 없으면 사이드바가 보이지 않는 채로 sidebarFocused만 true가 돼(classifyKey는 focusMode를
+      // 모르는 순수 함수라 11단에서 무조건 토글) 12단이 그 뒤 모든 타이핑을 조용히 삼키는 미아
+      // 포커스가 된다 — 화면에 아무 단서도 없어 사용자가 원인을 알 길이 없다.
       case "sidebar-focus-toggle":
-        setSidebarFocused((f) => !f);
+        if (!state.focusMode) setSidebarFocused((f) => !f);
         return;
       // ⌃1..9 직행 단축키(tab-switch-direct)와 달리 이 경로는 창이 스크롤돼 9번째 이후로 밀린 repo도
       // 커서로 닿을 수 있다 — Sidebar.tsx computeSidebarWindow가 같은 전역 인덱스를 쓴다.
@@ -1196,10 +1244,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   }, [approvalQueue, repos]);
   const chatHeaderRows = computeHeaderRows(frameLayout.innerColumns, responsiveLayout.effectiveTitleMode);
   const chatTotalRows = computeChatRegionRows(rows, frameLayout.bandRows, chatHeaderRows);
-  const sidebarColumns = responsiveLayout.showSidebar ? SIDEBAR_COLUMNS : 0;
+  // 0.11.1 — 포커스 모드(Alt+F). computeResponsiveLayout의 저폭 자동강등(showSidebar)과 사용자의
+  // 수동 강제숨김(state.focusMode)은 서로 다른 축이라 여기서 AND로 합류한다 — 강등 판정 자체(폭
+  // 계산)는 그대로 두고 "보일지"만 이 값 하나로 대신한다. tmux prefix+z와 동일하게 사용자가
+  // 명시적으로 켠 것은 화면이 넓어져도 자동으로 되돌지 않는다.
+  const showSidebar = responsiveLayout.showSidebar && !state.focusMode;
+  const sidebarColumns = showSidebar ? SIDEBAR_COLUMNS : 0;
   const chatOuterColumns = Math.max(
     0,
-    computeContentColumns(frameLayout.innerColumns, sidebarColumns) - (responsiveLayout.showSidebar ? CHAT_COLUMN_GAP : 0),
+    computeContentColumns(frameLayout.innerColumns, sidebarColumns) - (showSidebar ? CHAT_COLUMN_GAP : 0),
   );
   const chatInnerColumns = Math.max(1, chatOuterColumns - 4); // ChatBox 테두리2+paddingX(1×2)
   // 입력창(또는 승인박스)이 실제로 차지할 행수 — 프롬프트("❯ ")·커서(█)까지 포함해 에디터 텍스트를
@@ -1260,7 +1313,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // 있다"를 전제로 위로 이동량을 계산하는데, 우리 레이아웃은 출력이 터미널 행수를 정확히 채우는
     // 정적 설계라 커서가 최하단 행에서 클램프돼 전제가 1행 깨진다 — 실측 y=33 vs 실제 입력행 34.
     setCursorPosition({
-      x: frameLayout.gutterColumns + sidebarColumns + (responsiveLayout.showSidebar ? CHAT_COLUMN_GAP : 0) + 2 + 2 + inputLayout.caretCol,
+      x: frameLayout.gutterColumns + sidebarColumns + (showSidebar ? CHAT_COLUMN_GAP : 0) + 2 + 2 + inputLayout.caretCol,
       y: frameLayout.bandRows + chatHeaderRows + 2 + chatViewportRows + 1 + dropdownRows + inputLayout.caretRow + 1,
     });
   } else {
@@ -1323,7 +1376,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
             성격). ChatBox가 이미 쓰는 최종 방어선(콘텐츠 영역 고정+클리핑)을 여기도 적용해, 예산을
             살짝 벗어나도 사이드바 테두리가 프레임 밖으로 넘쳐 옆 대화 컬럼을 침범하는 대신 박스
             안에서 조용히 잘리게 한다. */}
-        {responsiveLayout.showSidebar && (
+        {showSidebar && (
           <Box flexDirection="column" flexShrink={0} height={chatTotalRows} overflow="hidden">
             <WelcomeCard specCount={state.specCount} deferCount={state.deferCount} skills={cardSkills} />
             <Sidebar cwd={cwd} tabs={tabs} repos={repos} focused={sidebarFocused} cursor={sidebarCursor} showMascot={responsiveLayout.showMascot} approvalCounts={approvalCounts} />
