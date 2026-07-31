@@ -52,23 +52,31 @@ export function SplashHeader({
   version,
   mode,
   leftMargin = 0,
+  plusFill = true,
 }: {
   columns: number;
   version: string;
   /** full=압축 워드마크(폭 부족 시 태그라인만)·mini=1행 텍스트 타이틀(⌃T 토글, 0.11.0). */
   mode: TitleMode;
   leftMargin?: number;
+  /** 0.11.2 포커스 모드 — 글리프 없는 칸의 '+' 채움을 끈다(시안 aef53edb B안). 포커스 모드는
+   *  외부 프레임·대화창 테두리를 전부 걷어내는데 타이틀 행에만 전체폭 '+'가 남으면 프레임 잔재로
+   *  보일 뿐 아니라, 사용자가 지목한 결함("바깥배경이 추출된다")이 그 행에 그대로 남는다. */
+  plusFill?: boolean;
 }) {
+  // count를 0으로 눌러 PlusFill의 기존 "count<=0이면 렌더 없음" 계약을 그대로 재사용한다 —
+  // 분기마다 조건부 JSX를 심는 것보다 누락 지점이 적다(채움 지점이 5곳).
+  const fill = (count: number) => (plusFill ? count : 0);
   const taglineText = taglineBadgeText(version);
   const taglineWidth = stringWidth(taglineText); // CJK 혼입이라 .length 대신 표시폭 기준 필수.
   const taglineTrailing = Math.max(0, columns - leftMargin - taglineWidth);
   const taglineRow = (
     <Text>
-      <PlusFill count={leftMargin} />
+      <PlusFill count={fill(leftMargin)} />
       <Text backgroundColor={TAGLINE_BADGE_BG} color={TAGLINE_BADGE_FG}>
         {taglineText}
       </Text>
-      <PlusFill count={taglineTrailing} />
+      <PlusFill count={fill(taglineTrailing)} />
     </Text>
   );
 
@@ -80,14 +88,14 @@ export function SplashHeader({
     const trailing = Math.max(0, columns - leftMargin - labelWidth - badgeWidth);
     return (
       <Text>
-        <PlusFill count={leftMargin} />
+        <PlusFill count={fill(leftMargin)} />
         <Text color="green" bold>
           {label}
         </Text>
         <Text backgroundColor={TAGLINE_BADGE_BG} color={TAGLINE_BADGE_FG}>
           {badgeText}
         </Text>
-        <PlusFill count={trailing} />
+        <PlusFill count={fill(trailing)} />
       </Text>
     );
   }
@@ -106,14 +114,14 @@ export function SplashHeader({
     <>
       {wordmarkLines.map((line, i) => (
         <Text key={i}>
-          <PlusFill count={leftMargin} />
+          <PlusFill count={fill(leftMargin)} />
           {line}
           {/* 2026-07-21(3차, 사용자 지시) — 워드마크-배지 사이는 '+' 채움에서 제외하고 원래
               공백으로 되돌린다. 둘을 한 로고 lockup으로 붙여 보이게 하려는 원래 여백 의도를
               보존(사용자 요청, 2026-07-14)하되, 그 외 모든 잔여 공간은 계속 '+'로 채운다. */}
           {" ".repeat(WORDMARK_BADGE_GAP)}
           {badgeLines[i]}
-          <PlusFill count={trailing} />
+          <PlusFill count={fill(trailing)} />
         </Text>
       ))}
       {taglineRow}

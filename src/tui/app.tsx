@@ -186,6 +186,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   const stateRef = useRef<TuiState>(state);
   stateRef.current = state;
 
+  // 0.11.2(ST3 scope-critic 지적 — 판정 이원화) — "사이드바가 지금 실제로 보이는가"를 키 핸들러가
+  // 읽을 수 있게 미러링한다. 0.11.1의 Tab 가드는 `!state.focusMode`만 봤는데, 사이드바는 포커스
+  // 모드 외에 **저폭 강등**(SIDEBAR_MIN_COLUMNS 미만)으로도 숨겨진다 — 그 경우 Tab이 보이지 않는
+  // 사이드바에 포커스를 걸어 12단 라우팅이 이후 타이핑을 조용히 삼키는 미아 포커스가 그대로
+  // 재현됐다(0.11.1이 닫은 것과 같은 결함의 미커버 갈래). 렌더 산술이 확정한 값 하나만 보게 해
+  // 두 판정이 갈라질 여지를 없앤다 — 기존 statuslineCacheRef·tabsRef와 동일한 "state+ref 미러"
+  // 관례이며, 핸들러는 렌더 완료 후에만 실행되므로 TDZ 우려가 없다.
+  const showSidebarRef = useRef(true);
+
   // ST3-1(0.11.0) — repoId별로 격리된 에디터 상태(대기중 텍스트+프롬프트 히스토리). tabsRef 등과
   // 동일한 "React state + ref 미러" 패턴 — editorState 자체는 파생값(아래)이라 별도 useEffect 없이
   // 매 렌더 tabs.activeTabId 기준으로 다시 구한다(TAB_SWITCHED가 별도로 신경쓸 필요 없음 — tabs가
@@ -1106,12 +1115,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         return;
 
       // SubTask5(0.10.1) — 사이드바 repos 키보드 내비게이션(Tab 포커스 토글).
-      // 0.11.1(scope-critic 지적) — focusMode 활성 중(사이드바 자체가 안 보임)엔 Tab을 삼킨다.
-      // 가드 없으면 사이드바가 보이지 않는 채로 sidebarFocused만 true가 돼(classifyKey는 focusMode를
-      // 모르는 순수 함수라 11단에서 무조건 토글) 12단이 그 뒤 모든 타이핑을 조용히 삼키는 미아
-      // 포커스가 된다 — 화면에 아무 단서도 없어 사용자가 원인을 알 길이 없다.
+      // 0.11.1(scope-critic 지적) — 사이드바가 화면에 없을 땐 Tab을 삼킨다. 가드 없으면 사이드바가
+      // 보이지 않는 채로 sidebarFocused만 true가 돼(classifyKey는 레이아웃을 모르는 순수 함수라
+      // 11단에서 무조건 토글) 12단이 그 뒤 모든 타이핑을 조용히 삼키는 미아 포커스가 된다 — 화면에
+      // 아무 단서도 없어 사용자가 원인을 알 길이 없다.
+      // 0.11.2 — 판정 근거를 `!state.focusMode`에서 실제 렌더 가시성으로 넓혔다. 사이드바를 숨기는
+      // 축은 포커스 모드 말고 저폭 강등도 있어서, 좁은 터미널에서 같은 미아 포커스가 그대로
+      // 재현됐다(위 showSidebarRef 주석 참조).
       case "sidebar-focus-toggle":
-        if (!state.focusMode) setSidebarFocused((f) => !f);
+        if (showSidebarRef.current) setSidebarFocused((f) => !f);
         return;
       // ⌃1..9 직행 단축키(tab-switch-direct)와 달리 이 경로는 창이 스크롤돼 9번째 이후로 밀린 repo도
       // 커서로 닿을 수 있다 — Sidebar.tsx computeSidebarWindow가 같은 전역 인덱스를 쓴다.
@@ -1235,6 +1247,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     cardRows,
     sidebarContentRows,
     state.titleMode,
+    state.focusMode,
   );
   // D-5 — repoId별 승인 대기 건수(0건인 repo는 아예 키를 안 실어 Sidebar가 "표시할 배지 없음"과
   // "0건"을 굳이 구분할 필요가 없게 한다, formatGateLine의 queueCount 생략 규약과 동일 정신).
@@ -1248,11 +1261,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   }, [approvalQueue, repos]);
   const chatHeaderRows = computeHeaderRows(frameLayout.innerColumns, responsiveLayout.effectiveTitleMode);
   const chatTotalRows = computeChatRegionRows(rows, frameLayout.bandRows, chatHeaderRows);
-  // 0.11.1 — 포커스 모드(Alt+F). computeResponsiveLayout의 저폭 자동강등(showSidebar)과 사용자의
-  // 수동 강제숨김(state.focusMode)은 서로 다른 축이라 여기서 AND로 합류한다 — 강등 판정 자체(폭
-  // 계산)는 그대로 두고 "보일지"만 이 값 하나로 대신한다. tmux prefix+z와 동일하게 사용자가
-  // 명시적으로 켠 것은 화면이 넓어져도 자동으로 되돌지 않는다.
-  const showSidebar = responsiveLayout.showSidebar && !state.focusMode;
+  // 0.11.1 — 포커스 모드(Alt+F)의 사이드바 숨김. 0.11.2에서 이 AND 합류를 computeResponsiveLayout
+  // 안으로 흡수했다 — 저폭 자동강등과 사용자의 수동 강제숨김이 서로 다른 축이긴 해도, 판정이 두
+  // 곳에 나뉘어 있으면 한쪽만 고쳤을 때 조용히 어긋난다(ST3 B안에서 타이틀 강등까지 같은 함수가
+  // 맡게 되며 더 분명해졌다). tmux prefix+z와 동일하게, 명시적으로 켠 것은 화면이 넓어져도
+  // 자동으로 되돌지 않는다.
+  const showSidebar = responsiveLayout.showSidebar;
+  showSidebarRef.current = showSidebar; // 키 핸들러(Tab 가드)가 읽는 미러 — 위 useRef 주석 참조.
   const sidebarColumns = showSidebar ? SIDEBAR_COLUMNS : 0;
   const chatOuterColumns = Math.max(
     0,
@@ -1360,7 +1375,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           렌더 강등값을 분리한다(0.10.6 A2, scope-critic 확인 계약). 2단 강등(저높이)일 때만
           effectiveTitleMode가 "mini"로 표시값을 오버라이드하고, model.ts의 실제 titleMode는
           그대로다 — 리사이즈로 복귀하면 사용자가 골랐던 모드가 그대로 되살아난다. */}
-      <SplashHeader columns={frameLayout.innerColumns} version={version} mode={responsiveLayout.effectiveTitleMode} leftMargin={HERO_LEFT_MARGIN} />
+      {/* plusFill={!state.focusMode}(0.11.2) — 포커스 모드에선 타이틀 행의 '+' 배경 채움까지
+          끈다. 프레임·대화창 테두리를 전부 걷어낸 화면에 타이틀 행만 전체폭 '+'가 남으면 프레임
+          잔재로 보이고, 무엇보다 사용자가 지목한 결함("바깥배경이 추출된다")이 그 행에 그대로
+          남는다 — 시안 aef53edb의 A·B 패널 모두 '+'가 한 글자도 없다. */}
+      <SplashHeader columns={frameLayout.innerColumns} version={version} mode={responsiveLayout.effectiveTitleMode} leftMargin={HERO_LEFT_MARGIN} plusFill={!state.focusMode} />
       {/* ST10(0.10.0 A3b) — 터틀 덱 2컬럼: 좌측 상시 스택(카드+사이드바, 고정폭)+우측 대화 컬럼
           (가변폭, flexGrow). 사이드바는 토글 패널 시스템(state.panel)과 별개 축이라 ⌃M/⌃R/⌃S
           기존 동작은 무변경. SubTask10 — 카드가 사이드바와 동일폭 34로 이 스택에 합류한다. */}

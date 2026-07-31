@@ -547,7 +547,18 @@ export function computeResponsiveLayout(
   cardRows: number,
   sidebarContentRows: number,
   userTitleMode: TitleMode,
+  focusMode = false,
 ): ResponsiveLayout {
+  // 0.11.2 — 포커스 모드(Alt+F)는 높이·폭 계산 이전에 최우선으로 갈린다: 사용자가 명시적으로
+  // "대화만 보겠다"고 고른 상태라 화면이 아무리 넓어도 강등 사다리를 탈 이유가 없다. 사이드바
+  // 숨김은 0.11.1에서 app.tsx가 responsiveLayout.showSidebar와 AND로 합류시키던 것을 여기로
+  // 흡수했다(판정 지점 이원화 방지). 타이틀 mini 강등은 시안 B안 — 포커스 모드의 목적이 "대화에
+  // 집중"인데 장식 워드마크가 7행을 점유하는 건 그 목적과 어긋난다(대화 6행 확보).
+  // 저높이 2단 강등과 동일하게 **표시값만** 바꾼다 — model.ts의 실제 titleMode는 불변이라 Alt+F를
+  // 다시 눌러 해제하면 사용자가 골랐던 full/mini가 그대로 되살아난다.
+  if (focusMode) {
+    return { effectiveTitleMode: "mini", showMascot: false, showSidebar: false };
+  }
   if (columns < SIDEBAR_MIN_COLUMNS) {
     return { effectiveTitleMode: userTitleMode, showMascot: false, showSidebar: false };
   }
