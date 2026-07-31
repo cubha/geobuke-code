@@ -19,7 +19,7 @@ import {
   wrapSegmentLine,
   computeChatViewport,
   decorateBubble,
-  BUBBLE_MIN_INNER_COLUMNS,
+  shouldAlignBubbles,
   WELCOME_LINE,
   isTurnSpacerBoundary,
   isAssistantRunLead,
@@ -50,6 +50,7 @@ export function ChatBox({
   panelNode,
   children,
   borderless = false,
+  focusMode = false,
 }: {
   /** 메시지 텍스트를 랩할 표시폭(문자 단위, string-width 기준) — 박스 테두리·패딩을 뺀 순수 콘텐츠 폭. */
   innerWidth: number;
@@ -73,6 +74,12 @@ export function ChatBox({
    *  보고였다(시안 aef53edb B안). 폭·행 예산은 호출부가 computeChatBoxChrome로 이미 반영하므로
    *  여기서는 그리기만 바꾼다 — 판정을 컴포넌트에 두면 예산과 렌더가 갈라진다. */
   borderless?: boolean;
+  /** 0.11.3 — 말풍선 우측정렬(decorateBubble) 강등 축. borderless와 동일하게 app.tsx가
+   *  state.focusMode 한 곳에서 파생하지만, 의미가 겹치지 않아 별도 prop으로 둔다(borderless=테두리
+   *  그리기, focusMode=정렬 게이팅). 포커스 모드는 "깨끗한 복사"가 목적인데 우측정렬의 선행
+   *  공백이 클립보드에 그대로 실려(크롬 글리프는 0이지만 byte-clean은 아님) 좁은 폭 강등 경로를
+   *  그대로 태운다(shouldAlignBubbles). */
+  focusMode?: boolean;
 }) {
   // ST4-3(0.11.0) — 말풍선 정렬(decorateBubble)은 반드시 wrapSegmentLine 직후에만 호출한다(ST4-2
   // 계약 — wrap 전 패딩은 폭 계산이 깨진다). innerWidth가 BUBBLE_MIN_INNER_COLUMNS 미만이면 정렬
@@ -86,7 +93,7 @@ export function ChatBox({
   const wrapped = useMemo(() => {
     const lines: TextSegment[][] = [];
     if (showWelcome) lines.push(...wrapSegmentLine([{ text: WELCOME_LINE, tone: "accent" }], innerWidth));
-    const bubbleEnabled = innerWidth >= BUBBLE_MIN_INNER_COLUMNS;
+    const bubbleEnabled = shouldAlignBubbles(innerWidth, focusMode);
     let prevRole: EntryRole | undefined;
     for (const e of entries) {
       if (isTurnSpacerBoundary(prevRole, e.role)) lines.push([]);
@@ -96,7 +103,7 @@ export function ChatBox({
       prevRole = e.role;
     }
     return lines;
-  }, [entries, showWelcome, innerWidth]);
+  }, [entries, showWelcome, innerWidth, focusMode]);
 
   // 스트리밍 프리뷰는 accent 승격 대상에서는 제외한다(scope-critic 검토로 확정) — 색은 wrap에
   // 영향 없어 리플로우가 아니지만, 생성 중인 텍스트의 색이 눈앞에서 바뀌는 건 별개로 산만하다.

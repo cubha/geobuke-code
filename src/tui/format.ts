@@ -293,6 +293,14 @@ export function tailLines(text: string, maxLines: number): string {
  * ST4-2에서 이미 확정된 무조건 정렬 계약을 이번 SubTask가 깨지 않기 위함(호출부 판단으로 분리). */
 export const BUBBLE_MIN_INNER_COLUMNS = 30;
 
+/** ST(0.11.3) — 좁은 폭 강등에 포커스 모드 강등을 합류. 포커스 모드는 "깨끗한 복사"가 목적인데
+ * decorateBubble의 우측정렬 선행 공백이 클립보드에 그대로 실린다(크롬 글리프는 0이지만
+ * byte-clean은 아니었다) — 좁은 폭에서 이미 쓰던 좌측정렬 강등 경로를 그대로 태운다(새 경로 0). */
+export function shouldAlignBubbles(innerWidth: number, focusMode: boolean): boolean {
+  if (focusMode) return false;
+  return innerWidth >= BUBBLE_MIN_INNER_COLUMNS;
+}
+
 export function decorateBubble(lines: TextSegment[][], role: EntryRole, innerWidth: number): TextSegment[][] {
   if (role !== "user") return lines;
   return lines.map((line) => {
@@ -672,6 +680,12 @@ export function formatTagline(version: string): string {
  * 태그라인 배지(formatTagline)는 SplashHeader가 이어붙인다(레이아웃 관심사 분리, 순수부는 문자열만). */
 export function formatMiniTitleLabel(version: string): string {
   return `🐢 GEOBUKE v${version}`;
+}
+
+/** mini 타이틀 우측 슬로건(0.11.3) — formatTagline과 달리 버전·제품명은 담지 않는다. mini 좌측
+ * 라벨(formatMiniTitleLabel)이 이미 둘 다 담고 있어, 그대로 이어붙이면 한 행에 버전이 2회 찍힌다. */
+export function formatMiniTagline(): string {
+  return "계획↔구현↔검증 게이트";
 }
 
 /** 스플래시 웰컴 라인 — 카드 아래, 입력창 위. "무엇을 입력하면 되는지"를 1줄로 안내(구현 갭 복원). */

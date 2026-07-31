@@ -20,6 +20,10 @@ import {
   formatWelcomeCard,
   renderWordmark,
   formatTagline,
+  formatMiniTitleLabel,
+  formatMiniTagline,
+  BUBBLE_MIN_INNER_COLUMNS,
+  shouldAlignBubbles,
   SPLASH_WORDMARK_MIN_COLUMNS,
   shouldShowWordmark,
   computeHeaderRows,
@@ -495,6 +499,46 @@ test("renderWordmark: 각 줄 내용은 WORDMARK_GEOBUKE 원문을 보존(색만
     const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
     assert.equal(stripped, WORDMARK_GEOBUKE[i]);
   });
+});
+
+// ── 0.11.3 — 0.11.2 시안(aef53edb) 대비 divergence 2건 해소 ──
+// 0.11.2 실검증에서 찾아놓고 "별도 판단"으로 미뤘던 것을 마저 닫는다. 시안이 수용 기준인
+// 작업이었으므로 미룰 게 아니었다.
+
+// ⓐ mini 타이틀 버전 이중 표기 — formatMiniTitleLabel("🐢 GEOBUKE vX")과
+// formatTagline("거북이코드 vX · …")이 각자 버전을 넣어 한 행에 두 번 찍혔다. 포커스 모드가
+// mini를 강제하면서 이게 기본 화면이 됐다. 시안 B는 "🐢 GEOBUKE vX · 계획⊕구현⊕검증 게이트".
+test("formatMiniTagline: 버전도 제품명도 없이 슬로건만 — mini 좌측 라벨이 이미 둘 다 담고 있다", () => {
+  const t = formatMiniTagline();
+  assert.equal(t, "계획↔구현↔검증 게이트");
+  assert.ok(!/v?\d+\.\d+\.\d+/.test(t), "버전이 들어가면 mini 타이틀 행에 두 번 찍힌다");
+  assert.ok(!t.includes("거북이코드"), "GEOBUKE 워드마크와 중복");
+});
+
+test("formatMiniTagline: mini 타이틀 한 행 전체에 버전이 정확히 1회만 등장한다(회귀락)", () => {
+  const row = formatMiniTitleLabel("1.2.3") + " " + formatMiniTagline();
+  assert.equal(row.match(/1\.2\.3/g).length, 1);
+});
+
+test("formatTagline(full)은 그대로 — 워드마크엔 버전이 없어 태그라인이 그걸 담아야 한다", () => {
+  assert.equal(formatTagline("1.2.3"), "거북이코드 v1.2.3 · 계획↔구현↔검증 게이트");
+});
+
+// ⓑ 말풍선 우측정렬의 선행 공백 — 포커스 모드는 "깨끗한 복사"가 목적인데, 사용자 메시지가
+// innerWidth(포커스 시 전체 폭) 기준 우측정렬이라 매 줄 앞에 공백 수십 칸이 붙어 클립보드에
+// 그대로 실렸다(크롬 글리프는 0이지만 byte-clean은 아니었다). 좁은 폭에서 이미 쓰던 좌측정렬
+// 강등 경로를 포커스 모드에도 태운다.
+test("shouldAlignBubbles: 포커스 모드면 폭이 충분해도 정렬하지 않는다(선행 공백 0)", () => {
+  assert.equal(shouldAlignBubbles(120, true), false);
+});
+
+test("shouldAlignBubbles: 일반 모드는 기존 폭 임계(BUBBLE_MIN_INNER_COLUMNS) 그대로", () => {
+  assert.equal(shouldAlignBubbles(BUBBLE_MIN_INNER_COLUMNS, false), true);
+  assert.equal(shouldAlignBubbles(BUBBLE_MIN_INNER_COLUMNS - 1, false), false);
+});
+
+test("shouldAlignBubbles: 포커스 + 저폭도 false(두 강등축이 충돌하지 않는다)", () => {
+  assert.equal(shouldAlignBubbles(BUBBLE_MIN_INNER_COLUMNS - 1, true), false);
 });
 
 test("formatTagline: 버전 문자열을 그대로 보간, 하드코딩 없음", () => {

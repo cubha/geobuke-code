@@ -1421,6 +1421,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
             대체하되 ChatBox 자체 테두리·행 예산은 그대로다(ⓓ, 상세는 ChatBox.tsx 주석). */}
         <ChatBox
           borderless={state.focusMode}
+          focusMode={state.focusMode}
           innerWidth={chatInnerColumns}
           viewportRows={chatViewportRows}
           totalRows={chatTotalRows}
