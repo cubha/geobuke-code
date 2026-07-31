@@ -167,11 +167,6 @@ export function applyEditorKey(input: string, key: Key, s: EditorState): EditorS
 
 export function App({ cwd, model, version }: { cwd: string; model?: string; version: string }) {
   const { columns, rows } = useWindowSize();
-  // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 활성이면 좌우 거터가 콘텐츠 가용폭을 잠식한다.
-  // 히어로/repos 패널의 columns 산정과 스트리밍 프리뷰 행 예산 모두 이 innerColumns/bandRows를
-  // 거쳐야 프레임 두께만큼 겹치거나 잘리지 않는다(computeFrameLayout은 순수 판정, 실제 렌더는
-  // <Frame>이 전담).
-  const frameLayout = computeFrameLayout(columns, rows);
   const [state, dispatch] = useReducer(reduce, undefined, () => {
     // detectGit은 execSync 2회(git rev-parse·git status)라 lazy initializer 안에서만 불러 마운트
     // 시점 1회로 제한한다 — 컴포넌트 본문 최상단에 두면 매 리렌더(=매 키입력)마다 재실행돼 타이핑이
@@ -1222,6 +1217,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // WelcomeCard.tsx와 동일 관례)로 실측한다. Sidebar 콘텐츠(repo 목록)는 상한(SIDEBAR_MAX_LIST_ROWS)
   // 근사만 쓴다 — Sidebar.tsx가 repos.json을 자체 폴링으로만 들고 있어(0.10.5 동기 I/O 재발 방지
   // 리팩토링) 여기서 실제 repos.length를 또 읽으면 그 버그가 되돌아온다(format.ts 주석 참조).
+  // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 활성이면 좌우 거터가 콘텐츠 가용폭을 잠식한다.
+  // 히어로/repos 패널의 columns 산정과 스트리밍 프리뷰 행 예산 모두 이 innerColumns/bandRows를
+  // 거쳐야 프레임 두께만큼 겹치거나 잘리지 않는다(computeFrameLayout은 순수 판정, 실제 렌더는
+  // <Frame>이 전담).
+  // 0.11.2 — state.focusMode를 읽어야 해서 선언 위치를 컴포넌트 최상단에서 여기(reduce 이후)로
+  // 내렸다. 소비처가 전부 이 아래 렌더 산술뿐이라(그 위엔 참조 없음) 이동만으로 완결된다.
+  const frameLayout = computeFrameLayout(columns, rows, state.focusMode);
   const cardRows = formatWelcomeCard(state.specCount, state.deferCount, cardSkills).length + 2;
   const sidebarContentRows = computeSidebarListRows(repos.length);
   const responsiveLayout = computeResponsiveLayout(
@@ -1338,7 +1340,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   return (
     // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 화면 전체를 감싼다. Frame은 동적 영역(헤더+
     // 좌측 스택+대화 컬럼) 바깥쪽 장식만 담당한다.
-    <Frame columns={columns} rows={rows}>
+    <Frame columns={columns} layout={frameLayout}>
       {/* SubTask10 — 워드마크는 사이드바까지 포함한 전체 화면 폭 기준으로 좌우 스택 위에 1회
           그린다(승인 시안). 0.11.0(사용자 확정) — 더 이상 첫 제출로 소멸하지 않고 항상 렌더된다.
           state.titleMode(full/mini)만 ⌃T로 바뀐다(useInput 배선 참조). */}

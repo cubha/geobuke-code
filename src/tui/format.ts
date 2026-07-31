@@ -816,9 +816,17 @@ export interface FrameLayout {
   gutterColumns: number;
 }
 
-/** 터미널 크기에 따라 외부 '+' 프레임 표시 여부·예산을 판정한다(순수). */
-export function computeFrameLayout(columns: number, rows: number): FrameLayout {
-  const enabled = columns >= FRAME_MIN_COLUMNS && rows >= FRAME_MIN_ROWS;
+/**
+ * 터미널 크기에 따라 외부 '+' 프레임 표시 여부·예산을 판정한다(순수).
+ *
+ * focusMode(0.11.2, 시안 aef53edb B안) — 크기와 무관하게 프레임을 통째로 끈다. 0.11.1의 포커스
+ * 모드는 사이드바만 숨겼는데, 실사용 보고에 따르면 그것만으로는 드래그 선택이 여전히 대화 행마다
+ * 좌우 거터('++')를 함께 물어와 "개선의 느낌이 없다"였다. 새 분기를 만들지 않고 이미 있는
+ * 저해상도 비활성 경로(거터·밴드 0 + 전체 폭 패스스루)를 그대로 태운다 — 그래야 이 함수의 반환을
+ * 소비하는 모든 산술(캐럿 좌표·헤더 폭·'+' 채움 블록 가드)이 자동으로 정합한다.
+ */
+export function computeFrameLayout(columns: number, rows: number, focusMode = false): FrameLayout {
+  const enabled = !focusMode && columns >= FRAME_MIN_COLUMNS && rows >= FRAME_MIN_ROWS;
   if (!enabled) {
     return { enabled: false, innerColumns: columns, innerRows: rows, bandRows: 0, gutterColumns: 0 };
   }

@@ -34,6 +34,7 @@ import {
   formatApprovalBadge,
   formatReposPanelPath,
   computeFrameLayout,
+  computeChatBoxChrome,
   decorateBubble,
   sanitizeControlChars,
   isTurnSpacerBoundary,
@@ -833,6 +834,38 @@ test("computeFrameLayout: focusMode면 innerColumns/innerRows가 전체 폭·행
 test("computeFrameLayout: focusMode 기본값 false — 기존 호출부(2인자)는 동작 무변경", () => {
   assert.deepEqual(computeFrameLayout(140, 44), computeFrameLayout(140, 44, false));
   assert.equal(computeFrameLayout(140, 44).enabled, true);
+});
+
+// ── computeChatBoxChrome (0.11.2 ST2) ──
+// ChatBox 테두리·패딩이 폭·행·캐럿 좌표 4곳에 각각 하드코딩(4 / 3 / 2 / 2)돼 있던 것을 단일
+// 소스로 모은다. 포커스 모드에서 borderless로 갈 때 이 넷이 따로 놀면 캐럿이 입력 텍스트에서
+// 어긋나거나(x) 하단이 밴드에서 밀린다(y) — 이 repo가 반복해서 겪은 drift 결함 클래스다.
+
+test("computeChatBoxChrome: 일반 모드 = 테두리2+paddingX2=4열 / 상하테두리2+인디케이터1=3행", () => {
+  assert.deepEqual(computeChatBoxChrome(false), { columns: 4, leftColumns: 2, rows: 3, topRows: 2 });
+});
+
+test("computeChatBoxChrome: 포커스 모드 = 좌우 크롬 0열 / 인디케이터 1행만", () => {
+  assert.deepEqual(computeChatBoxChrome(true), { columns: 0, leftColumns: 0, rows: 1, topRows: 1 });
+});
+
+test("computeChatBoxChrome: leftColumns는 항상 columns의 절반(좌우 대칭 — 캐럿 x 산정 근거)", () => {
+  for (const focus of [false, true]) {
+    const c = computeChatBoxChrome(focus);
+    assert.equal(c.leftColumns * 2, c.columns);
+  }
+});
+
+test("computeChatBoxChrome: topRows는 rows보다 정확히 하단 테두리(일반1/포커스0)만큼 작다", () => {
+  assert.equal(computeChatBoxChrome(false).rows - computeChatBoxChrome(false).topRows, 1);
+  assert.equal(computeChatBoxChrome(true).rows - computeChatBoxChrome(true).topRows, 0);
+});
+
+test("computeChatBoxChrome: 포커스 모드가 일반보다 좌우 4열·상하 2행을 대화에 되돌려준다", () => {
+  const normal = computeChatBoxChrome(false);
+  const focus = computeChatBoxChrome(true);
+  assert.equal(normal.columns - focus.columns, 4);
+  assert.equal(normal.rows - focus.rows, 2);
 });
 
 // ── computeHeaderRows (0.11.0 고정 레이아웃 — 타이틀 상시+⌃T 토글) ──
