@@ -26,6 +26,7 @@ import {
   renderShellBadge,
   formatTagline,
   formatMiniTitleLabel,
+  formatMiniTagline,
   WORDMARK_GEOBUKE,
   SHELL_BADGE_GLYPH,
   type TitleMode,
@@ -45,6 +46,12 @@ function PlusFill({ count }: { count: number }) {
 
 function taglineBadgeText(version: string): string {
   return ` ${formatTagline(version)} `; // 좌우 1칸 여백 포함(배지 형태).
+}
+
+/** mini 타이틀 슬로건(0.11.3) — 시안(aef53edb B안) 원문 대조 결과 full 태그라인과 달리 노란 배경
+ * 배지가 아니라 dim 텍스트다("🐢 GEOBUKE vX" 라벨 뒤에 " · 슬로건"만 이어붙임, 배경 없음). */
+function miniSloganText(): string {
+  return `· ${formatMiniTagline()}`;
 }
 
 export function SplashHeader({
@@ -81,20 +88,18 @@ export function SplashHeader({
   );
 
   if (mode === "mini") {
-    const label = formatMiniTitleLabel(version) + "  ";
+    const label = formatMiniTitleLabel(version) + " "; // 시안: 라벨-구분자 사이 1칸(기존 2칸 아님).
     const labelWidth = stringWidth(label);
-    const badgeText = taglineBadgeText(version);
-    const badgeWidth = stringWidth(badgeText);
-    const trailing = Math.max(0, columns - leftMargin - labelWidth - badgeWidth);
+    const sloganText = miniSloganText();
+    const sloganWidth = stringWidth(sloganText);
+    const trailing = Math.max(0, columns - leftMargin - labelWidth - sloganWidth);
     return (
       <Text>
         <PlusFill count={fill(leftMargin)} />
         <Text color="green" bold>
           {label}
         </Text>
-        <Text backgroundColor={TAGLINE_BADGE_BG} color={TAGLINE_BADGE_FG}>
-          {badgeText}
-        </Text>
+        <Text color="gray">{sloganText}</Text>
         <PlusFill count={fill(trailing)} />
       </Text>
     );
