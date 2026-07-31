@@ -311,7 +311,14 @@ export interface TextSegment {
   tone: Tone;
 }
 
-export function joinTextSegments(segments: TextSegment[], sep = " · "): string {
+/** 세그먼트 사이 구분자 단일 소스 — 렌더(Segments.tsx), 문자열 결합(joinTextSegments), 폭 계산
+ *  (computeSegmentsPad) 셋이 같은 값을 봐야 한다. 0.11.2 이전엔 앞의 둘이 각자 " · "를
+ *  하드코딩했고, 포커스 모드 statusline 패딩이 이 폭까지 정확히 빼야 하면서 드러났다 — 어긋나면
+ *  패딩이 과·부족해져 잔상이 남거나 줄바꿈이 생긴다. Ink-free 순수층에 두어 ui/가 이걸 가져간다
+ *  (반대 방향 import는 format.ts의 Ink-free 원칙을 깬다). */
+export const SEGMENT_SEP = " · ";
+
+export function joinTextSegments(segments: TextSegment[], sep = SEGMENT_SEP): string {
   return segments.map((s) => s.text).join(sep);
 }
 
@@ -547,7 +554,18 @@ export function computeResponsiveLayout(
   cardRows: number,
   sidebarContentRows: number,
   userTitleMode: TitleMode,
+  focusMode = false,
 ): ResponsiveLayout {
+  // 0.11.2 — 포커스 모드(Alt+F)는 높이·폭 계산 이전에 최우선으로 갈린다: 사용자가 명시적으로
+  // "대화만 보겠다"고 고른 상태라 화면이 아무리 넓어도 강등 사다리를 탈 이유가 없다. 사이드바
+  // 숨김은 0.11.1에서 app.tsx가 responsiveLayout.showSidebar와 AND로 합류시키던 것을 여기로
+  // 흡수했다(판정 지점 이원화 방지). 타이틀 mini 강등은 시안 B안 — 포커스 모드의 목적이 "대화에
+  // 집중"인데 장식 워드마크가 7행을 점유하는 건 그 목적과 어긋난다(대화 6행 확보).
+  // 저높이 2단 강등과 동일하게 **표시값만** 바꾼다 — model.ts의 실제 titleMode는 불변이라 Alt+F를
+  // 다시 눌러 해제하면 사용자가 골랐던 full/mini가 그대로 되살아난다.
+  if (focusMode) {
+    return { effectiveTitleMode: "mini", showMascot: false, showSidebar: false };
+  }
   if (columns < SIDEBAR_MIN_COLUMNS) {
     return { effectiveTitleMode: userTitleMode, showMascot: false, showSidebar: false };
   }
@@ -705,7 +723,18 @@ export function formatWelcomeCard(specCount: number, deferCount: number, skills:
       { text: "shift+↵ 개행", tone: "dim" },
       { text: "⌃C 종료(2회)", tone: "dim" },
     ],
-    [{ text: "Alt+T 타이틀 전환", tone: "dim" }], // 0.11.0 — full/mini 타이틀 토글(사용자 확정 2026-07-22).
+    // 0.11.0 — full/mini 타이틀 토글(사용자 확정 2026-07-22).
+    // 2026-07-30(사용자 실사용 지적) — Alt+F(포커스 모드) 병기. 0.11.1이 이 키를 도입하며
+    // HelpPanel에만 넣고 첫 진입 화면인 이 카드에는 빠뜨렸는데, '?' 도움말은 그걸 눌러본 사람만
+    // 보는 순환이라(바로 아래 주석이 지적한 그 문제) 신규 키가 사실상 미노출이었다. 새 줄이 아니라
+    // Alt+T와 같은 줄에 병기하는 이유: cardRows가 computeResponsiveLayout 강등 사다리의 입력이라
+    // 카드가 1행 자라면 저높이 터미널의 마스코트·타이틀 강등 임계가 함께 밀린다.
+    // 문구는 "Alt+M 메트릭 · Alt+R repos" 등 위 두 줄과 같은 간결체 — 병기하면서 구 "Alt+T 타이틀
+    // 전환"을 그대로 두면 표시폭 32로 카드 내부폭 30을 넘어 테두리를 뚫는다(폭 테스트가 포착).
+    [
+      { text: "Alt+T 타이틀", tone: "dim" },
+      { text: "Alt+F 포커스", tone: "dim" },
+    ],
     // 2026-07-27(사용자 실사용 지적) — 이 카드가 키맵을 상세히 안내하면서도 정작 "더 많은 키맵을
     // 보는 방법"(? 도움말)과 대화창 스크롤 방법이 빠져있었다. HelpPanel.tsx 자신도 "?"를
     // 목록에 넣지만 그건 이미 ?를 눌러 도움말을 연 사람만 보는 순환 문제라 여기(첫 진입 화면)에도
@@ -816,9 +845,17 @@ export interface FrameLayout {
   gutterColumns: number;
 }
 
-/** 터미널 크기에 따라 외부 '+' 프레임 표시 여부·예산을 판정한다(순수). */
-export function computeFrameLayout(columns: number, rows: number): FrameLayout {
-  const enabled = columns >= FRAME_MIN_COLUMNS && rows >= FRAME_MIN_ROWS;
+/**
+ * 터미널 크기에 따라 외부 '+' 프레임 표시 여부·예산을 판정한다(순수).
+ *
+ * focusMode(0.11.2, 시안 aef53edb B안) — 크기와 무관하게 프레임을 통째로 끈다. 0.11.1의 포커스
+ * 모드는 사이드바만 숨겼는데, 실사용 보고에 따르면 그것만으로는 드래그 선택이 여전히 대화 행마다
+ * 좌우 거터('++')를 함께 물어와 "개선의 느낌이 없다"였다. 새 분기를 만들지 않고 이미 있는
+ * 저해상도 비활성 경로(거터·밴드 0 + 전체 폭 패스스루)를 그대로 태운다 — 그래야 이 함수의 반환을
+ * 소비하는 모든 산술(캐럿 좌표·헤더 폭·'+' 채움 블록 가드)이 자동으로 정합한다.
+ */
+export function computeFrameLayout(columns: number, rows: number, focusMode = false): FrameLayout {
+  const enabled = !focusMode && columns >= FRAME_MIN_COLUMNS && rows >= FRAME_MIN_ROWS;
   if (!enabled) {
     return { enabled: false, innerColumns: columns, innerRows: rows, bandRows: 0, gutterColumns: 0 };
   }
@@ -829,6 +866,66 @@ export function computeFrameLayout(columns: number, rows: number): FrameLayout {
     bandRows: FRAME_BAND_ROWS,
     gutterColumns: FRAME_GUTTER_COLUMNS,
   };
+}
+
+/**
+ * 세그먼트 줄을 목표 표시폭까지 채우는 데 필요한 공백 문자열(순수). 이미 채웠거나 넘치면 "".
+ *
+ * 0.11.2 ST5 — tmux 실기 캡처로 발견한 잔상 결함의 근본수정. 포커스 모드로 전환하면 최하단
+ * statusline 뒤에 직전(일반 모드) 프레임의 '+' 밴드 꼬리가 남고, 이후 재렌더에도 지워지지 않았다.
+ * 같은 프레임의 게이트줄(끝에서 두 번째 행)엔 잔상이 없는 것으로 보아, ink가 **마지막 렌더 행에만**
+ * erase-to-EOL을 emit하지 않는 것이 원인이다 — 일반 모드에선 마지막 행이 늘 전체폭 '+' 밴드라 이
+ * 갈래가 드러난 적이 없었다. 마지막 행 스스로 전체폭을 덮게 해 원천 차단한다.
+ *
+ * sep — 호출부(Segments 컴포넌트)가 세그먼트 사이에 실제로 그리는 구분자. 이 폭을 빼먹으면 패딩이
+ * 그만큼 과도해져 잔상 대신 줄바꿈이 생긴다(같은 결함의 반대 방향).
+ *
+ * 패딩 톤이 "plain"이 아닌 이유(1차 수정 실패로 실측 확인) — ink는 렌더 직전 각 줄의 **끝 공백을
+ * 잘라낸다**. tone:"plain"은 toneColor가 undefined라 ANSI 코드 없이 순수 공백만 나가고, 그대로
+ * 잘려 잔상이 그대로 남았다(tmux 캡처: "…$0.00 ·" 뒤에 '+' 잔존 — 구분자만 남고 공백은 소멸).
+ * 색 토큰이 붙으면 줄의 마지막 문자가 SGR 리셋 시퀀스라 trim 대상이 아니게 되고, 공백이 살아
+ * 이전 프레임의 '+'를 실제로 덮는다. gray는 어차피 공백이라 눈에 보이지 않는다(실제 색 부여는
+ * 호출부인 Segments의 pad 렌더가 담당 — 이 함수는 순수하게 폭만 계산한다).
+ *
+ * 반환은 세그먼트 배열이 아니라 **덧그릴 공백 문자열**이다(빈 문자열이면 패딩 불필요). 배열에 한
+ * 세그먼트로 끼워 넣으면 Segments가 그 앞에 구분자를 그려 " ·"가 허공에 매달린 것처럼 보였다
+ * (1차 구현 실측). 호출부가 구분자 없이 줄 끝에 덧붙인다.
+ */
+export function computeSegmentsPad(segments: TextSegment[], width: number, sep: string): string {
+  const sepWidth = stringWidth(sep) * Math.max(0, segments.length - 1);
+  const current = segments.reduce((sum, s) => sum + stringWidth(s.text), sepWidth);
+  if (current >= width) return "";
+  return " ".repeat(width - current);
+}
+
+// ── ChatBox 크롬 예산 (0.11.2 ST2 — 포커스 모드 borderless) ──
+// 대화창 박스의 테두리·패딩이 먹는 열/행은 app.tsx 네 곳(내부폭·뷰포트 행수·캐럿 x·캐럿 y)에서
+// 각각 상수 4/3/2/2로 하드코딩돼 있었다. 포커스 모드가 테두리를 걷어내는 순간 이 넷이 동시에
+// 바뀌어야 하는데, 하나라도 놓치면 캐럿이 입력 글자에서 어긋나거나(x·y) 박스 하단이 밴드 위로
+// 밀린다(rows) — 이 repo가 measureElement·REPOS_PANEL_ROW_OVERHEAD 등에서 반복해 겪은 drift
+// 결함 클래스다. 단일 순수 함수로 모아 네 값이 구조적으로 함께 움직이게 한다.
+
+export interface ChatBoxChrome {
+  /** 좌우 합산 열(내부 콘텐츠 폭 산정용) — 테두리 2 + paddingX(1×2) 2. */
+  columns: number;
+  /** 좌측만(캐럿 x 좌표용) — 테두리 1 + padding 1. */
+  leftColumns: number;
+  /** 박스가 세로로 점유하는 행 — 상하 테두리 2 + 인디케이터 예약 1. */
+  rows: number;
+  /** 박스 상단에서 콘텐츠 첫 행까지의 오프셋(캐럿 y용) — 테두리 1 + 인디케이터 1. */
+  topRows: number;
+}
+
+/**
+ * 포커스 모드 여부에 따른 ChatBox 크롬 예산(순수).
+ *
+ * 인디케이터 행(▲위 N줄 / 스피너)은 포커스 모드에서도 남긴다 — 테두리와 달리 매 행에 붙는
+ * 장식이 아니라 대화 위 1행짜리 상태 표시라 선택 오염과 무관하고, 없애면 스크롤 위치·스피너를
+ * 알 길이 사라진다.
+ */
+export function computeChatBoxChrome(focusMode: boolean): ChatBoxChrome {
+  if (focusMode) return { columns: 0, leftColumns: 0, rows: 1, topRows: 1 };
+  return { columns: 4, leftColumns: 2, rows: 3, topRows: 2 };
 }
 
 export function formatUsageBar(pct: number, width = 10): string {

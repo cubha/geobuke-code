@@ -10,22 +10,25 @@
 // 잔존). Frame은 전체화면 전용이라 내부 높이가 정적으로 확정 가능 — 측정 자체를 제거해 이
 // 결함 클래스(팬텀 행·특정 폭 무한 리렌더)를 원천 차단한다. 콘텐츠가 innerRows보다 짧으면
 // 남는 공간은 app.tsx의 flexGrow '+' 채움 Box가 흡수한다.
+//
+// 0.11.2 — layout을 자체 계산에서 prop 수령으로 바꿨다. 포커스 모드가 computeFrameLayout에 세
+// 번째 인자(focusMode)를 더하면서, app.tsx와 이 컴포넌트가 같은 인자를 각자 넘겨야 하는 구조가
+// 됐는데 그건 이 repo가 이미 여러 번 겪은 drift 결함 클래스다(SplashHeader FRAME_COLOR 하드코딩
+// 지적과 동일 성격). 판정은 app.tsx 한 곳에서만 하고 여기는 결과만 그린다.
 import React from "react";
 import { Box, Text } from "ink";
-import { computeFrameLayout } from "../format.js";
+import type { FrameLayout } from "../format.js";
 import { FRAME_COLOR } from "./theme.js";
 
 export function Frame({
   columns,
-  rows,
+  layout,
   children,
 }: {
   columns: number;
-  rows: number;
+  layout: FrameLayout;
   children: React.ReactNode;
 }) {
-  const layout = computeFrameLayout(columns, rows);
-
   if (!layout.enabled) return <>{children}</>;
 
   const band = "+".repeat(columns);

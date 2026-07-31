@@ -34,6 +34,8 @@ import {
   formatApprovalBadge,
   formatReposPanelPath,
   computeFrameLayout,
+  computeChatBoxChrome,
+  computeSegmentsPad,
   decorateBubble,
   sanitizeControlChars,
   isTurnSpacerBoundary,
@@ -397,9 +399,29 @@ test("formatWelcomeCard: 게이트 요약 2줄 + spec/defer 1줄 + 기본 스킬
   assert.match(keymap3, /⌃C 종료\(2회\)/);
   const keymap4 = joinTextSegments(rows[10]);
   assert.match(keymap4, /Alt\+T 타이틀/);
+  // 0.11.2 — Alt+F(포커스 모드)를 Alt+T와 같은 줄에 병기한다. 새 줄을 만들지 않는 이유는
+  // cardRows가 computeResponsiveLayout의 강등 사다리 입력이라, 카드가 1행 자라면 저높이 터미널의
+  // 마스코트/타이틀 강등 임계가 함께 움직이기 때문이다(같은 성격의 키 2종이라 병기가 자연스럽다).
+  assert.match(keymap4, /Alt\+F 포커스/);
   const keymap5 = joinTextSegments(rows[11]);
   assert.match(keymap5, /\? 도움말/);
   assert.match(keymap5, /PgUp\/PgDn 스크롤/);
+});
+
+// 2026-07-30(사용자 실사용 지적) — 0.11.1이 포커스 모드(Alt+F)를 도입하면서 HelpPanel에는
+// 넣었지만 정작 첫 진입 화면인 이 카드에는 빠뜨렸다. '?' 도움말은 그것을 눌러본 사람만 보는
+// 순환이라, 신규 키는 항상 카드에도 함께 실려야 한다는 0.11.1의 교훈이 바로 다음 릴리스에서
+// 재발한 셈이다. 키맵 전량 커버를 테스트로 고정해 세 번째 재발을 막는다.
+test("formatWelcomeCard: 앱이 안내하는 키맵에 Alt+F(포커스 모드)가 빠지지 않는다", () => {
+  const all = formatWelcomeCard(0, 0, SKILLS).map(joinTextSegments).join("\n");
+  assert.match(all, /Alt\+F/);
+});
+
+test("formatWelcomeCard: HelpPanel이 안내하는 주요 토글 키(Alt+M/R/S/T/F)가 카드에도 전부 실린다", () => {
+  const all = formatWelcomeCard(0, 0, SKILLS).map(joinTextSegments).join("\n");
+  for (const key of ["Alt+M", "Alt+R", "Alt+S", "Alt+T", "Alt+F"]) {
+    assert.ok(all.includes(key), `${key} 안내 누락`);
+  }
 });
 
 test("formatWelcomeCard: 스킬 이름 세그먼트는 accent 톤(패널 강조와 일관)", () => {
@@ -805,6 +827,100 @@ test("computeFrameLayout: 비활성이면 innerRows는 입력 rows 그대로(패
 
 test("computeFrameLayout: 경계(80×30)에서 innerRows = 28", () => {
   assert.equal(computeFrameLayout(80, 30).innerRows, 28);
+});
+
+// ── 0.11.2 포커스 모드 크롬 제거(B안, 시안 aef53edb) ──
+// 드래그 선택이 대화 행마다 '++'(거터)를 물어오던 것이 사용자 실사용 결함 보고의 핵심이었다.
+// 새 레이아웃 계산 없이 기존 저해상도 비활성 경로를 그대로 태운다.
+
+test("computeFrameLayout: focusMode면 크기가 충분해도 비활성(외부 '+' 프레임 전체 생략)", () => {
+  const layout = computeFrameLayout(140, 44, true);
+  assert.equal(layout.enabled, false);
+  assert.equal(layout.bandRows, 0);
+  assert.equal(layout.gutterColumns, 0);
+});
+
+test("computeFrameLayout: focusMode 비활성 반환은 저해상도 비활성과 같은 형태(경로 재사용 — 새 분기 없음)", () => {
+  // 같은 (columns, rows)에 대해 "저해상도라 비활성"과 "포커스라 비활성"의 결과가 완전히 같아야
+  // 한다 — 다르면 두 비활성 경로가 갈라진 것이고, 그 순간 프레임 관련 산술이 이원화된다.
+  assert.deepEqual(computeFrameLayout(70, 20, true), computeFrameLayout(70, 20, false));
+});
+
+test("computeFrameLayout: focusMode면 innerColumns/innerRows가 전체 폭·행 그대로(대화 컬럼이 거터 몫까지 회수)", () => {
+  const layout = computeFrameLayout(140, 44, true);
+  assert.equal(layout.innerColumns, 140);
+  assert.equal(layout.innerRows, 44);
+});
+
+test("computeFrameLayout: focusMode 기본값 false — 기존 호출부(2인자)는 동작 무변경", () => {
+  assert.deepEqual(computeFrameLayout(140, 44), computeFrameLayout(140, 44, false));
+  assert.equal(computeFrameLayout(140, 44).enabled, true);
+});
+
+// ── computeSegmentsPad (0.11.2 ST5 — 최하단 행 '+' 잔상 근본수정) ──
+// tmux 실기 캡처로 발견: 포커스 모드로 전환하면 최하단 statusline 뒤에 직전(일반 모드) 프레임의
+// '+' 밴드 꼬리가 그대로 남고, 이후 재렌더에도 사라지지 않는다. 행 39(게이트줄)엔 남지 않는 것으로
+// 보아 ink가 **마지막 렌더 행에만** erase-to-EOL을 emit하지 않는 것이 원인 — 일반 모드에선 마지막
+// 행이 항상 전체폭 '+' 밴드라 드러나지 않던 갈래다. 마지막 행을 전체폭까지 공백으로 밀어 덮는다.
+//
+// 반환이 세그먼트 배열이 아니라 공백 문자열인 이유(1차 구현 실측) — 배열에 한 세그먼트로 끼워
+// 넣으면 Segments가 그 앞에 구분자를 그려 "$0.00 ·"처럼 구분자가 허공에 매달렸다. 색 부여는
+// 호출부(Segments pad 렌더) 몫이다 — 순수 공백은 ink가 줄 끝에서 잘라내 패딩이 통째로 소멸한다.
+
+test("computeSegmentsPad: 폭이 남으면 정확히 그만큼의 공백을 돌려준다", () => {
+  assert.equal(computeSegmentsPad([{ text: "abc", tone: "plain" }], 10, ""), " ".repeat(7));
+});
+
+test("computeSegmentsPad: 구분자(sep) 폭까지 계산에 넣는다(Segments가 실제로 그걸 그린다)", () => {
+  // Segments는 세그먼트 사이에 sep(" · ")를 넣어 그린다 — 이걸 빼먹으면 패딩이 sep 폭만큼
+  // 과도해져 오히려 줄이 넘치고, 잔상 대신 줄바꿈이 생긴다.
+  const pad = computeSegmentsPad([{ text: "ab", tone: "plain" }, { text: "cd", tone: "plain" }], 10, " · ");
+  assert.equal(stringWidth("ab" + " · " + "cd" + pad), 10);
+});
+
+test("computeSegmentsPad: CJK는 표시폭 2칸으로 계산한다(.length가 아님)", () => {
+  assert.equal(computeSegmentsPad([{ text: "한글", tone: "plain" }], 10, ""), " ".repeat(6)); // 4 + 6 = 10
+});
+
+test("computeSegmentsPad: 이미 폭을 채웠거나 넘치면 빈 문자열(패딩 없음)", () => {
+  assert.equal(computeSegmentsPad([{ text: "0123456789ab", tone: "plain" }], 10, ""), "");
+  assert.equal(computeSegmentsPad([{ text: "0123456789", tone: "plain" }], 10, ""), "");
+});
+
+test("computeSegmentsPad: 빈 세그먼트도 목표폭만큼 공백으로 채운다(내용 없는 statusline 방어)", () => {
+  assert.equal(computeSegmentsPad([], 5, " · "), "     ");
+});
+
+// ── computeChatBoxChrome (0.11.2 ST2) ──
+// ChatBox 테두리·패딩이 폭·행·캐럿 좌표 4곳에 각각 하드코딩(4 / 3 / 2 / 2)돼 있던 것을 단일
+// 소스로 모은다. 포커스 모드에서 borderless로 갈 때 이 넷이 따로 놀면 캐럿이 입력 텍스트에서
+// 어긋나거나(x) 하단이 밴드에서 밀린다(y) — 이 repo가 반복해서 겪은 drift 결함 클래스다.
+
+test("computeChatBoxChrome: 일반 모드 = 테두리2+paddingX2=4열 / 상하테두리2+인디케이터1=3행", () => {
+  assert.deepEqual(computeChatBoxChrome(false), { columns: 4, leftColumns: 2, rows: 3, topRows: 2 });
+});
+
+test("computeChatBoxChrome: 포커스 모드 = 좌우 크롬 0열 / 인디케이터 1행만", () => {
+  assert.deepEqual(computeChatBoxChrome(true), { columns: 0, leftColumns: 0, rows: 1, topRows: 1 });
+});
+
+test("computeChatBoxChrome: leftColumns는 항상 columns의 절반(좌우 대칭 — 캐럿 x 산정 근거)", () => {
+  for (const focus of [false, true]) {
+    const c = computeChatBoxChrome(focus);
+    assert.equal(c.leftColumns * 2, c.columns);
+  }
+});
+
+test("computeChatBoxChrome: topRows는 rows보다 정확히 하단 테두리(일반1/포커스0)만큼 작다", () => {
+  assert.equal(computeChatBoxChrome(false).rows - computeChatBoxChrome(false).topRows, 1);
+  assert.equal(computeChatBoxChrome(true).rows - computeChatBoxChrome(true).topRows, 0);
+});
+
+test("computeChatBoxChrome: 포커스 모드가 일반보다 좌우 4열·상하 2행을 대화에 되돌려준다", () => {
+  const normal = computeChatBoxChrome(false);
+  const focus = computeChatBoxChrome(true);
+  assert.equal(normal.columns - focus.columns, 4);
+  assert.equal(normal.rows - focus.rows, 2);
 });
 
 // ── computeHeaderRows (0.11.0 고정 레이아웃 — 타이틀 상시+⌃T 토글) ──

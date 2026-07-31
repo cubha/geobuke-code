@@ -21,6 +21,9 @@ import {
   computeContentColumns,
   computePreviewRowBudget,
   computeFrameLayout,
+  computeChatBoxChrome,
+  computeSegmentsPad,
+  SEGMENT_SEP,
   computeChatRegionRows,
   computeHeaderRows,
   computeResponsiveLayout,
@@ -92,8 +95,9 @@ const HERO_LEFT_MARGIN = 3;
 // ⓐ 헤더 행수 — 0.11.0부터 computeHeaderRows(format.ts)가 단일 소스(타이틀이 상시 렌더되며
 // full/mini 두 모드를 가지므로 상수가 아니라 함수). 구 CHAT_HEADER_ROWS_WIDE/NARROW(스플래시
 // 소멸 전제·측정 상수)는 폐기.
-// ⓑ ChatBox 자체 테두리(상하 각 1) + 스크롤 인디케이터(항상 1행 예약).
-const CHAT_BOX_CHROME_ROWS = 3;
+// ⓑ ChatBox 자체 테두리(상하 각 1) + 스크롤 인디케이터(항상 1행 예약) — 0.11.2부터 format.ts
+// computeChatBoxChrome이 단일 소스다(포커스 모드에서 테두리가 사라지면 이 행수와 캐럿 좌표·내부
+// 폭이 함께 움직여야 하므로 상수 4곳 하드코딩을 한 함수로 모았다). 여기 상수는 폐기.
 // ⓒ 하단 고정 UI 중 입력창을 뺀 고정분 — 입력창 테두리(상하 2) + 게이트줄(1) + statusline(1).
 // 입력창 내용 행수는 0.10.3부터 에디터 실제 텍스트를 랩해 동적으로 계산한다(멀티라인/랩 성장분을
 // 뷰포트 예산에서 차감하지 않으면 박스가 예산을 초과해 프레임 전체가 밀린다 — 2026-07-22 현장
@@ -167,11 +171,6 @@ export function applyEditorKey(input: string, key: Key, s: EditorState): EditorS
 
 export function App({ cwd, model, version }: { cwd: string; model?: string; version: string }) {
   const { columns, rows } = useWindowSize();
-  // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 활성이면 좌우 거터가 콘텐츠 가용폭을 잠식한다.
-  // 히어로/repos 패널의 columns 산정과 스트리밍 프리뷰 행 예산 모두 이 innerColumns/bandRows를
-  // 거쳐야 프레임 두께만큼 겹치거나 잘리지 않는다(computeFrameLayout은 순수 판정, 실제 렌더는
-  // <Frame>이 전담).
-  const frameLayout = computeFrameLayout(columns, rows);
   const [state, dispatch] = useReducer(reduce, undefined, () => {
     // detectGit은 execSync 2회(git rev-parse·git status)라 lazy initializer 안에서만 불러 마운트
     // 시점 1회로 제한한다 — 컴포넌트 본문 최상단에 두면 매 리렌더(=매 키입력)마다 재실행돼 타이핑이
@@ -188,6 +187,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   });
   const stateRef = useRef<TuiState>(state);
   stateRef.current = state;
+
+  // 0.11.2(ST3 scope-critic 지적 — 판정 이원화) — "사이드바가 지금 실제로 보이는가"를 키 핸들러가
+  // 읽을 수 있게 미러링한다. 0.11.1의 Tab 가드는 `!state.focusMode`만 봤는데, 사이드바는 포커스
+  // 모드 외에 **저폭 강등**(SIDEBAR_MIN_COLUMNS 미만)으로도 숨겨진다 — 그 경우 Tab이 보이지 않는
+  // 사이드바에 포커스를 걸어 12단 라우팅이 이후 타이핑을 조용히 삼키는 미아 포커스가 그대로
+  // 재현됐다(0.11.1이 닫은 것과 같은 결함의 미커버 갈래). 렌더 산술이 확정한 값 하나만 보게 해
+  // 두 판정이 갈라질 여지를 없앤다 — 기존 statuslineCacheRef·tabsRef와 동일한 "state+ref 미러"
+  // 관례이며, 핸들러는 렌더 완료 후에만 실행되므로 TDZ 우려가 없다.
+  const showSidebarRef = useRef(true);
 
   // ST3-1(0.11.0) — repoId별로 격리된 에디터 상태(대기중 텍스트+프롬프트 히스토리). tabsRef 등과
   // 동일한 "React state + ref 미러" 패턴 — editorState 자체는 파생값(아래)이라 별도 useEffect 없이
@@ -1109,12 +1117,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         return;
 
       // SubTask5(0.10.1) — 사이드바 repos 키보드 내비게이션(Tab 포커스 토글).
-      // 0.11.1(scope-critic 지적) — focusMode 활성 중(사이드바 자체가 안 보임)엔 Tab을 삼킨다.
-      // 가드 없으면 사이드바가 보이지 않는 채로 sidebarFocused만 true가 돼(classifyKey는 focusMode를
-      // 모르는 순수 함수라 11단에서 무조건 토글) 12단이 그 뒤 모든 타이핑을 조용히 삼키는 미아
-      // 포커스가 된다 — 화면에 아무 단서도 없어 사용자가 원인을 알 길이 없다.
+      // 0.11.1(scope-critic 지적) — 사이드바가 화면에 없을 땐 Tab을 삼킨다. 가드 없으면 사이드바가
+      // 보이지 않는 채로 sidebarFocused만 true가 돼(classifyKey는 레이아웃을 모르는 순수 함수라
+      // 11단에서 무조건 토글) 12단이 그 뒤 모든 타이핑을 조용히 삼키는 미아 포커스가 된다 — 화면에
+      // 아무 단서도 없어 사용자가 원인을 알 길이 없다.
+      // 0.11.2 — 판정 근거를 `!state.focusMode`에서 실제 렌더 가시성으로 넓혔다. 사이드바를 숨기는
+      // 축은 포커스 모드 말고 저폭 강등도 있어서, 좁은 터미널에서 같은 미아 포커스가 그대로
+      // 재현됐다(위 showSidebarRef 주석 참조).
       case "sidebar-focus-toggle":
-        if (!state.focusMode) setSidebarFocused((f) => !f);
+        if (showSidebarRef.current) setSidebarFocused((f) => !f);
         return;
       // ⌃1..9 직행 단축키(tab-switch-direct)와 달리 이 경로는 창이 스크롤돼 9번째 이후로 밀린 repo도
       // 커서로 닿을 수 있다 — Sidebar.tsx computeSidebarWindow가 같은 전역 인덱스를 쓴다.
@@ -1222,6 +1233,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // WelcomeCard.tsx와 동일 관례)로 실측한다. Sidebar 콘텐츠(repo 목록)는 상한(SIDEBAR_MAX_LIST_ROWS)
   // 근사만 쓴다 — Sidebar.tsx가 repos.json을 자체 폴링으로만 들고 있어(0.10.5 동기 I/O 재발 방지
   // 리팩토링) 여기서 실제 repos.length를 또 읽으면 그 버그가 되돌아온다(format.ts 주석 참조).
+  // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 활성이면 좌우 거터가 콘텐츠 가용폭을 잠식한다.
+  // 히어로/repos 패널의 columns 산정과 스트리밍 프리뷰 행 예산 모두 이 innerColumns/bandRows를
+  // 거쳐야 프레임 두께만큼 겹치거나 잘리지 않는다(computeFrameLayout은 순수 판정, 실제 렌더는
+  // <Frame>이 전담).
+  // 0.11.2 — state.focusMode를 읽어야 해서 선언 위치를 컴포넌트 최상단에서 여기(reduce 이후)로
+  // 내렸다. 소비처가 전부 이 아래 렌더 산술뿐이라(그 위엔 참조 없음) 이동만으로 완결된다.
+  const frameLayout = computeFrameLayout(columns, rows, state.focusMode);
   const cardRows = formatWelcomeCard(state.specCount, state.deferCount, cardSkills).length + 2;
   const sidebarContentRows = computeSidebarListRows(repos.length);
   const responsiveLayout = computeResponsiveLayout(
@@ -1231,6 +1249,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     cardRows,
     sidebarContentRows,
     state.titleMode,
+    state.focusMode,
   );
   // D-5 — repoId별 승인 대기 건수(0건인 repo는 아예 키를 안 실어 Sidebar가 "표시할 배지 없음"과
   // "0건"을 굳이 구분할 필요가 없게 한다, formatGateLine의 queueCount 생략 규약과 동일 정신).
@@ -1244,17 +1263,22 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   }, [approvalQueue, repos]);
   const chatHeaderRows = computeHeaderRows(frameLayout.innerColumns, responsiveLayout.effectiveTitleMode);
   const chatTotalRows = computeChatRegionRows(rows, frameLayout.bandRows, chatHeaderRows);
-  // 0.11.1 — 포커스 모드(Alt+F). computeResponsiveLayout의 저폭 자동강등(showSidebar)과 사용자의
-  // 수동 강제숨김(state.focusMode)은 서로 다른 축이라 여기서 AND로 합류한다 — 강등 판정 자체(폭
-  // 계산)는 그대로 두고 "보일지"만 이 값 하나로 대신한다. tmux prefix+z와 동일하게 사용자가
-  // 명시적으로 켠 것은 화면이 넓어져도 자동으로 되돌지 않는다.
-  const showSidebar = responsiveLayout.showSidebar && !state.focusMode;
+  // 0.11.1 — 포커스 모드(Alt+F)의 사이드바 숨김. 0.11.2에서 이 AND 합류를 computeResponsiveLayout
+  // 안으로 흡수했다 — 저폭 자동강등과 사용자의 수동 강제숨김이 서로 다른 축이긴 해도, 판정이 두
+  // 곳에 나뉘어 있으면 한쪽만 고쳤을 때 조용히 어긋난다(ST3 B안에서 타이틀 강등까지 같은 함수가
+  // 맡게 되며 더 분명해졌다). tmux prefix+z와 동일하게, 명시적으로 켠 것은 화면이 넓어져도
+  // 자동으로 되돌지 않는다.
+  const showSidebar = responsiveLayout.showSidebar;
+  showSidebarRef.current = showSidebar; // 키 핸들러(Tab 가드)가 읽는 미러 — 위 useRef 주석 참조.
   const sidebarColumns = showSidebar ? SIDEBAR_COLUMNS : 0;
   const chatOuterColumns = Math.max(
     0,
     computeContentColumns(frameLayout.innerColumns, sidebarColumns) - (showSidebar ? CHAT_COLUMN_GAP : 0),
   );
-  const chatInnerColumns = Math.max(1, chatOuterColumns - 4); // ChatBox 테두리2+paddingX(1×2)
+  // 0.11.2 — ChatBox 테두리·패딩 예산 단일 소스. 아래 네 곳(내부폭·뷰포트 행수·캐럿 x·캐럿 y)이
+  // 전부 이 한 값에서 파생돼야 포커스 모드 borderless 전환에서 서로 어긋나지 않는다.
+  const chatChrome = computeChatBoxChrome(state.focusMode);
+  const chatInnerColumns = Math.max(1, chatOuterColumns - chatChrome.columns);
   // 입력창(또는 승인박스)이 실제로 차지할 행수 — 프롬프트("❯ ")·커서(█)까지 포함해 에디터 텍스트를
   // 표시폭으로 랩한 결과다. shift+↵ 개행·긴 입력 랩·승인박스 프리뷰로 하단부가 늘어나는 만큼 대화
   // 뷰포트를 줄여 박스 총높이(chatTotalRows)를 불변으로 유지한다(0.10.3 — 이슈② 성장 갈래 근본수정).
@@ -1298,7 +1322,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 계약(chatTotalRows)을 불변으로 유지한다(이슈② 재발 방지 원칙 그대로 적용).
   const chatViewportRows = Math.max(
     1,
-    chatTotalRows - CHAT_BOX_CHROME_ROWS - CHAT_BOTTOM_CHROME_ROWS - inputContentRows - dropdownRows,
+    chatTotalRows - chatChrome.rows - CHAT_BOTTOM_CHROME_ROWS - inputContentRows - dropdownRows,
   );
 
   // 실터미널 커서를 캐럿 위치에 노출(0.10.3) — IME(한글) 조합 중 글자는 터미널이 커서 위치에
@@ -1313,8 +1337,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // 있다"를 전제로 위로 이동량을 계산하는데, 우리 레이아웃은 출력이 터미널 행수를 정확히 채우는
     // 정적 설계라 커서가 최하단 행에서 클램프돼 전제가 1행 깨진다 — 실측 y=33 vs 실제 입력행 34.
     setCursorPosition({
-      x: frameLayout.gutterColumns + sidebarColumns + (showSidebar ? CHAT_COLUMN_GAP : 0) + 2 + 2 + inputLayout.caretCol,
-      y: frameLayout.bandRows + chatHeaderRows + 2 + chatViewportRows + 1 + dropdownRows + inputLayout.caretRow + 1,
+      // 0.11.2 — 구 하드코딩 "+2"(대화박스 테두리1+패딩1) / "+2"(테두리1+인디케이터1)를
+      // chatChrome.leftColumns / chatChrome.topRows로 대체했다. 포커스 모드에선 각각 0·1이 된다.
+      // 뒤따르는 "+2"(x)·"+1"(y)는 입력박스 자신의 테두리·패딩이라 borderless와 무관하게 유지된다.
+      x: frameLayout.gutterColumns + sidebarColumns + (showSidebar ? CHAT_COLUMN_GAP : 0) + chatChrome.leftColumns + 2 + inputLayout.caretCol,
+      y: frameLayout.bandRows + chatHeaderRows + chatChrome.topRows + chatViewportRows + 1 + dropdownRows + inputLayout.caretRow + 1,
     });
   } else {
     setCursorPosition(undefined);
@@ -1324,6 +1351,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 참조를 그대로 반환하므로(scrollback.ts appendEntry가 건드린 repoId 키만 새 배열이 됨), 다른
   // repo에 append가 일어나도 activeScrollBuffer 참조는 안 바뀌어 이 useMemo가 불필요하게
   // 무효화되지 않는다.
+  // 0.11.2 ST5 — 세그먼트를 한 번만 만들어 렌더와 패딩 폭 계산이 같은 값을 보게 한다(각자
+  // formatStatusline을 부르면 그 사이 상태가 달라질 여지가 생긴다).
+  const statuslineSegments = formatStatusline(state.statusline);
   const activeScrollBuffer = getBuffer(scrollBuffers, tabs.activeTabId);
   const chatEntries = useMemo<ChatEntry[]>(
     () =>
@@ -1338,7 +1368,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   return (
     // 0.10.1 — 외부 '+' 프레임(braintrust 확정)이 화면 전체를 감싼다. Frame은 동적 영역(헤더+
     // 좌측 스택+대화 컬럼) 바깥쪽 장식만 담당한다.
-    <Frame columns={columns} rows={rows}>
+    <Frame columns={columns} layout={frameLayout}>
       {/* SubTask10 — 워드마크는 사이드바까지 포함한 전체 화면 폭 기준으로 좌우 스택 위에 1회
           그린다(승인 시안). 0.11.0(사용자 확정) — 더 이상 첫 제출로 소멸하지 않고 항상 렌더된다.
           state.titleMode(full/mini)만 ⌃T로 바뀐다(useInput 배선 참조). */}
@@ -1350,7 +1380,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           렌더 강등값을 분리한다(0.10.6 A2, scope-critic 확인 계약). 2단 강등(저높이)일 때만
           effectiveTitleMode가 "mini"로 표시값을 오버라이드하고, model.ts의 실제 titleMode는
           그대로다 — 리사이즈로 복귀하면 사용자가 골랐던 모드가 그대로 되살아난다. */}
-      <SplashHeader columns={frameLayout.innerColumns} version={version} mode={responsiveLayout.effectiveTitleMode} leftMargin={HERO_LEFT_MARGIN} />
+      {/* plusFill={!state.focusMode}(0.11.2) — 포커스 모드에선 타이틀 행의 '+' 배경 채움까지
+          끈다. 프레임·대화창 테두리를 전부 걷어낸 화면에 타이틀 행만 전체폭 '+'가 남으면 프레임
+          잔재로 보이고, 무엇보다 사용자가 지목한 결함("바깥배경이 추출된다")이 그 행에 그대로
+          남는다 — 시안 aef53edb의 A·B 패널 모두 '+'가 한 글자도 없다. */}
+      <SplashHeader columns={frameLayout.innerColumns} version={version} mode={responsiveLayout.effectiveTitleMode} leftMargin={HERO_LEFT_MARGIN} plusFill={!state.focusMode} />
       {/* ST10(0.10.0 A3b) — 터틀 덱 2컬럼: 좌측 상시 스택(카드+사이드바, 고정폭)+우측 대화 컬럼
           (가변폭, flexGrow). 사이드바는 토글 패널 시스템(state.panel)과 별개 축이라 ⌃M/⌃R/⌃S
           기존 동작은 무변경. SubTask10 — 카드가 사이드바와 동일폭 34로 이 스택에 합류한다. */}
@@ -1386,6 +1420,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
             scrollback 전량을 시각행 윈도잉으로 그린다. 패널·승인은 대화 뷰포트/입력창 자리를
             대체하되 ChatBox 자체 테두리·행 예산은 그대로다(ⓓ, 상세는 ChatBox.tsx 주석). */}
         <ChatBox
+          borderless={state.focusMode}
           innerWidth={chatInnerColumns}
           viewportRows={chatViewportRows}
           totalRows={chatTotalRows}
@@ -1460,8 +1495,19 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           <Box height={1} overflow="hidden" flexShrink={0}>
             <Segments segments={formatGateLine(state, countFor(submitQueue, tabs.activeTabId))} />
           </Box>
+          {/* 0.11.2 ST5 — 포커스 모드에선 이 줄이 화면의 **마지막 렌더 행**이 되는데, ink가 마지막
+              행에만 erase-to-EOL을 emit하지 않아 직전(일반 모드) 프레임의 '+' 밴드 꼬리가 그대로
+              남았다(tmux 실기 캡처로 발견, 재렌더로도 안 사라짐). 스스로 전체폭을 덮게 한다.
+              일반 모드에선 패딩하지 않는다. 이유는 "마지막 행이 늘 전체폭 '+' 밴드라서"가 **아니다**
+              — 프레임은 80열/30행 미만이면 비활성이라 밴드 자체가 없다. 진짜 이유는 그 경우에도
+              마지막 행이 사이드바 하단 테두리 + 컬럼갭 + 대화박스 하단 테두리로 화면 폭을 정확히
+              메우기 때문이다(chatOuterColumns가 사이드바가 남긴 나머지를 그대로 받는다). 괜히
+              채우면 대화 박스 안에서 우측 테두리를 밀 위험만 생긴다. */}
           <Box height={1} overflow="hidden" flexShrink={0}>
-            <Segments segments={formatStatusline(state.statusline)} />
+            <Segments
+              segments={statuslineSegments}
+              pad={state.focusMode ? computeSegmentsPad(statuslineSegments, chatInnerColumns, SEGMENT_SEP) : ""}
+            />
           </Box>
         </ChatBox>
       </Box>

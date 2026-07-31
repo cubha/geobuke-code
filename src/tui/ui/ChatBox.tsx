@@ -49,6 +49,7 @@ export function ChatBox({
   spinnerText,
   panelNode,
   children,
+  borderless = false,
 }: {
   /** 메시지 텍스트를 랩할 표시폭(문자 단위, string-width 기준) — 박스 테두리·패딩을 뺀 순수 콘텐츠 폭. */
   innerWidth: number;
@@ -67,6 +68,11 @@ export function ChatBox({
   panelNode?: React.ReactNode;
   /** 하단 고정 영역: 입력창/승인박스 + 게이트줄 + statusline. */
   children: React.ReactNode;
+  /** 0.11.2 포커스 모드 — 테두리·좌우 패딩을 끈다. alt-screen에서 대화 한 줄을 드래그하면 박스
+   *  테두리('│')와 프레임 거터가 매 행 함께 딸려와 클립보드가 오염되던 것이 사용자 실사용 결함
+   *  보고였다(시안 aef53edb B안). 폭·행 예산은 호출부가 computeChatBoxChrome로 이미 반영하므로
+   *  여기서는 그리기만 바꾼다 — 판정을 컴포넌트에 두면 예산과 렌더가 갈라진다. */
+  borderless?: boolean;
 }) {
   // ST4-3(0.11.0) — 말풍선 정렬(decorateBubble)은 반드시 wrapSegmentLine 직후에만 호출한다(ST4-2
   // 계약 — wrap 전 패딩은 폭 계산이 깨진다). innerWidth가 BUBBLE_MIN_INNER_COLUMNS 미만이면 정렬
@@ -141,9 +147,7 @@ export function ChatBox({
   return (
     <Box
       flexDirection="column"
-      borderStyle="round"
-      borderColor={BORDER_COLOR}
-      paddingX={1}
+      {...(borderless ? {} : { borderStyle: "round" as const, borderColor: BORDER_COLOR, paddingX: 1 })}
       flexGrow={1}
       height={totalRows}
       overflow="hidden"
