@@ -22,6 +22,7 @@ import {
   computePreviewRowBudget,
   computeFrameLayout,
   computeChatBoxChrome,
+  computeSegmentsPad,
   computeChatRegionRows,
   computeHeaderRows,
   computeResponsiveLayout,
@@ -66,7 +67,7 @@ import { createApprovalQueue, pushApproval, peekApproval, shiftApproval, countAp
 import { appendText, appendSegments, getBuffer, type ScrollBuffers, type EntryRole } from "./scrollback.js";
 import { gbcDir } from "../store.js";
 import { nowIso } from "../time.js";
-import { Segments } from "./ui/Segments.js";
+import { Segments, SEGMENT_SEP } from "./ui/Segments.js";
 import { ApprovalBox } from "./ui/ApprovalBox.js";
 import { MetricsPanel } from "./ui/MetricsPanel.js";
 import { ReposPanel } from "./ui/ReposPanel.js";
@@ -1349,6 +1350,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 참조를 그대로 반환하므로(scrollback.ts appendEntry가 건드린 repoId 키만 새 배열이 됨), 다른
   // repo에 append가 일어나도 activeScrollBuffer 참조는 안 바뀌어 이 useMemo가 불필요하게
   // 무효화되지 않는다.
+  // 0.11.2 ST5 — 세그먼트를 한 번만 만들어 렌더와 패딩 폭 계산이 같은 값을 보게 한다(각자
+  // formatStatusline을 부르면 그 사이 상태가 달라질 여지가 생긴다).
+  const statuslineSegments = formatStatusline(state.statusline);
   const activeScrollBuffer = getBuffer(scrollBuffers, tabs.activeTabId);
   const chatEntries = useMemo<ChatEntry[]>(
     () =>
@@ -1490,8 +1494,16 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           <Box height={1} overflow="hidden" flexShrink={0}>
             <Segments segments={formatGateLine(state, countFor(submitQueue, tabs.activeTabId))} />
           </Box>
+          {/* 0.11.2 ST5 — 포커스 모드에선 이 줄이 화면의 **마지막 렌더 행**이 되는데, ink가 마지막
+              행에만 erase-to-EOL을 emit하지 않아 직전(일반 모드) 프레임의 '+' 밴드 꼬리가 그대로
+              남았다(tmux 실기 캡처로 발견, 재렌더로도 안 사라짐). 스스로 전체폭을 덮게 한다.
+              일반 모드에선 패딩하지 않는다 — 마지막 행이 늘 전체폭 '+' 밴드라 잔상이 생길 수 없고,
+              괜히 채우면 대화 박스 안에서 우측 테두리를 밀 위험만 생긴다. */}
           <Box height={1} overflow="hidden" flexShrink={0}>
-            <Segments segments={formatStatusline(state.statusline)} />
+            <Segments
+              segments={statuslineSegments}
+              pad={state.focusMode ? computeSegmentsPad(statuslineSegments, chatInnerColumns, SEGMENT_SEP) : ""}
+            />
           </Box>
         </ChatBox>
       </Box>

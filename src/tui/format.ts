@@ -861,6 +861,36 @@ export function computeFrameLayout(columns: number, rows: number, focusMode = fa
   };
 }
 
+/**
+ * 세그먼트 줄을 목표 표시폭까지 채우는 데 필요한 공백 문자열(순수). 이미 채웠거나 넘치면 "".
+ *
+ * 0.11.2 ST5 — tmux 실기 캡처로 발견한 잔상 결함의 근본수정. 포커스 모드로 전환하면 최하단
+ * statusline 뒤에 직전(일반 모드) 프레임의 '+' 밴드 꼬리가 남고, 이후 재렌더에도 지워지지 않았다.
+ * 같은 프레임의 게이트줄(끝에서 두 번째 행)엔 잔상이 없는 것으로 보아, ink가 **마지막 렌더 행에만**
+ * erase-to-EOL을 emit하지 않는 것이 원인이다 — 일반 모드에선 마지막 행이 늘 전체폭 '+' 밴드라 이
+ * 갈래가 드러난 적이 없었다. 마지막 행 스스로 전체폭을 덮게 해 원천 차단한다.
+ *
+ * sep — 호출부(Segments 컴포넌트)가 세그먼트 사이에 실제로 그리는 구분자. 이 폭을 빼먹으면 패딩이
+ * 그만큼 과도해져 잔상 대신 줄바꿈이 생긴다(같은 결함의 반대 방향).
+ *
+ * 패딩 톤이 "plain"이 아닌 이유(1차 수정 실패로 실측 확인) — ink는 렌더 직전 각 줄의 **끝 공백을
+ * 잘라낸다**. tone:"plain"은 toneColor가 undefined라 ANSI 코드 없이 순수 공백만 나가고, 그대로
+ * 잘려 잔상이 그대로 남았다(tmux 캡처: "…$0.00 ·" 뒤에 '+' 잔존 — 구분자만 남고 공백은 소멸).
+ * 색 토큰이 붙으면 줄의 마지막 문자가 SGR 리셋 시퀀스라 trim 대상이 아니게 되고, 공백이 살아
+ * 이전 프레임의 '+'를 실제로 덮는다. gray는 어차피 공백이라 눈에 보이지 않는다(실제 색 부여는
+ * 호출부인 Segments의 pad 렌더가 담당 — 이 함수는 순수하게 폭만 계산한다).
+ *
+ * 반환은 세그먼트 배열이 아니라 **덧그릴 공백 문자열**이다(빈 문자열이면 패딩 불필요). 배열에 한
+ * 세그먼트로 끼워 넣으면 Segments가 그 앞에 구분자를 그려 " ·"가 허공에 매달린 것처럼 보였다
+ * (1차 구현 실측). 호출부가 구분자 없이 줄 끝에 덧붙인다.
+ */
+export function computeSegmentsPad(segments: TextSegment[], width: number, sep: string): string {
+  const sepWidth = stringWidth(sep) * Math.max(0, segments.length - 1);
+  const current = segments.reduce((sum, s) => sum + stringWidth(s.text), sepWidth);
+  if (current >= width) return "";
+  return " ".repeat(width - current);
+}
+
 // ── ChatBox 크롬 예산 (0.11.2 ST2 — 포커스 모드 borderless) ──
 // 대화창 박스의 테두리·패딩이 먹는 열/행은 app.tsx 네 곳(내부폭·뷰포트 행수·캐럿 x·캐럿 y)에서
 // 각각 상수 4/3/2/2로 하드코딩돼 있었다. 포커스 모드가 테두리를 걷어내는 순간 이 넷이 동시에
