@@ -35,6 +35,7 @@ import {
   formatReposPanelPath,
   computeFrameLayout,
   computeChatBoxChrome,
+  padSegmentsToWidth,
   decorateBubble,
   sanitizeControlChars,
   isTurnSpacerBoundary,
@@ -854,6 +855,43 @@ test("computeFrameLayout: focusMode면 innerColumns/innerRows가 전체 폭·행
 test("computeFrameLayout: focusMode 기본값 false — 기존 호출부(2인자)는 동작 무변경", () => {
   assert.deepEqual(computeFrameLayout(140, 44), computeFrameLayout(140, 44, false));
   assert.equal(computeFrameLayout(140, 44).enabled, true);
+});
+
+// ── padSegmentsToWidth (0.11.2 ST5 — 최하단 행 '+' 잔상 근본수정) ──
+// tmux 실기 캡처로 발견: 포커스 모드로 전환하면 최하단 statusline 뒤에 직전(일반 모드) 프레임의
+// '+' 밴드 꼬리가 그대로 남고, 이후 재렌더에도 사라지지 않는다. 행 39(게이트줄)엔 남지 않는 것으로
+// 보아 ink가 **마지막 렌더 행에만** erase-to-EOL을 emit하지 않는 것이 원인 — 일반 모드에선 마지막
+// 행이 항상 전체폭 '+' 밴드라 드러나지 않던 갈래다. 마지막 행을 전체폭까지 공백으로 밀어 덮는다.
+
+test("padSegmentsToWidth: 폭이 남으면 공백 세그먼트를 덧붙여 정확히 목표폭을 채운다", () => {
+  const out = padSegmentsToWidth([{ text: "abc", tone: "plain" }], 10, "");
+  assert.equal(out.map((s) => s.text).join(""), "abc" + " ".repeat(7));
+});
+
+test("padSegmentsToWidth: 구분자(sep) 폭까지 계산에 넣는다(Segments가 실제로 그걸 그린다)", () => {
+  // Segments는 세그먼트 사이에 sep(" · ")를 넣어 그린다 — 이걸 빼먹으면 패딩이 sep 폭만큼
+  // 과도해져 오히려 줄이 넘치고, 잔상 대신 줄바꿈이 생긴다.
+  const out = padSegmentsToWidth([{ text: "ab", tone: "plain" }, { text: "cd", tone: "plain" }], 10, " · ");
+  const rendered = "ab" + " · " + "cd" + out[out.length - 1].text;
+  assert.equal(stringWidth(rendered), 10);
+});
+
+test("padSegmentsToWidth: CJK는 표시폭 2칸으로 계산한다(.length가 아님)", () => {
+  const out = padSegmentsToWidth([{ text: "한글", tone: "plain" }], 10, "");
+  assert.equal(out[out.length - 1].text, " ".repeat(6)); // 4 + 6 = 10
+});
+
+test("padSegmentsToWidth: 이미 폭을 채웠거나 넘치면 원본 그대로 반환(패딩 없음)", () => {
+  const segs = [{ text: "0123456789ab", tone: "plain" }];
+  assert.deepEqual(padSegmentsToWidth(segs, 10, ""), segs);
+  assert.deepEqual(padSegmentsToWidth([{ text: "0123456789", tone: "plain" }], 10, ""), [
+    { text: "0123456789", tone: "plain" },
+  ]);
+});
+
+test("padSegmentsToWidth: 빈 세그먼트도 목표폭만큼 공백으로 채운다(내용 없는 statusline 방어)", () => {
+  const out = padSegmentsToWidth([], 5, " · ");
+  assert.equal(out.map((s) => s.text).join(""), "     ");
 });
 
 // ── computeChatBoxChrome (0.11.2 ST2) ──
