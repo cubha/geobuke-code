@@ -1,12 +1,8 @@
 // 0.9.0 A3a ST5 — TextSegment[](format.ts)를 Ink 줄로 렌더.
 import React from "react";
 import { Text } from "ink";
-import type { TextSegment } from "../format.js";
+import { SEGMENT_SEP, type TextSegment } from "../format.js";
 import { toneColor } from "./theme.js";
-
-/** 세그먼트 사이 구분자 기본값. 0.11.2 — 포커스 모드 statusline 전체폭 패딩(padSegmentsToWidth)이
- *  이 폭까지 정확히 계산해야 해서 상수로 노출한다(각자 " · "를 하드코딩하면 drift). */
-export const SEGMENT_SEP = " · ";
 
 export function Segments({
   segments,

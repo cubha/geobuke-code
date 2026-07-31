@@ -23,6 +23,7 @@ import {
   computeFrameLayout,
   computeChatBoxChrome,
   computeSegmentsPad,
+  SEGMENT_SEP,
   computeChatRegionRows,
   computeHeaderRows,
   computeResponsiveLayout,
@@ -67,7 +68,7 @@ import { createApprovalQueue, pushApproval, peekApproval, shiftApproval, countAp
 import { appendText, appendSegments, getBuffer, type ScrollBuffers, type EntryRole } from "./scrollback.js";
 import { gbcDir } from "../store.js";
 import { nowIso } from "../time.js";
-import { Segments, SEGMENT_SEP } from "./ui/Segments.js";
+import { Segments } from "./ui/Segments.js";
 import { ApprovalBox } from "./ui/ApprovalBox.js";
 import { MetricsPanel } from "./ui/MetricsPanel.js";
 import { ReposPanel } from "./ui/ReposPanel.js";

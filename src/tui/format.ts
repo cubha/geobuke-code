@@ -311,7 +311,14 @@ export interface TextSegment {
   tone: Tone;
 }
 
-export function joinTextSegments(segments: TextSegment[], sep = " · "): string {
+/** 세그먼트 사이 구분자 단일 소스 — 렌더(Segments.tsx), 문자열 결합(joinTextSegments), 폭 계산
+ *  (computeSegmentsPad) 셋이 같은 값을 봐야 한다. 0.11.2 이전엔 앞의 둘이 각자 " · "를
+ *  하드코딩했고, 포커스 모드 statusline 패딩이 이 폭까지 정확히 빼야 하면서 드러났다 — 어긋나면
+ *  패딩이 과·부족해져 잔상이 남거나 줄바꿈이 생긴다. Ink-free 순수층에 두어 ui/가 이걸 가져간다
+ *  (반대 방향 import는 format.ts의 Ink-free 원칙을 깬다). */
+export const SEGMENT_SEP = " · ";
+
+export function joinTextSegments(segments: TextSegment[], sep = SEGMENT_SEP): string {
   return segments.map((s) => s.text).join(sep);
 }
 
