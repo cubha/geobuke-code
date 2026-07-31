@@ -398,9 +398,29 @@ test("formatWelcomeCard: 게이트 요약 2줄 + spec/defer 1줄 + 기본 스킬
   assert.match(keymap3, /⌃C 종료\(2회\)/);
   const keymap4 = joinTextSegments(rows[10]);
   assert.match(keymap4, /Alt\+T 타이틀/);
+  // 0.11.2 — Alt+F(포커스 모드)를 Alt+T와 같은 줄에 병기한다. 새 줄을 만들지 않는 이유는
+  // cardRows가 computeResponsiveLayout의 강등 사다리 입력이라, 카드가 1행 자라면 저높이 터미널의
+  // 마스코트/타이틀 강등 임계가 함께 움직이기 때문이다(같은 성격의 키 2종이라 병기가 자연스럽다).
+  assert.match(keymap4, /Alt\+F 포커스/);
   const keymap5 = joinTextSegments(rows[11]);
   assert.match(keymap5, /\? 도움말/);
   assert.match(keymap5, /PgUp\/PgDn 스크롤/);
+});
+
+// 2026-07-30(사용자 실사용 지적) — 0.11.1이 포커스 모드(Alt+F)를 도입하면서 HelpPanel에는
+// 넣었지만 정작 첫 진입 화면인 이 카드에는 빠뜨렸다. '?' 도움말은 그것을 눌러본 사람만 보는
+// 순환이라, 신규 키는 항상 카드에도 함께 실려야 한다는 0.11.1의 교훈이 바로 다음 릴리스에서
+// 재발한 셈이다. 키맵 전량 커버를 테스트로 고정해 세 번째 재발을 막는다.
+test("formatWelcomeCard: 앱이 안내하는 키맵에 Alt+F(포커스 모드)가 빠지지 않는다", () => {
+  const all = formatWelcomeCard(0, 0, SKILLS).map(joinTextSegments).join("\n");
+  assert.match(all, /Alt\+F/);
+});
+
+test("formatWelcomeCard: HelpPanel이 안내하는 주요 토글 키(Alt+M/R/S/T/F)가 카드에도 전부 실린다", () => {
+  const all = formatWelcomeCard(0, 0, SKILLS).map(joinTextSegments).join("\n");
+  for (const key of ["Alt+M", "Alt+R", "Alt+S", "Alt+T", "Alt+F"]) {
+    assert.ok(all.includes(key), `${key} 안내 누락`);
+  }
 });
 
 test("formatWelcomeCard: 스킬 이름 세그먼트는 accent 톤(패널 강조와 일관)", () => {
