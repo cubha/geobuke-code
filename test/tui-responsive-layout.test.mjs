@@ -85,6 +85,42 @@ test("computeResponsiveLayout: repo가 적으면(≤9) 보수적 상한이 아�
   assert.deepEqual(out, { effectiveTitleMode: "full", showMascot: true, showSidebar: true });
 });
 
+// ── 0.11.2 포커스 모드(Alt+F) 크롬 제거 B안 — 시안 aef53edb ──
+// 0.11.1의 포커스 모드는 사이드바만 숨겼는데, 실사용 보고: 드래그 선택이 여전히 프레임 거터·박스
+// 테두리를 물어와 "전혀 개선의 느낌이 없다". B안은 사이드바 숨김을 이 함수 안으로 흡수하고
+// (app.tsx의 AND 합류를 제거해 판정 지점을 하나로), 타이틀도 mini로 자동 강등한다 — 포커스
+// 모드의 목적이 "대화에 집중"인데 장식 워드마크가 7행을 먹는 건 목적과 어긋나기 때문.
+
+test("computeResponsiveLayout: focusMode면 화면이 충분히 넓고 높아도 사이드바·마스코트를 숨긴다", () => {
+  const out = computeResponsiveLayout(60, WIDE, 1, 13, SIX_REPOS_ROWS, "full", true);
+  assert.equal(out.showSidebar, false);
+  assert.equal(out.showMascot, false);
+});
+
+test("computeResponsiveLayout: focusMode면 타이틀을 mini로 자동 강등한다(대화 6행 확보)", () => {
+  const out = computeResponsiveLayout(60, WIDE, 1, 13, SIX_REPOS_ROWS, "full", true);
+  assert.equal(out.effectiveTitleMode, "mini");
+});
+
+test("computeResponsiveLayout: focusMode 강등은 저높이 2단 강등과 동일하게 '표시값만' 바꾼다(사용자 titleMode 불변 — 해제 시 full 복귀)", () => {
+  // 같은 인자에서 focusMode만 끄면 즉시 full로 돌아와야 한다 — 이 함수가 상태를 갖지 않는다는
+  // 뜻이고, 그래야 model.ts의 실제 titleMode를 건드리지 않는다는 계약이 지켜진다.
+  assert.equal(computeResponsiveLayout(60, WIDE, 1, 13, SIX_REPOS_ROWS, "full", true).effectiveTitleMode, "mini");
+  assert.equal(computeResponsiveLayout(60, WIDE, 1, 13, SIX_REPOS_ROWS, "full", false).effectiveTitleMode, "full");
+});
+
+test("computeResponsiveLayout: focusMode 기본값 false — 기존 6인자 호출부는 동작 무변경", () => {
+  assert.deepEqual(
+    computeResponsiveLayout(60, WIDE, 1, 13, SIX_REPOS_ROWS, "full"),
+    computeResponsiveLayout(60, WIDE, 1, 13, SIX_REPOS_ROWS, "full", false),
+  );
+});
+
+test("computeResponsiveLayout: focusMode는 저폭 강등보다 우선한다(둘 다 사이드바 숨김이라 결과 동일)", () => {
+  const out = computeResponsiveLayout(60, SIDEBAR_MIN_COLUMNS - 1, 1, 13, SIX_REPOS_ROWS, "mini", true);
+  assert.deepEqual(out, { effectiveTitleMode: "mini", showMascot: false, showSidebar: false });
+});
+
 test("computeSidebarListRows: 0개면 1행(빈 상태 안내)", () => {
   assert.equal(computeSidebarListRows(0), 1);
 });

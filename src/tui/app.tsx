@@ -21,6 +21,7 @@ import {
   computeContentColumns,
   computePreviewRowBudget,
   computeFrameLayout,
+  computeChatBoxChrome,
   computeChatRegionRows,
   computeHeaderRows,
   computeResponsiveLayout,
@@ -92,8 +93,9 @@ const HERO_LEFT_MARGIN = 3;
 // ⓐ 헤더 행수 — 0.11.0부터 computeHeaderRows(format.ts)가 단일 소스(타이틀이 상시 렌더되며
 // full/mini 두 모드를 가지므로 상수가 아니라 함수). 구 CHAT_HEADER_ROWS_WIDE/NARROW(스플래시
 // 소멸 전제·측정 상수)는 폐기.
-// ⓑ ChatBox 자체 테두리(상하 각 1) + 스크롤 인디케이터(항상 1행 예약).
-const CHAT_BOX_CHROME_ROWS = 3;
+// ⓑ ChatBox 자체 테두리(상하 각 1) + 스크롤 인디케이터(항상 1행 예약) — 0.11.2부터 format.ts
+// computeChatBoxChrome이 단일 소스다(포커스 모드에서 테두리가 사라지면 이 행수와 캐럿 좌표·내부
+// 폭이 함께 움직여야 하므로 상수 4곳 하드코딩을 한 함수로 모았다). 여기 상수는 폐기.
 // ⓒ 하단 고정 UI 중 입력창을 뺀 고정분 — 입력창 테두리(상하 2) + 게이트줄(1) + statusline(1).
 // 입력창 내용 행수는 0.10.3부터 에디터 실제 텍스트를 랩해 동적으로 계산한다(멀티라인/랩 성장분을
 // 뷰포트 예산에서 차감하지 않으면 박스가 예산을 초과해 프레임 전체가 밀린다 — 2026-07-22 현장
@@ -1256,7 +1258,10 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     0,
     computeContentColumns(frameLayout.innerColumns, sidebarColumns) - (showSidebar ? CHAT_COLUMN_GAP : 0),
   );
-  const chatInnerColumns = Math.max(1, chatOuterColumns - 4); // ChatBox 테두리2+paddingX(1×2)
+  // 0.11.2 — ChatBox 테두리·패딩 예산 단일 소스. 아래 네 곳(내부폭·뷰포트 행수·캐럿 x·캐럿 y)이
+  // 전부 이 한 값에서 파생돼야 포커스 모드 borderless 전환에서 서로 어긋나지 않는다.
+  const chatChrome = computeChatBoxChrome(state.focusMode);
+  const chatInnerColumns = Math.max(1, chatOuterColumns - chatChrome.columns);
   // 입력창(또는 승인박스)이 실제로 차지할 행수 — 프롬프트("❯ ")·커서(█)까지 포함해 에디터 텍스트를
   // 표시폭으로 랩한 결과다. shift+↵ 개행·긴 입력 랩·승인박스 프리뷰로 하단부가 늘어나는 만큼 대화
   // 뷰포트를 줄여 박스 총높이(chatTotalRows)를 불변으로 유지한다(0.10.3 — 이슈② 성장 갈래 근본수정).
@@ -1300,7 +1305,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 계약(chatTotalRows)을 불변으로 유지한다(이슈② 재발 방지 원칙 그대로 적용).
   const chatViewportRows = Math.max(
     1,
-    chatTotalRows - CHAT_BOX_CHROME_ROWS - CHAT_BOTTOM_CHROME_ROWS - inputContentRows - dropdownRows,
+    chatTotalRows - chatChrome.rows - CHAT_BOTTOM_CHROME_ROWS - inputContentRows - dropdownRows,
   );
 
   // 실터미널 커서를 캐럿 위치에 노출(0.10.3) — IME(한글) 조합 중 글자는 터미널이 커서 위치에
@@ -1315,8 +1320,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
     // 있다"를 전제로 위로 이동량을 계산하는데, 우리 레이아웃은 출력이 터미널 행수를 정확히 채우는
     // 정적 설계라 커서가 최하단 행에서 클램프돼 전제가 1행 깨진다 — 실측 y=33 vs 실제 입력행 34.
     setCursorPosition({
-      x: frameLayout.gutterColumns + sidebarColumns + (showSidebar ? CHAT_COLUMN_GAP : 0) + 2 + 2 + inputLayout.caretCol,
-      y: frameLayout.bandRows + chatHeaderRows + 2 + chatViewportRows + 1 + dropdownRows + inputLayout.caretRow + 1,
+      // 0.11.2 — 구 하드코딩 "+2"(대화박스 테두리1+패딩1) / "+2"(테두리1+인디케이터1)를
+      // chatChrome.leftColumns / chatChrome.topRows로 대체했다. 포커스 모드에선 각각 0·1이 된다.
+      // 뒤따르는 "+2"(x)·"+1"(y)는 입력박스 자신의 테두리·패딩이라 borderless와 무관하게 유지된다.
+      x: frameLayout.gutterColumns + sidebarColumns + (showSidebar ? CHAT_COLUMN_GAP : 0) + chatChrome.leftColumns + 2 + inputLayout.caretCol,
+      y: frameLayout.bandRows + chatHeaderRows + chatChrome.topRows + chatViewportRows + 1 + dropdownRows + inputLayout.caretRow + 1,
     });
   } else {
     setCursorPosition(undefined);
@@ -1388,6 +1396,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
             scrollback 전량을 시각행 윈도잉으로 그린다. 패널·승인은 대화 뷰포트/입력창 자리를
             대체하되 ChatBox 자체 테두리·행 예산은 그대로다(ⓓ, 상세는 ChatBox.tsx 주석). */}
         <ChatBox
+          borderless={state.focusMode}
           innerWidth={chatInnerColumns}
           viewportRows={chatViewportRows}
           totalRows={chatTotalRows}

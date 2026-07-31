@@ -839,6 +839,36 @@ export function computeFrameLayout(columns: number, rows: number, focusMode = fa
   };
 }
 
+// ── ChatBox 크롬 예산 (0.11.2 ST2 — 포커스 모드 borderless) ──
+// 대화창 박스의 테두리·패딩이 먹는 열/행은 app.tsx 네 곳(내부폭·뷰포트 행수·캐럿 x·캐럿 y)에서
+// 각각 상수 4/3/2/2로 하드코딩돼 있었다. 포커스 모드가 테두리를 걷어내는 순간 이 넷이 동시에
+// 바뀌어야 하는데, 하나라도 놓치면 캐럿이 입력 글자에서 어긋나거나(x·y) 박스 하단이 밴드 위로
+// 밀린다(rows) — 이 repo가 measureElement·REPOS_PANEL_ROW_OVERHEAD 등에서 반복해 겪은 drift
+// 결함 클래스다. 단일 순수 함수로 모아 네 값이 구조적으로 함께 움직이게 한다.
+
+export interface ChatBoxChrome {
+  /** 좌우 합산 열(내부 콘텐츠 폭 산정용) — 테두리 2 + paddingX(1×2) 2. */
+  columns: number;
+  /** 좌측만(캐럿 x 좌표용) — 테두리 1 + padding 1. */
+  leftColumns: number;
+  /** 박스가 세로로 점유하는 행 — 상하 테두리 2 + 인디케이터 예약 1. */
+  rows: number;
+  /** 박스 상단에서 콘텐츠 첫 행까지의 오프셋(캐럿 y용) — 테두리 1 + 인디케이터 1. */
+  topRows: number;
+}
+
+/**
+ * 포커스 모드 여부에 따른 ChatBox 크롬 예산(순수).
+ *
+ * 인디케이터 행(▲위 N줄 / 스피너)은 포커스 모드에서도 남긴다 — 테두리와 달리 매 행에 붙는
+ * 장식이 아니라 대화 위 1행짜리 상태 표시라 선택 오염과 무관하고, 없애면 스크롤 위치·스피너를
+ * 알 길이 사라진다.
+ */
+export function computeChatBoxChrome(focusMode: boolean): ChatBoxChrome {
+  if (focusMode) return { columns: 0, leftColumns: 0, rows: 1, topRows: 1 };
+  return { columns: 4, leftColumns: 2, rows: 3, topRows: 2 };
+}
+
 export function formatUsageBar(pct: number, width = 10): string {
   const clamped = Math.max(0, Math.min(100, pct));
   const filled = Math.round((clamped / 100) * width);
