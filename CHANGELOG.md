@@ -2,6 +2,18 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.11.3] - 2026-08-03
+
+**0.11.2 시안 divergence 잔여 2건 근본수정 — mini 타이틀 버전 이중표기·말풍선 클립보드 공백**
+
+0.11.2 실검증에서 발견하고 "별도 판단"으로 미룬 채 배포했던 시안(aef53edb B안) 대비 불일치 2건을 마저 닫는다.
+
+### Fixed
+- **mini 타이틀 버전 이중표기** — `formatMiniTitleLabel`·`formatTagline` 양쪽에서 버전을 넣어 한 행에 2회 표기되던 것을 `formatMiniTagline()` 신설로 근본수정. 시안 원문 재대조로 구분자 공백폭·배지 배경 유무 불일치도 함께 바로잡음(배경 없는 dim 텍스트로 교체).
+- **포커스 모드 말풍선 클립보드 공백 오염** — 사용자 메시지 우측정렬의 선행 공백이 클립보드에 그대로 실리던 것을 `shouldAlignBubbles(innerWidth, focusMode)` 신설로 근본수정 — 좁은 폭 강등 경로를 포커스 모드에도 합류.
+
+검증: `verify.sh` 909/909(빌드 포함) · tmux 실터미널로 포커스 on/off 양쪽 분기 검증 · scope-critic·security-auditor 통과. hook 계약 무변경 = 재init 불요.
+
 ## [0.11.2] - 2026-07-31
 
 **포커스 모드(Alt+F) 크롬 전면 제거 — 드래그 선택 클립보드 오염 근본수정**
