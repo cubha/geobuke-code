@@ -6,6 +6,26 @@ import type { Verdict, ReviewVerdict, ScopeQueueEntry, ScopeVerdict, AxisAVerdic
 
 const DEFAULT_MODEL = "claude-haiku-4-5";
 const CLI_TIMEOUT_MS = 30000; // claude -p 폴백 상한(행 방지). 초과 시 kill → fail-open.
+/** API 트랜스포트 요청 상한(0.12.0 F-15) — 호출 경로 성격에 따라 갈린다. */
+export interface ApiLimits {
+  timeoutMs: number;
+  maxRetries: number;
+}
+/**
+ * **게이트 전용**(`judge` — PreToolUse 동기 차단). CLI 폴백의 `CLI_TIMEOUT_MS`와 동형: 판정 1회가
+ * 이보다 오래 걸리면 fail-open으로 흘려보내는 게 사용자 편집을 무한 차단하는 것보다 낫다.
+ * 재시도 1회 — SDK 기본(2회)이면 최악 지연이 timeout×3이 되는데, 동기 차단 경로에서는 지연을
+ * 늘려가며 성공률을 사는 트레이드가 성립하지 않는다.
+ */
+export const GATE_API_LIMITS: ApiLimits = { timeoutMs: 30_000, maxRetries: 1 };
+/**
+ * **배치·비차단 경로**(`judgeReviewed` 코드독해 · `judgeScope` Stop 훅 · `judgeM1Violation`
+ * 사후대조). 게이트 상한을 그대로 물리면 안 된다(scope-critic 지적, 2026-08-09): `judgeReviewed`는
+ * `MAX_REVIEW_CODE`(12000자) 코드 본문을 독해하므로 30s에 걸려 **정당한 판정이 unverifiable로
+ * 강등**될 수 있고, 이들은 사용자 편집을 막고 있지도 않다. 재시도도 SDK 기본(2회)을 유지해
+ * 일시적 네트워크 오류에서의 회복력을 산다 — 여기선 지연보다 성공률이 옳은 우선순위다.
+ */
+export const BATCH_API_LIMITS: ApiLimits = { timeoutMs: 60_000, maxRetries: 2 };
 
 /**
  * 모델 토큰을 셸 안전 문자로 제한한다(win32 shell:true 경로의 argv 인젝션 차단).
@@ -159,6 +179,7 @@ const GATE_SYSTEM = `너는 코드 구현 직전에 동작하는 "게이트"다.
     - ★ [현재 파일 상태] 섹션이 있다면 **[현재 편집](diff)만 보지 말고 파일 전체를 확인하라** — 이 편집이 다루지 않은 형제 케이스가 diff 밖 다른 부분에 **이미 구현돼 있을 수 있다**. 그런 형제는 missing에 넣지 마라(침묵 누락이 아니라 이미 반영됨 — diff에 안 보인다고 없는 게 아니다). [현재 파일 상태] 섹션이 없으면(신규 파일 등) 이 판단은 생략하고 diff만으로 판정한다 — 섹션이 없다는 것 자체를 별도 신호로 해석하지 마라(예: "신규 파일이라 미구현"으로 확대해석 금지, 1단계 분류에도 영향 없음).
     - ★★ [현재 편집]이 "(전체 작성/덮어쓰기)"로 표시돼 있으면(Write — 파일 전체를 새 내용으로 교체) [현재 파일 상태]는 **곧 사라질 구버전**이다. 이때는 위 규칙이 거꾸로 적용된다: 구버전에만 있고 [현재 편집]의 새 전체 내용에는 없는 형제 케이스는 "이미 구현됨"이 아니라 **덮어쓰기로 삭제되는 회귀**다 — missing에서 빼지 말고 그대로 침묵 누락으로 취급하라. "diff 밖에 이미 구현돼 있으면 missing 제외" 규칙은 Edit/MultiEdit(파일 일부만 바뀌고 나머지는 그대로 남는 경우)에만 적용된다.
     - ★ missing에 넣는 항목은 [계획 명세]의 해당 케이스를 **원문 그대로 인용**하라(재서술·요약·ID 재조합 금지). 계획 명세에 적혀 있지 않은 항목을 만들어 넣지 마라 — 편집 본문이 언급하는 미래 작업은 missing이 아니다.
+    - ★★★ [관련 코드 근거(grep)] 섹션이 있다면 — missing 후보 케이스와 관련된 심볼을 다른 코드 위치에서 grep으로 찾은 원시 라인(파일:줄번호: 텍스트)이다. 그 문맥이 해당 케이스를 **실제로 구현**하고 있다면(로직·검증·분기·반환이 실제로 있음) missing에서 제외하라. 심볼만 존재하고 로직이 없다면(함수 시그니처만·TODO 주석·빈 본문) 여전히 침묵 누락으로 취급하라 — **심볼 존재 자체는 구현의 증거가 아니다.** 이 섹션 끝에 "…(근거 N건 생략)" 표시가 있으면 예산 때문에 일부 근거가 잘린 것이다 — 잘린 케이스에 대해 "근거가 없으니 미구현"으로 단정하지 말고, 남은 근거로 판단 가능한 것만 제외하라.
 (c) 위에 해당 없으면 → **pass**.
 
 핵심 균형:
@@ -168,7 +189,10 @@ const GATE_SYSTEM = `너는 코드 구현 직전에 동작하는 "게이트"다.
 오직 아래 JSON만 출력(설명·마크다운 펜스 금지):
 {"verdict":"block"|"pass","missing":["누락된 케이스"],"reason":"한 줄 사유"}`;
 
-const MAX_CURRENT_FILE = 8000; // [현재 파일 상태] 절단(프롬프트 비대화 방지) — MAX_REVIEW_CODE와 동형
+// [현재 파일 상태] 절단(프롬프트 비대화 방지) — MAX_REVIEW_CODE와 동형. export = 테스트에서 실값을
+// 참조하기 위함(gate-core.ts는 이 상수를 정적 import하지 않는다 — judge=deps.judge 주입 원칙과
+// 동일하게 핫패스 zero-dep·테스트 격리를 지키려 값을 복제하고 드리프트 가드 테스트로 묶는다).
+export const MAX_CURRENT_FILE = 8000;
 
 function buildUserMessage(
   planSpec: string,
@@ -176,6 +200,7 @@ function buildUserMessage(
   defers: string[],
   resolved: string[] = [],
   currentFileContent?: string,
+  evidenceContext?: string,
 ): string {
   const fmt = (xs: string[]): string => (xs.length > 0 ? xs.map((d) => `- ${d}`).join("\n") : "(없음)");
   const trimmed = (currentFileContent ?? "").trim();
@@ -186,6 +211,10 @@ function buildUserMessage(
   const fileStateSection = trimmed
     ? `\n\n[현재 파일 상태]\n${trimmed.length > MAX_CURRENT_FILE ? trimmed.slice(0, MAX_CURRENT_FILE) + "\n…(절단됨)" : trimmed}`
     : "";
+  // 2026-08-07 RCA 후속(P2b ST12) — grep 근거주입 2단계 재판정 전용. 비어있으면(1차 판정·근거 없음)
+  // 섹션 자체를 생략(위 fileStateSection과 동일 관례 — placeholder가 오염 유발한 전례 반복 방지).
+  const trimmedEvidence = (evidenceContext ?? "").trim();
+  const evidenceSection = trimmedEvidence ? `\n\n[관련 코드 근거(grep)]\n${trimmedEvidence}` : "";
   return `[계획 명세]
 ${planSpec.trim() || "(계획 명세 없음 — 개발자가 곧바로 구현을 시작함)"}
 
@@ -193,7 +222,7 @@ ${planSpec.trim() || "(계획 명세 없음 — 개발자가 곧바로 구현을
 ${fmt(defers)}
 
 [이미 완료된 항목]
-${fmt(resolved)}${fileStateSection}
+${fmt(resolved)}${fileStateSection}${evidenceSection}
 
 [현재 편집]
 ${editText}`;
@@ -256,11 +285,20 @@ export function selectedTransport(): "api" | "cli" {
  * Anthropic API 클라이언트 팩토리 — SDK lazy import(핫패스 보호)와 키 해석(env > ~/.gbc/api-key)을
  * 단일 지점으로(0.5.4). A-mode engine.ts가 클라이언트 생명주기를 가져갈 때 이 seam만 바꾸면 된다.
  */
-async function createApiClient() {
+async function createApiClient(limits: ApiLimits) {
   const mod = await import("@anthropic-ai/sdk");
   const Anthropic = mod.default;
   // 키를 코드에서 해석해 명시 전달 — 셸 주입 불필요(크로스플랫폼).
-  return new Anthropic({ apiKey: resolveApiKey() ?? undefined });
+  // timeout/maxRetries 명시(0.12.0 F-15) — 지정하지 않으면 상한이 SDK 기본값에 위임되어 gbc가
+  // 통제하지 못한다. CLI 트랜스포트는 CLI_TIMEOUT_MS(30s)로 이미 유계인데 API 경로만 무한정이면
+  // 비대칭이고, P2b가 block 경로에서 judge를 **2회** 부르게 되면서 그 노출이 2배가 됐다.
+  // 값은 호출 경로가 정한다(GATE_API_LIMITS vs BATCH_API_LIMITS) — 동기 차단 경로와 배치 경로에
+  // 같은 상한을 물리면 후자가 부당하게 깨진다.
+  return new Anthropic({
+    apiKey: resolveApiKey() ?? undefined,
+    timeout: limits.timeoutMs,
+    maxRetries: limits.maxRetries,
+  });
 }
 
 /**
@@ -273,8 +311,9 @@ async function judgeViaApi(
   user: string,
   temperature?: number,
   model: string = gateModel(),
+  limits: ApiLimits = GATE_API_LIMITS,
 ): Promise<string> {
-  const client = await createApiClient();
+  const client = await createApiClient(limits);
   const resp = await client.messages.create({
     model: safeModel(model),
     max_tokens: 1024,
@@ -399,6 +438,9 @@ export function judgeViaCliWin(
   );
 }
 
+/** transport 무관 호출자 시그니처(테스트 주입용) — ReviewInvoke/ScopeInvoke/ScoreInvoke와 동형. */
+export type JudgeInvoke = (system: string, user: string) => Promise<string>;
+
 /**
  * 게이트 판정. ANTHROPIC_API_KEY 있으면 직접 API(빠름), 없으면 claude -p 폴백.
  * 실패 시 안전하게 pass(fail-open) — 게이트가 개발을 막아버리는 사고 방지.
@@ -408,16 +450,27 @@ export async function judge(
   editText: string,
   defers: string[] = [],
   resolved: string[] = [],
-  opts: { temperature?: number; currentFileContent?: string; cwd?: string } = {},
+  opts: {
+    temperature?: number;
+    currentFileContent?: string;
+    cwd?: string;
+    invoke?: JudgeInvoke;
+    /** 2026-08-07 RCA 후속(P2b ST12) — grep 근거주입 2단계 재판정에서만 채워짐(1차 판정은 undefined). */
+    evidenceContext?: string;
+  } = {},
 ): Promise<Verdict> {
-  const user = buildUserMessage(planSpec, editText, defers, resolved, opts.currentFileContent);
+  const user = buildUserMessage(planSpec, editText, defers, resolved, opts.currentFileContent, opts.evidenceContext);
   const transport = selectedTransport();
   try {
+    // opts.invoke(2026-08-07, RCA 후속 — judgeReviewed/judgeScope/judgeM1Violation과 동형 seam):
+    // 지정되면 transport 선택·temperature·cwd를 전부 우회하고 그대로 호출한다(다른 3개 invoke도
+    // 이 값들을 안 쓴다 — 결정론 테스트가 모델 응답만 고정하면 되는 게 이 seam의 목적).
     // claude -p 폴백은 temperature 플래그가 없어 핀 불가 → CLI-transport replay는 best-effort.
     // cwd(ST4): CLI 트랜스포트만 spawn을 실제로 하므로 cwd가 의미 있다 — API 트랜스포트는 프로세스를
     // 띄우지 않아 cwd 상속 오염 경로 자체가 없다(전달할 이유 없음).
-    const raw =
-      transport === "api"
+    const raw = opts.invoke
+      ? await opts.invoke(GATE_SYSTEM, user)
+      : transport === "api"
         ? await judgeViaApi(GATE_SYSTEM, user, opts.temperature)
         : await judgeViaCli(GATE_SYSTEM, user, gateModel(), opts.cwd);
     const verdict = parseVerdict(raw);
@@ -514,7 +567,12 @@ export type ReviewInvoke = (system: string, user: string) => Promise<string>;
  */
 function defaultInvoke(modelFn: () => string): (system: string, user: string) => Promise<string> {
   return (system, user) =>
-    selectedTransport() === "api" ? judgeViaApi(system, user, undefined, modelFn()) : judgeViaCli(system, user, modelFn());
+    selectedTransport() === "api"
+      // BATCH_API_LIMITS 명시(0.12.0 F-15) — 이 세 판정은 사용자 편집을 막고 있지 않고,
+      // judgeReviewed는 12000자 코드 독해라 게이트 상한(30s)을 물리면 정당한 판정이
+      // unverifiable로 강등된다.
+      ? judgeViaApi(system, user, undefined, modelFn(), BATCH_API_LIMITS)
+      : judgeViaCli(system, user, modelFn());
 }
 
 /**

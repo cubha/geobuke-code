@@ -21,6 +21,8 @@ function makeDeps(over = {}) {
     refreshDuringJudge: over.refreshDuringJudge,
     readPendingReview: over.readPendingReview ?? (() => null), // 0.9.3 ST2 — GateDeps 신규 필드
     readCurrentFile: over.readCurrentFile ?? (() => null), // 0.9.3 ST3 — GateDeps 신규 필드
+    // 2026-08-07 RCA 후속 ST12 — GateDeps 신규 필드. 기본값=매치 없음(evidence 미사용 유지).
+    collectCaseEvidence: over.collectCaseEvidence ?? (async (_cwd, missing) => missing.map((c) => ({ case: c, context: "", matched: false }))),
   };
 }
 function preInput(over = {}) {

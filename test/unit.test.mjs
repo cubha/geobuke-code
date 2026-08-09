@@ -65,8 +65,10 @@ import {
   writeVersionCache,
   shouldRefreshCache,
 } from "../dist/version.js";
-import { serializeEvent, parseEvents, computeMetrics, logEvent, tagEventsWithRepo, readEventsMerged, eventsPath } from "../dist/metrics.js";
-import { goldenCaseId, diffVerdict, upsertGolden, summarizeReplay } from "../dist/golden.js";
+import { serializeEvent, parseEvents, computeMetrics, logEvent, tagEventsWithRepo, readEventsMerged, eventsPath, parseSince, filterEventsSince } from "../dist/metrics.js";
+import { goldenCaseId, diffVerdict, upsertGolden, summarizeReplay, needsP2bReplay } from "../dist/golden.js";
+import { EVIDENCE_TIME_BUDGET_MS } from "../dist/evidence.js";
+import { GREP_TIMEOUT_MS } from "../dist/scope.js";
 import { resolveApiKey, safeModel, buildCliInvocation } from "../dist/judge.js";
 import { normalizeCase, MAX_CASE } from "../dist/text.js";
 import { isStopHintMuted, setStopHintMuted } from "../dist/config.js";
@@ -219,6 +221,38 @@ test("buildUserMessage: [현재 파일 상태]는 [현재 편집] 앞에 위치(
 test("GATE_SYSTEM: 이미 파일에 구현된 형제 케이스는 missing에 넣지 말라는 규칙 포함 (ST3)", () => {
   assert.match(GATE_SYSTEM, /현재 파일 상태/);
   assert.match(GATE_SYSTEM, /이미.*구현/);
+});
+
+// ── 절단 특성화(2026-08-07, 게이트 오탐 RCA — P1 회귀락) ──
+// 8000바이트 head-only 절단이 파일 뒤쪽 기구현 형제를 못 보게 하는 게 오탐의 한 갈래(1/4 지분,
+// braintrust 실측)임을 결정론적으로 고정한다. 이 테스트는 "현재 결함이 있는 채로" RED가 아니라
+// *현재 동작을 특성화(characterize)*한다 — P3(ⓐ 절단을 편집지점 윈도우로)가 이 동작을 의도적으로
+// 바꿀 때 이 테스트도 함께 갱신해야 한다(주석에 명시).
+test("buildUserMessage: 8000바이트 초과 파일은 head만 남고 뒤쪽(예: v18류 최신 구현)은 잘려나간다 — P3 대상, 현재 동작 특성화", () => {
+  const content = "A".repeat(12000) + "\n// MARKER_LATEST_IMPL\n";
+  const m = buildUserMessage("plan", "edit", [], [], content);
+  assert.doesNotMatch(m, /MARKER_LATEST_IMPL/, "head-only 절단이 파일 끝의 최신 구현 마커를 잘라낸다(오탐의 근본 메커니즘)");
+  assert.match(m, /…\(절단됨\)/, "절단 마커는 남아 판정 모델에게 '전체가 아님'을 알린다");
+});
+
+test("buildUserMessage: 8000바이트 이하 파일은 절단되지 않는다(경계 확인)", () => {
+  const content = "B".repeat(7900) + "\n// MARKER_END\n"; // 전체 길이 < 8000 유지(마커분 포함)
+  const m = buildUserMessage("plan", "edit", [], [], content);
+  assert.match(m, /MARKER_END/);
+  assert.doesNotMatch(m, /…\(절단됨\)/);
+});
+
+test("예산 불변식 known-gap 잠금: MAX_FIELD(Write 새내용, normalize.ts) < MAX_CURRENT_FILE(judge.ts) — 현재 거꾸로임을 고정, P3 대상", async () => {
+  const { MAX_FIELD } = await import("../dist/normalize.js");
+  const { MAX_CURRENT_FILE } = await import("../dist/judge.js");
+  // "옳은 방향"은 content 예산 ≥ currentFile 예산(구버전과 새내용을 같은 기준으로 비교해야
+  // ★★ 회귀판정이 성립)인데, 현재는 반대(4000 < 8000)다. P3가 상수를 바꾸면 이 assert가
+  // 강제로 실패해 불변식을 마주치게 된다(scratch.md ST5 설계 그대로) — 그때 이 테스트를
+  // "MAX_FIELD >= MAX_CURRENT_FILE"로 뒤집어 갱신할 것.
+  assert.ok(
+    MAX_FIELD < MAX_CURRENT_FILE,
+    `현재 사실(MAX_FIELD=${MAX_FIELD} < MAX_CURRENT_FILE=${MAX_CURRENT_FILE})이 바뀌었다면 P3가 착수된 것 — 이 테스트를 갱신하라`,
+  );
 });
 
 // scope-critic 발견(2026-07-14): Write(전체 덮어쓰기)는 [현재 파일 상태]가 곧 사라질 구버전이라
@@ -3542,4 +3576,184 @@ test("runRunnerCommand: 타임아웃 → kill + ok:false·reason에 timeout", as
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ===== gbc metrics --since (0.12.0 F-1) =====
+// 원계획 ST2의 명시 항목인데 UPR/IPR 폐기와 함께 떨어져 나갔다. 시간창 제한의 필요성은 지표
+// 이름과 독립적이다 — 현재 침묵-누락 block 모집단이 331건이라, 0.12.0 배포 후 신규 block이
+// 30건 쌓여도 전체 재계산 시 신규분은 8%에 불과해 P2b 효과가 노이즈에 묻힌다. PR#2 착수조건
+// ("0.12.0 설치시점 기준 재계산, 전체 재계산 금지")이 바로 이 플래그에 의존한다.
+
+test("parseSince: ISO 8601 절대시각", () => {
+  const d = parseSince("2026-08-01T00:00:00Z");
+  assert.ok(d instanceof Date);
+  assert.equal(d.toISOString(), "2026-08-01T00:00:00.000Z");
+});
+
+test("parseSince: 상대 표기 Nd/Nh/Nm — now 기준으로 과거를 가리킨다", () => {
+  const now = new Date("2026-08-09T12:00:00Z");
+  assert.equal(parseSince("7d", now).toISOString(), "2026-08-02T12:00:00.000Z");
+  assert.equal(parseSince("24h", now).toISOString(), "2026-08-08T12:00:00.000Z");
+  assert.equal(parseSince("30m", now).toISOString(), "2026-08-09T11:30:00.000Z");
+});
+
+test("parseSince: 해석 불가 입력은 null — 조용히 0건으로 뭉개지 않는다", () => {
+  assert.equal(parseSince("어제"), null);
+  assert.equal(parseSince(""), null);
+  assert.equal(parseSince("7x"), null);
+  assert.equal(parseSince("-3d"), null);
+});
+
+test("filterEventsSince: 경계는 포함(>=) — 설치시각을 since로 넣으면 그 시각 이벤트가 살아있다", () => {
+  const evs = [
+    { at: "2026-08-01T00:00:00.000Z", kind: "gate", session: "", specHash: "a" },
+    { at: "2026-08-05T00:00:00.000Z", kind: "gate", session: "", specHash: "a" },
+  ];
+  const kept = filterEventsSince(evs, new Date("2026-08-05T00:00:00.000Z"));
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].at, "2026-08-05T00:00:00.000Z");
+});
+
+test("filterEventsSince: at이 없거나 깨진 이벤트는 제외한다(시간창에 귀속 불가)", () => {
+  const evs = [
+    { kind: "gate", session: "", specHash: "a" },
+    { at: "not-a-date", kind: "gate", session: "", specHash: "a" },
+    { at: "2026-08-05T00:00:00.000Z", kind: "gate", session: "", specHash: "a" },
+  ];
+  assert.equal(filterEventsSince(evs, new Date("2026-01-01T00:00:00.000Z")).length, 1);
+});
+
+// ── F-2(0.12.0): P2b 근거주입·절단 계측을 실제로 *보여준다* ──
+// gate-core는 evidenceUsed/evidenceFlip/evidenceBudgetExhausted/evidenceDropped/truncated를 이벤트에
+// 남기지만 computeMetrics가 집계하지 않아 `gbc metrics` 어디에도 나오지 않았다 — 기록만 있고
+// 보이지 않는 계측은 "측정했다"는 착각만 만든다(RCA 교훈: 숫자가 안 보이면 아무도 안 본다).
+
+test("computeMetrics evidence: 근거주입 재판정 건수와 판정전환 건수를 집계한다", () => {
+  const evs = [
+    { at: "2026-08-09T00:00:00Z", kind: "gate", decision: "block", evidenceUsed: true, evidenceFlip: true },
+    { at: "2026-08-09T00:01:00Z", kind: "gate", decision: "block", evidenceUsed: true, evidenceFlip: false },
+    { at: "2026-08-09T00:02:00Z", kind: "gate", decision: "pass", evidenceUsed: true, evidenceFlip: true },
+    { at: "2026-08-09T00:03:00Z", kind: "gate", decision: "block" },
+  ];
+  const m = computeMetrics(evs);
+  assert.equal(m.evidence.used, 3);
+  assert.equal(m.evidence.flipped, 2);
+  assert.equal(m.evidence.flipRate, 0.667);
+});
+
+test("computeMetrics evidence: 예산소진·근거절단·파일절단을 각각 집계한다", () => {
+  const evs = [
+    { at: "2026-08-09T00:00:00Z", kind: "gate", decision: "block", evidenceBudgetExhausted: true, evidenceDropped: 3, fileBytes: 12000, truncated: true },
+    { at: "2026-08-09T00:01:00Z", kind: "gate", decision: "block", evidenceDropped: 2, fileBytes: 100, truncated: false },
+    { at: "2026-08-09T00:02:00Z", kind: "gate", decision: "pass" },
+  ];
+  const m = computeMetrics(evs);
+  assert.equal(m.evidence.budgetExhausted, 1);
+  assert.equal(m.evidence.droppedCases, 5, "생략된 근거 케이스 수의 합");
+  assert.equal(m.evidence.truncated, 1);
+  assert.equal(m.evidence.withFile, 2, "fileBytes가 기록된 판정만 절단율 분모");
+});
+
+test("computeMetrics evidence: 근거주입이 한 번도 없으면 전부 0·전환율 null(표본 0을 0%로 위장하지 않음)", () => {
+  const m = computeMetrics([{ at: "2026-08-09T00:00:00Z", kind: "gate", decision: "pass" }]);
+  assert.deepEqual(m.evidence, { used: 0, flipped: 0, flipRate: null, droppedCases: 0, budgetExhausted: 0, truncated: 0, withFile: 0, failed: 0, budgetExhaustedByTime: 0 });
+});
+
+test("computeMetrics evidence: 근거수집 실패 건수를 집계한다(P2b 무력화 감지)", () => {
+  const evs = [
+    { at: "2026-08-09T00:00:00Z", kind: "gate", decision: "block", evidenceFailed: true },
+    { at: "2026-08-09T00:01:00Z", kind: "gate", decision: "block", evidenceUsed: true, evidenceFlip: false },
+  ];
+  assert.equal(computeMetrics(evs).evidence.failed, 1);
+});
+
+// ── F-13(0.12.0, 최상위): P2b에 모델-행동 자동검증이 하나도 없다 ──
+// 골든 replay는 judge()를 1회만 호출하고(cli.ts cmdGateSnapshotReplay), 골든 캡처는 P2b 재판정
+// *이전*에 일어난다 — 즉 이 배치의 유일한 판정 로직 변경(근거주입)에 드리프트 감지가 무신호다.
+// 이 프로젝트는 정확히 같은 사각지대(replay가 currentFileContent를 안 실어 flip0 거짓안심)를 이미
+// 한 번 겪었다. 캡처에 근거 컨텍스트와 재판정 결과를 함께 남겨 replay가 2단계까지 재현하게 한다.
+
+test("needsP2bReplay: 근거 컨텍스트와 재판정 기대가 모두 있어야 2단계 재현 대상", () => {
+  assert.equal(
+    needsP2bReplay({ evidenceContext: "src/a.ts:1: impl", expectedAfterEvidence: { verdict: "pass", missing: [], reason: "" } }),
+    true,
+  );
+});
+
+test("needsP2bReplay: 구버전 골든(두 필드 없음)은 대상 아님 — 하위호환", () => {
+  assert.equal(needsP2bReplay({ id: "x", tool: "Edit", edit: "e", spec: "s", defers: [] }), false);
+});
+
+test("needsP2bReplay: 한쪽만 있으면 대상 아님(비교 기준 없이 재판정만 돌리면 신호가 안 됨)", () => {
+  assert.equal(needsP2bReplay({ evidenceContext: "src/a.ts:1: impl" }), false);
+  assert.equal(needsP2bReplay({ expectedAfterEvidence: { verdict: "pass", missing: [], reason: "" } }), false);
+});
+
+test("needsP2bReplay: 빈 근거 문자열은 대상 아님(judge가 섹션 자체를 생략 = 1차와 동일 프롬프트)", () => {
+  assert.equal(
+    needsP2bReplay({ evidenceContext: "   ", expectedAfterEvidence: { verdict: "pass", missing: [], reason: "" } }),
+    false,
+  );
+});
+
+test("computeMetrics evidence: 예산 소진 중 시간 사유 건수를 따로 센다(개수 소진과 해소법이 다름)", () => {
+  const evs = [
+    { at: "2026-08-09T00:00:00Z", kind: "gate", decision: "block", evidenceBudgetExhausted: true, evidenceBudgetReason: "time" },
+    { at: "2026-08-09T00:01:00Z", kind: "gate", decision: "block", evidenceBudgetExhausted: true, evidenceBudgetReason: "count" },
+  ];
+  const m = computeMetrics(evs);
+  assert.equal(m.evidence.budgetExhausted, 2);
+  assert.equal(m.evidence.budgetExhaustedByTime, 1);
+});
+
+// ── upsertGolden이 P2b 락을 지운다(advisor 실측 지적, 2026-08-09) ──
+// goldenCaseId는 sha256(tool, edit, spec)이라 근거가 키에 없다. 같은 편집을 다시 캡처했을 때
+// 그 회차엔 grep 매치가 0이면(= P2b 미발화) 새 케이스엔 evidenceContext/expectedAfterEvidence가
+// 없고, 전체 교체 upsert가 기존 P2b 필드를 통째로 날린다 → needsP2bReplay=false → replay가 조용히
+// 2단계를 그만두고 "flip 0"을 출력한다. F-13이 막으려던 바로 그 거짓안심이 쓰기 경로에서 재현된다.
+// 게다가 문서화된 워크플로(`gbc gate reset` 후 같은 편집 재수행)로 실제 도달 가능하다.
+
+test("upsertGolden: 재캡처에 P2b 필드가 없으면 기존 것을 보존한다(드리프트 락 유실 방지)", () => {
+  const withP2b = {
+    id: "abc", at: "2026-08-09T00:00:00Z", tool: "Edit", edit: "e", spec: "s", defers: [],
+    evidenceContext: "src/a.ts:1: impl",
+    expectedAfterEvidence: { verdict: "pass", missing: [], reason: "근거로 확인" },
+    expected: { verdict: "block", missing: ["케이스 A"], reason: "누락" },
+  };
+  const recaptured = {
+    id: "abc", at: "2026-08-09T01:00:00Z", tool: "Edit", edit: "e", spec: "s", defers: [],
+    expected: { verdict: "block", missing: ["케이스 A"], reason: "누락" },
+  };
+  const [only] = upsertGolden([withP2b], recaptured);
+  assert.equal(only.at, "2026-08-09T01:00:00Z", "1차 판정·시각은 최신으로 교체");
+  assert.equal(only.evidenceContext, "src/a.ts:1: impl", "P2b 근거가 유실되면 안 된다");
+  assert.deepEqual(only.expectedAfterEvidence, { verdict: "pass", missing: [], reason: "근거로 확인" });
+});
+
+test("upsertGolden: 재캡처에 P2b 필드가 있으면 최신으로 교체한다(보존이 갱신을 막지 않는다)", () => {
+  const old = {
+    id: "abc", tool: "Edit", edit: "e", spec: "s", defers: [], at: "2026-08-09T00:00:00Z",
+    evidenceContext: "옛 근거", expectedAfterEvidence: { verdict: "pass", missing: [], reason: "old" },
+    expected: { verdict: "block", missing: [], reason: "" },
+  };
+  const fresh = { ...old, at: "2026-08-09T01:00:00Z", evidenceContext: "새 근거", expectedAfterEvidence: { verdict: "block", missing: ["X"], reason: "new" } };
+  const [only] = upsertGolden([old], fresh);
+  assert.equal(only.evidenceContext, "새 근거");
+  assert.deepEqual(only.expectedAfterEvidence, { verdict: "block", missing: ["X"], reason: "new" });
+});
+
+test("상수 관계 락: 근거수집 시간 예산은 grep 1회 최악값보다 커야 한다", () => {
+  // 아니면 START_DEADLINE_MS <= 0이 되어 첫 grep 1회만 돌고 P2b가 사실상 무력화되는데,
+  // 어떤 테스트도 실패하지 않는다(다른 상수쌍에 이미 같은 종류의 락을 걸어둔 이유와 동일).
+  assert.ok(
+    EVIDENCE_TIME_BUDGET_MS > GREP_TIMEOUT_MS,
+    `예산(${EVIDENCE_TIME_BUDGET_MS}) <= grep 타임아웃(${GREP_TIMEOUT_MS}) — 첫 심볼 외 전부 스킵된다`,
+  );
+});
+
+test("parseSince: 극단 상대값은 Invalid Date가 아니라 null(모듈이 선언한 '해석 실패=명시적 실패' 불변식)", () => {
+  // Date 객체 자체는 truthy라 `if (!since)` 가드를 통과해버리고, 이후 toISOString()에서
+  // RangeError로 CLI가 죽었다(security-auditor 실측 재현).
+  assert.equal(parseSince("99999999999d"), null);
+  assert.equal(parseSince("999999999999999h"), null);
 });

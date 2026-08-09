@@ -82,7 +82,11 @@ export function classifySpawnPermissionError(msg: string): string | null {
     "🐢 claude 실행 파일 spawn이 거부됐습니다(EPERM/EACCES) — 실행 환경의 보안정책이 SDK가 사용하는\n" +
     "   기본 claude.exe를 차단했을 가능성이 있습니다.\n" +
     "   확인: claude --version (성공하면 그 경로가 이미 허용된 설치본입니다)\n" +
-    "   우회: GBC_CLAUDE_PATH=<허용된 claude 실행파일 경로> 환경변수로 지정하세요.\n" +
+    "   우회: GBC_CLAUDE_PATH 환경변수에 허용된 claude 실행파일 경로를 지정하세요.\n" +
+    "     · macOS/Linux(bash/zsh): export GBC_CLAUDE_PATH=\"/path/to/cli.js\"\n" +
+    "     · Windows(PowerShell): $env:GBC_CLAUDE_PATH=\"C:\\path\\to\\cli.js\"\n" +
+    "   실측 확인된 우회: 번들 claude.exe 대신 npm(JS) 설치본의 cli.js를 지정하면 spawn 차단을\n" +
+    "     우회할 수 있습니다(예: node_modules/@anthropic-ai/claude-code/cli.js).\n" +
     "   그래도 안 되면 환경 관리자(보안 담당)에게 claude 실행파일 허용 예외를 요청하세요."
   );
 }

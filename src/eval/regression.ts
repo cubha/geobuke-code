@@ -15,44 +15,100 @@ interface Case {
   expected: "block" | "pass";
   /** 0.9.3 ST3/ST5 — [현재 파일 상태] 골든 커버리지(fa-support 도그푸딩 오탐 케이스). 생략 시 미제공. */
   current_file?: string;
+  /**
+   * 2026-08-07 RCA 후속 — true면 이 케이스의 결과는 baseline 하드게이트(pass<results.length→exit1)
+   * 분모에서 제외되고 별도 known-fail로 보고만 된다. 8000바이트 절단 결함(P3)·grep 근거주입(P2b)
+   * 착수 전/도중에는 실패가 "회귀"가 아니라 "아직 안 고친 알려진 결함"이라 릴리스를 막으면 안 되기
+   * 때문 — 단 결과는 항상 로그에 찍혀 언제 해소됐는지(GREEN 전환) 관측 가능하다.
+   */
+  expectedFailing?: boolean;
+  /**
+   * 0.12.0 F-13 — P2b 근거주입 2단계 판정을 eval에서 재현하기 위한 `[관련 코드 근거(grep)]` 원문.
+   * 있으면 judge에 그대로 실어 "근거가 주어졌을 때 모델이 옳게 판정하는가"를 잰다. 이 필드 없이는
+   * eval도 골든 replay와 똑같이 1차 판정만 재현해, 이 배치의 유일한 판정 로직 변경에 무신호였다.
+   */
+  evidence_context?: string;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
 const casesPath = process.argv[2] ?? join(here, "..", "..", "test", "cases.json");
 const cases: Case[] = JSON.parse(readFileSync(casesPath, "utf8"));
 
+/**
+ * 전체 실행 상한(0.12.0 F-7). `verify.sh --eval`은 `VERIFY_TIMEOUT_EVAL`(900s) 가드를 두지만
+ * **실제 발행 게이트는 `package.json`의 `prepublishOnly`**(build && test && eval)이고 그쪽엔 아무
+ * 가드가 없었다 — 키 없는 CLI 폴백에서 케이스당 최대 30s라 응답이 안 오면 `npm publish`가 무한정
+ * 매달린다. 셸 `timeout` 명령에 의존하면 macOS·Windows에서 깨지므로 하네스 자신이 상한을 쥔다.
+ * `unref()` — 이 타이머가 이벤트 루프를 살려두어 정상 종료를 막지 않게 한다(판정이 다 끝나면
+ * 대기 중인 다른 작업이 없어 프로세스가 즉시 끝나야 한다).
+ */
+const EVAL_TIMEOUT_MS = Number(process.env.GBC_EVAL_TIMEOUT_MS ?? 900_000);
+
 console.log(`트랜스포트: ${selectedTransport()}  ·  케이스 ${cases.length}개  ·  파일 ${casesPath}\n`);
 
-const results: Array<{ id: string; expected: string; got: string; ok: boolean; ms: number; reason: string }> = [];
+const results: Array<{ id: string; expected: string; got: string; ok: boolean; ms: number; reason: string; expectedFailing: boolean }> = [];
+
+// 타임아웃 감시는 results 선언 **뒤**에 둔다 — 발화 시 누적 결과를 요약해 출력해야 하기 때문
+// (scope-critic 지적, 2026-08-09: 그냥 죽으면 어디까지 통과했는지 알 수 없어 원인 추적이 막힌다).
+// `unref()`로 이벤트 루프는 붙잡지 않으므로 정상 완주 시엔 아무 영향이 없고, 아래 scope 회귀
+// 구간까지 같은 상한이 덮인다(둘 다 이 타이머보다 뒤에서 await된다).
+const evalDeadline = setTimeout(() => {
+  const done = results.length;
+  const ok = results.filter((r) => r.ok).length;
+  console.error(
+    `\n⚠️ eval 전체 타임아웃(${EVAL_TIMEOUT_MS}ms) 초과 — 중단합니다.\n` +
+      `   진행: ${done}/${cases.length}케이스 완료(통과 ${ok}) · 미완 ${cases.length - done}건\n` +
+      `   ${done > 0 ? `마지막 완료: ${results[done - 1].id}` : "첫 케이스도 완료되지 않음"}\n` +
+      `   트랜스포트=${selectedTransport()} · 키 없는 CLI 폴백은 케이스당 최대 30s라 느립니다.\n` +
+      `   상한 조정: GBC_EVAL_TIMEOUT_MS=<ms>`,
+  );
+  process.exit(1);
+}, EVAL_TIMEOUT_MS);
+evalDeadline.unref();
 
 for (const c of cases) {
   const t0 = Date.now();
   // 회귀는 defer 없는 기본 상태에서의 판정 품질을 본다.
-  const v = await judge(c.plan_spec, c.edit_diff, [], [], { currentFileContent: c.current_file });
+  const v = await judge(c.plan_spec, c.edit_diff, [], [], {
+    currentFileContent: c.current_file,
+    evidenceContext: c.evidence_context,
+  });
   const ms = Date.now() - t0;
   const ok = v.verdict === c.expected;
-  results.push({ id: c.id, expected: c.expected, got: v.verdict, ok, ms, reason: v.reason });
-  console.log(`${ok ? "✓" : "✗"} ${c.id}: exp=${c.expected} got=${v.verdict} (${ms}ms) — ${v.reason}`);
+  results.push({ id: c.id, expected: c.expected, got: v.verdict, ok, ms, reason: v.reason, expectedFailing: !!c.expectedFailing });
+  const mark = c.expectedFailing ? (ok ? "✓(해소됨!)" : "⚠known-fail") : ok ? "✓" : "✗";
+  console.log(`${mark} ${c.id}: exp=${c.expected} got=${v.verdict} (${ms}ms) — ${v.reason}`);
 }
 
-const tp = results.filter((r) => r.expected === "block" && r.got === "block").length;
-const tn = results.filter((r) => r.expected === "pass" && r.got === "pass").length;
-const fp = results.filter((r) => r.expected === "pass" && r.got === "block").length;
-const fn = results.filter((r) => r.expected === "block" && r.got === "pass").length;
+// known-fail(expectedFailing) 케이스는 하드게이트 분모에서 제외 — P2b/P3 착수 전 알려진 결함이
+// 릴리스를 막지 않게 하되, 결과는 항상 로그·별도 요약에 남겨 해소 시점을 관측 가능하게 한다.
+const hard = results.filter((r) => !r.expectedFailing);
+const knownFail = results.filter((r) => r.expectedFailing);
+
+const tp = hard.filter((r) => r.expected === "block" && r.got === "block").length;
+const tn = hard.filter((r) => r.expected === "pass" && r.got === "pass").length;
+const fp = hard.filter((r) => r.expected === "pass" && r.got === "block").length;
+const fn = hard.filter((r) => r.expected === "block" && r.got === "pass").length;
 const avg = Math.round(results.reduce((s, r) => s + r.ms, 0) / results.length);
 const pass = tp + tn;
 
 console.log(`\n===== 결과 =====`);
 console.log(`TP=${tp}(누락차단) TN=${tn}(정상통과) FP=${fp}(오탐) FN=${fn}(미탐)`);
-console.log(`정확도 ${pass}/${results.length}  ·  평균지연 ${avg}ms`);
+console.log(`정확도 ${pass}/${hard.length}  ·  평균지연 ${avg}ms`);
+if (knownFail.length > 0) {
+  console.log(
+    `\nknown-fail(비차단, P2b/P3 대상) ${knownFail.length}건: ` +
+      knownFail.map((r) => `${r.ok ? "✓해소" : "✗예상대로실패"} ${r.id}`).join(", "),
+  );
+}
 
 // 회귀 기준: 전건 통과(baseline은 스파이크 8/8에서 시작해 0.9.3 ST5에서 fa-support 4유형 3건 추가).
-// 미달 시 비정상 종료로 신호.
-if (pass < results.length) {
-  console.error(`\n⚠️ 회귀 실패: ${pass}/${results.length} (baseline ${results.length}/${results.length} 미달)`);
+// knownFail은 분모에서 제외(2026-08-07 RCA — 위 hard 필터 참조). 미달 시 비정상 종료로 신호.
+if (pass < hard.length) {
+  console.error(`\n⚠️ 회귀 실패: ${pass}/${hard.length} (baseline ${hard.length}/${hard.length} 미달)`);
   process.exit(1);
 }
-console.log(`\n✅ 회귀 통과: baseline 유지`);
+console.log(`\n✅ 회귀 통과: baseline 유지(hard ${hard.length}건)`);
 
 // ===== scope(축A/rung) 회귀 — 0.5.2 골든셋 보강 =====
 // 축A·rung2는 "탐색 없인 판정 불가"라 grepContext를 케이스에 정답라벨과 함께 담는다(스파이크

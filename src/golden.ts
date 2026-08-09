@@ -47,6 +47,16 @@ export function goldenCaseId(tool: string, edit: string, spec: string): string {
   return createHash("sha256").update(`${tool}\x00${edit}\x00${spec}`).digest("hex").slice(0, 16);
 }
 
+/**
+ * 이 골든 케이스가 P2b 2단계까지 재현할 대상인가(0.12.0 F-13, 순수 술어). 근거 원문과 재판정
+ * 기대가 **둘 다** 있어야 한다 — 기준 없이 재판정만 돌리면 비교할 것이 없어 신호가 안 되고,
+ * 근거 없이 기준만 있으면 1차 프롬프트와 동일해져 2단계를 재현하는 것이 아니다. 공백뿐인 근거도
+ * 제외한다: `judge`의 `buildUserMessage`가 trim 후 비면 섹션 자체를 생략하므로 1차와 같아진다.
+ */
+export function needsP2bReplay(c: Partial<GoldenCase>): boolean {
+  return Boolean(c.evidenceContext && c.evidenceContext.trim() && c.expectedAfterEvidence);
+}
+
 /** 기대 vs 재판정 비교. decisionFlip=하드, missingChanged=정보용. */
 export function diffVerdict(expected: GoldenExpected, actual: VerdictLike): GoldenDiff {
   const decisionFlip = expected.verdict !== actual.verdict;
@@ -57,9 +67,26 @@ export function diffVerdict(expected: GoldenExpected, actual: VerdictLike): Gold
   return { decisionFlip, missingChanged, match: !decisionFlip && !missingChanged };
 }
 
-/** id 디둑 upsert — 같은 id면 교체(최신 expected), 없으면 추가. */
+/**
+ * id 디둑 upsert — 같은 id면 교체(최신 expected), 없으면 추가.
+ *
+ * ⚠️ 단 **P2b 필드(`evidenceContext`/`expectedAfterEvidence`)는 새 캡처에 없으면 기존 것을
+ * 보존한다**(0.12.0, advisor 실측 지적). `goldenCaseId`는 `sha256(tool, edit, spec)`이라 근거가
+ * 키에 없다 — 같은 편집을 다시 캡처했는데 그 회차엔 grep 매치가 0이면(= P2b 미발화) 새 케이스엔
+ * 두 필드가 없고, 통째 교체하면 드리프트 락이 **조용히 사라진다**. 그러면 replay는 2단계를
+ * 그만두고 "flip 0"을 출력한다 — F-13이 막으려던 거짓안심이 읽기가 아니라 쓰기 경로에서 재현되며,
+ * 문서화된 워크플로(`gbc gate reset` 후 같은 편집 재수행)로 실제 도달 가능하다.
+ *
+ * 보존이 옳은 이유: 그 쌍은 "이 근거를 실으면 judge가 X를 낸다"는 **자기완결적** 기준이라, 이번
+ * 회차에 매치가 났는지와 무관하게 유효하다. 새 캡처가 두 필드를 가져오면 그때는 최신으로 교체한다.
+ */
 export function upsertGolden(cases: GoldenCase[], c: GoldenCase): GoldenCase[] {
-  return [...cases.filter((x) => x.id !== c.id), c];
+  const prev = cases.find((x) => x.id === c.id);
+  const merged: GoldenCase =
+    prev && c.evidenceContext === undefined && prev.evidenceContext !== undefined
+      ? { ...c, evidenceContext: prev.evidenceContext, expectedAfterEvidence: prev.expectedAfterEvidence }
+      : c;
+  return [...cases.filter((x) => x.id !== c.id), merged];
 }
 
 /** replay 결과 집계 — 플립/정보용변화/일치 카운트 + 플립 케이스 목록. */

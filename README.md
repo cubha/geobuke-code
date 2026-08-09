@@ -285,8 +285,8 @@ gbc verify                                                   # 사다리 리포�
 | `gbc gate review` | 차단이 도출한 누락 케이스 체크리스트 보기 |
 | `gbc gate review --spec <ref> --defer <ref>` | 누락 케이스 일괄 분류(승인→spec / 미룸→defer) |
 | `gbc gate snapshot <on\|off\|status\|list\|clear>` | 골든셋 캡처 토글·조회(판정 드리프트 회귀락) |
-| `gbc gate snapshot replay [--samples N]` | 골든 케이스 재판정(temp 0)·드리프트 시 exit 1 |
-| `gbc metrics [--all] [--json]` | 계측 리포트(M1~M3 + **진짜 M1** 사후대조). `--all`=등록 repo들의 events.jsonl 병합 집계(진짜 M1은 단일 repo 전용) |
+| `gbc gate snapshot replay [--samples N]` | 골든 케이스 재판정(temp 0)·드리프트 시 exit 1. 근거주입이 걸렸던 케이스는 2단계(`<id>#p2b`)까지 재현 |
+| `gbc metrics [--all] [--json] [--since <시각>]` | 계측 리포트(M1~M3 + **진짜 M1** 사후대조 + **[P2b] 근거주입** 롤업). `--all`=등록 repo들의 events.jsonl 병합 집계(진짜 M1은 단일 repo 전용). `--since`=시간창 제한(`2026-08-09T00:00:00Z` 또는 `7d`/`24h`/`30m`) |
 | `gbc score [--json]` | **(A-모드)** extraction⨝events 사후대조 채점 — 세션 편집이 통과 당시 명세를 커버했는지 모델 판정(후보당 1호출). 결과는 `.gbc/scores.json` → `gbc metrics` 위반율에 반영 |
 | `gbc repos add [경로]` | 크로스-repo 레지스트리에 추가(생략 시 현재 폴더) |
 | `gbc repos list` | 등록된 repo + 각 repo의 미해결 defer 수 + **게이트 건강성**(hook 부재/구식 코호트) |
@@ -422,6 +422,14 @@ gbc repos list                # 등록 현황 + 각 repo 미해결 defer 수
 게이트는 모든 결정을 `.gbc/events.jsonl`(append-only, 메타데이터만 — 코드 본문 미기록)에 기록한다. `gbc metrics`로 집계를 본다. 끄려면 `GBC_NO_METRICS=1`.
 
 여러 repo의 게이트 ROI를 한 번에 보려면 `gbc metrics --all` — 등록된 repo들의 `events.jsonl`을 병합 집계한다. 병합 시 각 이벤트의 `specHash`를 repo 경로로 태깅해 **repo간 boilerplate 명세 해시 충돌**을 막는다(태깅 없이 합치면 한 repo의 통과 뒤 다른 repo의 변이가 M1 churn으로 오집계된다; M2/M3는 세션 UUID 키라 원래 안전). symlink로 등록된 경로는 거부한다(등록 경로 밖 임의 디렉터리 읽기 차단).
+
+### 근거주입(P2b) 롤업
+
+차단 판정은 곧바로 확정되지 않는다 — 누락으로 지목된 케이스의 심볼을 저장소에서 `grep`해 실측 근거를 찾고, 매치가 있으면 그 근거를 함께 실어 **한 번 더 판정**한다(절단선 밖·다른 파일에 이미 구현된 형제 케이스를 판정 모델이 못 보던 것이 오탐의 실측 주지분이었다). `gbc metrics`의 `[P2b]` 블록이 그 발화·전환율·제약을 보여준다.
+
+**무엇이 외부로 나가는가** — 근거는 `judge`(Anthropic haiku) 프롬프트에 실린다. 즉 차단 판정마다 **여러 파일의 코드 조각**이 전송된다(기존에도 편집 본문과 편집 대상 파일 상태는 전송됐다). 조립 단계에서 시크릿 패턴을 마스킹하고 `--include` allowlist·`--exclude-dir`가 `.env`·`node_modules` 등을 애초에 스캔 대상에서 뺀다. 게이트 자체를 끄려면 `GBC_NO_GATE=1`. ⚠️ 근거는 저장소 파일에서 오므로, 저장소에 쓸 수 있는 주체는 그 텍스트로 판정에 영향을 줄 수 있다(모델 지시 `심볼 존재 ≠ 구현 증거`가 완화 장치이지 구조적 통제는 아니다).
+
+**적용 범위(과대주장 금지)** — grep 대상 확장자(`.ts`/`.js`/`.tsx`/`.jsx`)에서만 동작하고, `Write`(전체 덮어쓰기)와 케이스 구현을 **삭제하는** `Edit`에서는 억제된다(그 코드는 곧 사라지므로 구현 증거가 아니다). 근거가 "헬퍼 함수가 존재한다" 수준이면 판정은 뒤집히지 않는다 — 호출·배선이 근거에 없으면 여전히 누락으로 본다. 수집은 grep 8회·8초 예산 안에서만 돌고, 초과분은 "못 봤음"으로 정직 표기된다(매치 없음과 구분).
 
 | 지표 | 관측 | B-모드 신뢰도 |
 |---|---|---|

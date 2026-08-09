@@ -163,8 +163,40 @@ export interface GoldenCase {
   defers: string[];
   /** 캡처 시점 완료(resolved) defer 스냅샷 — judge [이미 완료된 항목] 입력 재현용(선택, 하위호환) */
   resolved?: string[];
-  /** 캡처 시점 judge 출력(드리프트 비교 기준) */
+  /**
+   * 캡처 시점 편집 대상 파일 상태(선택, 하위호환·2026-08-07 RCA 후속). 이전 골든은 이 필드가 없어
+   * undefined — replay가 [현재 파일 상태] 섹션 없이 재현되던 기존 동작 그대로(골든 오탐 결함 자체가
+   * 이 필드 부재였다: replay가 그 섹션을 못 봐 절단 로직 변경에 무신호).
+   *
+   * 🔒 저장 형태(0.12.0 ship 전 security-auditor 후속) — `readCurrentFile`이 읽은 원본(최대 1MB)을
+   * 그대로 담지 않는다. 두 가지를 거쳐 저장한다:
+   *  ⓐ `redactSecrets` — 이 값은 **디스크에 영속**된다(전송만 되는 것과 노출면이 다르다). 같은
+   *    릴리스의 `evidenceContext`가 조립 시점에 마스킹을 거치므로 형제 필드가 안 거칠 이유가 없다.
+   *  ⓑ `MAX_CURRENT_FILE`(8000) 절단 — `buildUserMessage`가 judge에 실을 때 어차피 같은 값으로
+   *    자른다. 그 뒤는 replay 충실도에 **기여할 수 없는** 죽은 용량인데, 골든셋엔 크기 상한도
+   *    로테이션도 없어(events.jsonl·extraction.jsonl과 달리) 케이스마다 최대 1MB가 무한 누적됐다.
+   *    절단본을 저장해야 replay가 캡처 당시 judge가 본 것과 바이트 동일해진다.
+   */
+  currentFileContent?: string;
+  /** 캡처 시점 judge 출력(드리프트 비교 기준) — **1차 판정 원본**. P2b 재판정으로 덮지 않는다. */
   expected: GoldenExpected;
+  /**
+   * P2b 근거주입 2단계 재판정에 실제로 실린 `[관련 코드 근거(grep)]` 원문(선택, 0.12.0 F-13).
+   * 재판정이 안 돌았거나 fail-open으로 폐기됐으면 없음 — 구버전 골든과 같은 모양이라 하위호환.
+   *
+   * ⚠️ 이 필드가 골든 replay가 P2b를 **재현할 수 있는 유일한 통로**다. 그 전까지 replay는 judge를
+   * 1회만 호출해, 이 배치의 유일한 판정 로직 변경(근거주입)에 완전히 무신호였다 — 이 프로젝트가
+   * 이미 한 번 겪은 사각지대(replay가 currentFileContent를 안 실어 "flip 0" 거짓안심)의 재발.
+   *
+   * 🔒 프라이버시 — 이 값은 `edit`·`currentFileContent`와 달리 **저장소 전역 grep 결과**다(편집
+   * 대상 파일에 한정되지 않는다). 골든셋 자체가 이미 편집 본문을 담는 opt-in 로컬 자산이고
+   * `.gbc/`는 gitignore이지만, 커밋하면 노출 범위가 한 파일이 아니라 여러 파일이 된다는 점이
+   * 다르다. `realGrep`의 `--include` allowlist와 `--exclude-dir`가 `.env`·`node_modules` 등을
+   * 애초에 스캔 대상에서 배제하는 것이 1차 방어선이다.
+   */
+  evidenceContext?: string;
+  /** 위 근거를 실었을 때의 재판정 결과(선택) — replay의 2단계 비교 기준. */
+  expectedAfterEvidence?: GoldenExpected;
 }
 
 /**
