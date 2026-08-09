@@ -133,6 +133,14 @@ export interface BlockClassification {
   fpCandidate: boolean;
   /** 시간창에 타 세션 gate 이벤트 혼입 — CLI 이벤트(session="") 귀속이 불확실함을 정직 표기 */
   ambiguous: boolean;
+  /**
+   * 이 block이 침묵 누락(missing 비어있지 않음)이었는가 — spec-empty block(missing=[])과 분리
+   * 집계하기 위한 파티션 태그(2026-08-07, RCA 후속). classifyBlockOutcome의 판정 로직 자체는
+   * 불변 — 원본 GateEvent.missing을 그대로 옮겨 적을 뿐이다.
+   */
+  hasMissing: boolean;
+  /** 이 창을 닫은 적용판정(pass/cached/failopen/block-repeat)의 시각. 미적용(overridden/abandoned)이면 undefined. */
+  appliedAt?: string;
 }
 
 /** 세션 1건의 LLM 사후대조 채점 결과(gbc score가 산출·저장, computeRealM1이 집계). */
@@ -351,9 +359,35 @@ export function classifyBlockOutcome(events: GateEvent[]): BlockClassification[]
         outcome === "repeated-unresolved" ||
         outcome === "acknowledged-fp",
       ambiguous,
+      hasMissing: (b.missing?.length ?? 0) > 0,
+      appliedAt: applied ? sorted[endIdx].at : undefined,
     });
   }
   return out;
+}
+
+/**
+ * self-corrected 중 block→적용판정이 threshold 미만으로 닫힌 건수(2026-08-07, RCA 후속).
+ * self-corrected는 fpCandidate가 아니다(위 타입 주석 — 정상도 오탐도 아닌 모호) — 이 함수는 그
+ * 판정을 바꾸지 않는다. 다만 "N초 만에 지적된 여러 케이스를 전부 구현했을 리 없다"는 물리적
+ * 근거가 있는 하위집합만 별도 매그니튜드로 드러낸다(오탐율에 합산하지 않음, 카운트만).
+ */
+/**
+ * 교차repo(`gbc metrics --all`) 오탐 분류 — **repo별로 계산해 합친다**(0.12.0 F-6). 병합 이벤트에
+ * `classifyBlockOutcome`을 직접 돌리면 안 된다: CLI 이벤트는 `session=""`이라 repo 경계를 넘어
+ * 뒤 repo의 spec-add가 앞 repo block의 해소로 오귀속된다(해소 탐색이 전방 스캔이라 시각 순서만
+ * 맞으면 걸린다). 이 규율은 그동안 호출부 주석에만 있어, 한 줄만 되돌려도 아무 테스트가 울지
+ * 않았다 — 함수로 고정해 회귀락을 건다.
+ */
+export function classifyBlockOutcomeAcrossRepos(perRepoEvents: GateEvent[][]): BlockClassification[] {
+  return perRepoEvents.flatMap((evts) => classifyBlockOutcome(evts));
+}
+
+export function countFastSelfCorrected(classifications: BlockClassification[], thresholdMs = 120_000): number {
+  return classifications.filter((c) => {
+    if (c.outcome !== "self-corrected" || !c.appliedAt) return false;
+    return new Date(c.appliedAt).getTime() - new Date(c.at).getTime() < thresholdMs;
+  }).length;
 }
 
 /**

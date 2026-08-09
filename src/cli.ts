@@ -27,7 +27,9 @@ import {
   joinBySession,
   selectScoringCandidates,
   classifyBlockOutcome,
+  classifyBlockOutcomeAcrossRepos,
   computeRealM1,
+  countFastSelfCorrected,
   loadScores,
   saveScores,
   formatEditsForScore,
@@ -41,7 +43,7 @@ import { resolveRunCommand, runRunnerCommand } from "./run.js";
 import { statVerifyResults } from "./junit.js";
 import { readPendingReview, clearPendingReview, resolveRefs } from "./review.js";
 import { isStopHintMuted, setStopHintMuted, isGoldenCapture, setGoldenCapture } from "./config.js";
-import { loadGolden, clearGolden, diffVerdict, summarizeReplay } from "./golden.js";
+import { loadGolden, clearGolden, diffVerdict, summarizeReplay, needsP2bReplay } from "./golden.js";
 import type { ReplayOutcome } from "./golden.js";
 import type { VerdictKind } from "./types.js";
 import { selectedTransport, judgeM1Violation } from "./judge.js";
@@ -51,7 +53,7 @@ import type { CaseVerdict } from "./types.js";
 import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER, assessRepoHealth, GBC_SKILL_NAMES } from "./install.js";
 import { readProjectSettings } from "./notice.js";
 import { refreshCacheIfStale } from "./version.js";
-import { logEvent, computeMetrics, tagEventsWithRepo, readEventsMerged, eventsPath } from "./metrics.js";
+import { logEvent, computeMetrics, tagEventsWithRepo, readEventsMerged, eventsPath, parseSince, filterEventsSince } from "./metrics.js";
 import type { GateEvent, Metrics } from "./metrics.js";
 import type { EventKind } from "./metrics.js";
 import { nowIso, nowStamp } from "./time.js";
@@ -115,8 +117,14 @@ function curHash(cwd: string): string {
 }
 
 /** CLI 변이 이벤트를 events.jsonl에 기록(메트릭 상관용). specHash는 변이 전 값을 넘긴다. */
-function logCli(cwd: string, kind: EventKind, specHash: string): void {
-  logEvent(cwd, { at: nowIso(), session: "", specHash, kind });
+/**
+ * missing(2026-08-07, RCA 후속): gate-ack 전용 — "게이트가 잘못 도출한 누락을 이미완료로 인정"하는
+ * 유일한 사후 감사 채널인데, 무엇을 인정했는지가 기록에 없어 20/425(4.7%)라는 수치의 *내용*을 감사할
+ * 수 없었다(측정 렌즈 지적). 다른 kind(spec-add 등)는 이미 자기 의미가 명확해 대상 아님 — 호출부가
+ * gate-ack일 때만 넘긴다.
+ */
+function logCli(cwd: string, kind: EventKind, specHash: string, missing?: string[]): void {
+  logEvent(cwd, { at: nowIso(), session: "", specHash, kind, ...(missing ? { missing } : {}) });
 }
 
 // ---------- gbc init ----------
@@ -566,6 +574,8 @@ async function cmdGateSnapshot(cwd: string, args: string[]): Promise<void> {
     console.log(
       "🐢 골든셋 캡처 ON — 이제 judge가 평가하는 cache-miss 편집이 .gbc/golden.json에 기록됩니다.\n" +
         "   ⚠️ 캡처되는 편집 본문은 'gbc gate snapshot replay' 시 Anthropic API(haiku)로 전송됩니다.\n" +
+        "   ⚠️ 차단 판정에 grep 근거주입이 걸리면 그 근거(저장소 여러 파일의 코드 조각)도 함께\n" +
+        "      캡처·전송되며, replay는 그 케이스에 judge를 2회 호출합니다(비용 2배).\n" +
         "   (특정 편집을 캡처하려면 'gbc gate reset' 후 그 편집 수행. 끄기: gbc gate snapshot off)",
     );
   } else if (sub === "off") {
@@ -624,7 +634,12 @@ async function cmdGateSnapshotReplay(cwd: string, args: string[]): Promise<void>
     const votes: Record<VerdictKind, number> = { pass: 0, block: 0 };
     let lastMissing: string[] = [];
     for (let i = 0; i < samples; i++) {
-      const v = await judge(c.spec, c.edit, c.defers, c.resolved ?? [], { temperature: 0 });
+      // currentFileContent(2026-08-07 RCA 후속): 없으면(구버전 골든·신규 파일 캡처) undefined 그대로
+      // 전달 — [현재 파일 상태] 섹션 생략은 기존 동작과 동일(judge.ts buildUserMessage 계약).
+      const v = await judge(c.spec, c.edit, c.defers, c.resolved ?? [], {
+        temperature: 0,
+        currentFileContent: c.currentFileContent,
+      });
       votes[v.verdict]++;
       lastMissing = v.missing;
     }
@@ -633,6 +648,28 @@ async function cmdGateSnapshotReplay(cwd: string, args: string[]): Promise<void>
     outcomes.push({ id: c.id, tool: c.tool, expected: c.expected.verdict, actual, diff });
     const mark = diff.decisionFlip ? "❌FLIP" : diff.missingChanged ? "·missing변화" : "✓";
     console.log(`  ${mark} ${c.tool} ${c.id}: ${c.expected.verdict}→${actual}`);
+
+    // P2b 2단계 재현(0.12.0 F-13) — 근거를 실었을 때의 판정까지 잠근다. 이게 없으면 근거주입은
+    // 프롬프트·조립·억제 규칙을 아무리 바꿔도 replay가 "flip 0"을 돌려주는 무신호 구간이었다.
+    // 별도 outcome(`<id>#p2b`)으로 집계해 1차 판정 드리프트와 원인을 섞지 않는다.
+    if (!needsP2bReplay(c)) continue;
+    const p2bVotes: Record<VerdictKind, number> = { pass: 0, block: 0 };
+    let p2bMissing: string[] = [];
+    for (let i = 0; i < samples; i++) {
+      const v = await judge(c.spec, c.edit, c.defers, c.resolved ?? [], {
+        temperature: 0,
+        currentFileContent: c.currentFileContent,
+        evidenceContext: c.evidenceContext,
+      });
+      p2bVotes[v.verdict]++;
+      p2bMissing = v.missing;
+    }
+    const p2bActual: VerdictKind = p2bVotes.block > p2bVotes.pass ? "block" : "pass";
+    const p2bExpected = c.expectedAfterEvidence!;
+    const p2bDiff = diffVerdict(p2bExpected, { verdict: p2bActual, missing: p2bMissing });
+    outcomes.push({ id: `${c.id}#p2b`, tool: c.tool, expected: p2bExpected.verdict, actual: p2bActual, diff: p2bDiff });
+    const p2bMark = p2bDiff.decisionFlip ? "❌FLIP" : p2bDiff.missingChanged ? "·missing변화" : "✓";
+    console.log(`  ${p2bMark} ${c.tool} ${c.id}#p2b(근거주입): ${p2bExpected.verdict}→${p2bActual}`);
   }
 
   const s = summarizeReplay(outcomes);
@@ -718,7 +755,8 @@ function cmdGateReview(cwd: string, args: string[]): void {
     const dup: string[] = [];
     for (const c of items) {
       if (tryAdd(c)) {
-        logCli(cwd, kind, beforeHash);
+        // gate-ack만 missing[]=[인정한 케이스] 기록 — logCli 주석 참조.
+        logCli(cwd, kind, beforeHash, kind === "gate-ack" ? [c] : undefined);
         added.push(c);
       } else {
         dup.push(c);
@@ -750,16 +788,27 @@ function cmdGateReview(cwd: string, args: string[]): void {
  * M1 churn축은 specHash 단독키라, 태깅 없이 합치면 repo간 boilerplate spec 해시가 충돌해
  * 한 repo의 통과 뒤 다른 repo의 변이가 churn으로 오집계된다(M2/M3는 session-UUID 키라 안전).
  */
-function loadMetricsEvents(cwd: string, all: boolean): { events: GateEvent[]; scope: string; source: string } {
+/**
+ * perRepoEvents(2026-08-07, RCA 후속): --all에서 오탐 행동신호(classifyBlockOutcome)를 계산하려면
+ * repo별 *원본*(specHash 태깅 전) 이벤트가 필요하다 — merged `events`는 tagEventsWithRepo가 specHash만
+ * 재기록할 뿐 session은 그대로라, CLI 이벤트(session="")가 여러 repo에서 시간순으로 뒤섞이면
+ * classifyBlockOutcome의 시간창 스캔이 타 repo의 spec-add/gate-ack를 이 repo의 block 해소로
+ * 오귀속할 수 있다(기존 `ambiguous` 플래그는 동시 *세션* 혼입만 잡지 repo 경계는 모른다). 그래서
+ * repo별로 classifyBlockOutcome을 각각 돌리고 *분류 결과*(BlockClassification[])만 이어붙인다 —
+ * 병합 후 계산 금지, repo별 계산 후 집계(M1 churn축이 specHash 충돌을 태깅으로 막는 것과 동일 원칙,
+ * 대상만 다르다).
+ */
+function loadMetricsEvents(
+  cwd: string,
+  all: boolean,
+): { events: GateEvent[]; perRepoEvents: GateEvent[][]; scope: string; source: string } {
   if (!all) {
-    return {
-      // readEventsMerged(0.10.6 A4) — 로테이션된 .1 세대가 있으면 현행 세대와 병합해 읽는다(metrics.ts).
-      events: readEventsMerged(cwd),
-      scope: cwd,
-      source: ".gbc/events.jsonl",
-    };
+    // readEventsMerged(0.10.6 A4) — 로테이션된 .1 세대가 있으면 현행 세대와 병합해 읽는다(metrics.ts).
+    const events = readEventsMerged(cwd);
+    return { events, perRepoEvents: [events], scope: cwd, source: ".gbc/events.jsonl" };
   }
   const merged: GateEvent[] = [];
+  const perRepoEvents: GateEvent[][] = [];
   let included = 0;
   let skipped = 0;
   for (const repo of loadRepos()) {
@@ -775,7 +824,9 @@ function loadMetricsEvents(cwd: string, all: boolean): { events: GateEvent[]; sc
         skipped++;
         continue;
       }
-      merged.push(...tagEventsWithRepo(readEventsMerged(abs), abs));
+      const repoEvents = readEventsMerged(abs);
+      perRepoEvents.push(repoEvents);
+      merged.push(...tagEventsWithRepo(repoEvents, abs));
       included++;
     } catch {
       skipped++; // repo별 읽기 실패는 조용히 skip(fail-silent)
@@ -783,12 +834,62 @@ function loadMetricsEvents(cwd: string, all: boolean): { events: GateEvent[]; sc
   }
   return {
     events: merged,
+    perRepoEvents,
     scope: `전체 ${included}개 repo 병합${skipped ? ` (${skipped}개 skip: 부재/이벤트없음)` : ""}`,
     source: "등록 repo들의 .gbc/events.jsonl(repo 태깅 병합)",
   };
 }
 
-function printMetricsReport(scope: string, source: string, m: Metrics, real: RealM1 | null): void {
+/** 자가수정 비중이 이 이상이면 경고 라인을 붙인다(2026-08-07) — "숫자만 있으면 또 안 본다"(RCA 교훈). */
+const SELF_CORRECTED_WARN_THRESHOLD = 0.4;
+
+/** falsePositive 블록 렌더(단일repo·교차repo 공용) — 오탐율·outcome breakdown·자가수정 한계고지. */
+function renderFalsePositiveBlock(fp: RealM1["falsePositive"], selfCorrectedFast: number): string {
+  const pct = (r: number | null) => (r === null ? "—(표본 0)" : `${(r * 100).toFixed(1)}%`);
+  const classifiable = fp.totalBlocks - fp.failedOpen;
+  const selfCorrectedRatio = classifiable > 0 ? fp.selfCorrected / classifiable : 0;
+  const fastNote = selfCorrectedFast > 0 ? ` (2분내 재발화 ${selfCorrectedFast}건 — 그 시간에 구현했을 리 없다는 참고신호, 오탐율 미합산)` : "";
+  const warnLine =
+    selfCorrectedRatio > SELF_CORRECTED_WARN_THRESHOLD
+      ? `\n    🚨 자가수정 비중 ${(selfCorrectedRatio * 100).toFixed(1)}% — 오탐 여부 점검 권장(임계 ${SELF_CORRECTED_WARN_THRESHOLD * 100}% 초과)`
+      : "";
+  return (
+    `    오탐율(행동신호): ${pct(fp.rate)} — block ${fp.totalBlocks}건 중 오탐후보 ${fp.fpCandidates}${fp.failedOpen ? ` (판정불능 ${fp.failedOpen} 분모제외)` : ""}\n` +
+    `      해소(spec보강) ${fp.resolvedSpec} · 자가수정 ${fp.selfCorrected}${fastNote} · 재발화미해소 ${fp.repeatedUnresolved} · 오탐인정(ack) ${fp.acknowledgedFp} · 무시 ${fp.overridden} · 포기 ${fp.abandoned}${fp.ambiguous ? ` · 귀속불확실 ${fp.ambiguous}` : ""}\n` +
+    `    ⚠️ 자가수정은 오탐과 "정탐이지만 무시(고무도장)"를 구분하지 못한다 — 방향성 참고만.${warnLine}`
+  );
+}
+
+/**
+ * P2b 근거주입 롤업 렌더(0.12.0 F-2). 세 축을 한 블록에 모은다: ⓐ재판정이 실제로 돈 횟수와 그중
+ * 판정이 뒤집힌 비율(= P2b가 오탐을 해소했다는 유일한 정량 신호), ⓑ근거가 예산/상한에 걸려 온전히
+ * 실리지 못한 횟수(= 위 수치를 얼마나 믿을지), ⓒ파일 절단율(= P2b가 존재해야 하는 이유의 크기).
+ * 표본 0을 0%로 위장하지 않는다 — "아직 안 돌았다"와 "돌았는데 효과 0"은 전혀 다른 결론이다.
+ */
+function renderEvidenceBlock(e: Metrics["evidence"]): string {
+  const flip = e.flipRate === null ? "—(표본 0)" : `${(e.flipRate * 100).toFixed(1)}%`;
+  const truncPct = e.withFile ? ` (${((e.truncated / e.withFile) * 100).toFixed(1)}%)` : "";
+  const caveat =
+    e.budgetExhausted > 0 || e.droppedCases > 0
+      ? `\n    ⚠️ 근거가 온전히 실리지 못한 판정이 있다 — grep예산 소진 ${e.budgetExhausted}건${e.budgetExhaustedByTime ? `(시간 ${e.budgetExhaustedByTime}·개수 ${e.budgetExhausted - e.budgetExhaustedByTime})` : ""} · 상한초과 생략 ${e.droppedCases}케이스(그만큼 위 전환율은 과소평가)`
+      : "";
+  const failLine =
+    e.failed > 0
+      ? `\n    🚨 근거수집 실패 ${e.failed}건 — P2b가 그만큼 무력화된 상태(grep 부재·권한 등 환경 점검 필요)`
+      : "";
+  return (
+    `    근거주입 ${e.used}건 · 판정전환 ${e.flipped}건 (전환율 ${flip})\n` +
+    `    파일절단(8000자 초과) ${e.truncated}/${e.withFile}건${truncPct} — 절단면 뒤 기구현 형제가 1차 judge에 불가시${caveat}${failLine}`
+  );
+}
+
+function printMetricsReport(
+  scope: string,
+  source: string,
+  m: Metrics,
+  real: RealM1 | null,
+  opts: { selfCorrectedFast: number; crossRepo: boolean; silentOmission: RealM1["falsePositive"] },
+): void {
   console.log(`🐢 거북이 게이트 계측 — ${scope}
   이벤트 총 ${m.totalEvents}건  (${source})
 
@@ -804,44 +905,110 @@ function printMetricsReport(scope: string, source: string, m: Metrics, real: Rea
     ⚠️ ${m.m1.note}
 
   [scope] 축A 파급반경 · 축B 최소구현 사다리 (사후 판정)
-    판정 ${m.scope.total}건 · 파급반경 broken ${m.scope.rippleBroken} · 사다리 걸림 ${m.scope.rungHits} · 탐색불가 미평가 ${m.scope.degraded}`);
+    판정 ${m.scope.total}건 · 파급반경 broken ${m.scope.rippleBroken} · 사다리 걸림 ${m.scope.rungHits} · 탐색불가 미평가 ${m.scope.degraded}
 
-  if (real) {
-    const fp = real.falsePositive;
-    const v = real.violation;
-    const pct = (r: number | null) => (r === null ? "—(표본 0)" : `${(r * 100).toFixed(1)}%`);
+  [P2b] 근거주입 재판정 — block을 grep 실측 근거로 재검토
+${renderEvidenceBlock(m.evidence)}`);
+
+  if (!real) return;
+  // 전체(spec-empty block 포함) + 침묵-누락(missing>0) 부분집합 — 후자가 RCA가 다루는 모집단이다.
+  // fast-self-corrected 매그니튜드는 부분집합에서만 의미 있다(missing=[]엔 "구현할 케이스" 자체가
+  // 없어 "N초만에 구현했을 리 없다"는 논거가 성립 안 함 — 그래서 전체 라인엔 0으로 억제한다).
+  const fpBlock = renderFalsePositiveBlock(real.falsePositive, 0);
+  const silentBlock = renderFalsePositiveBlock(opts.silentOmission, opts.selfCorrectedFast);
+  if (opts.crossRepo) {
+    // --all: violation(위반율)은 extraction·scores가 repo-로컬 자산이라 여전히 미지원. 오탐 행동신호는
+    // repo별 계산 후 집계(loadMetricsEvents 주석 참조)라 여기서는 항상 산출된다.
     console.log(`
+  [오탐 행동신호 — 교차repo 병합(repo별 계산 후 집계)]
+  전체:
+${fpBlock}
+  침묵-누락(missing>0) 부분집합 — spec-empty block 제외, RCA 대상 모집단:
+${silentBlock}
+    ⚠️ 위반율(LLM 사후대조)은 --all 미지원(extraction·scores는 repo-로컬) — 단일 repo에서 'gbc metrics' 실행`);
+    return;
+  }
+  const v = real.violation;
+  const pct = (r: number | null) => (r === null ? "—(표본 0)" : `${(r * 100).toFixed(1)}%`);
+  console.log(`
   [진짜 M1 — A2 사후대조 (extraction⨝events)]
     세션: 전체 ${real.sessions.total} · 채점가능(A-mode) ${real.sessions.scorable}
-    오탐율(행동신호): ${pct(fp.rate)} — block ${fp.totalBlocks}건 중 오탐후보 ${fp.fpCandidates}${fp.failedOpen ? ` (판정불능 ${fp.failedOpen} 분모제외)` : ""}
-      해소(spec보강) ${fp.resolvedSpec} · 자가수정 ${fp.selfCorrected} · 재발화미해소 ${fp.repeatedUnresolved} · 오탐인정(ack) ${fp.acknowledgedFp} · 무시 ${fp.overridden} · 포기 ${fp.abandoned}${fp.ambiguous ? ` · 귀속불확실 ${fp.ambiguous}` : ""}
+  전체:
+${fpBlock}
+  침묵-누락(missing>0) 부분집합 — spec-empty block 제외, RCA 대상 모집단:
+${silentBlock}
     위반율(LLM 사후대조): ${pct(v.rate)} — 채점 ${v.scored}건 중 위반 ${v.violated}${v.unscored ? ` (미채점 ${v.unscored})` : ""}${
       v.scored === 0 && real.sessions.scorable > 0 ? "\n      → 'gbc score'로 A-mode 세션 채점 실행" : ""
     }${real.sessions.scorable === 0 ? "\n      → 채점 대상 없음('gbc run' A-mode 세션이 extraction을 남김)" : ""}`);
-  }
 }
 
 function cmdMetrics(args: string[]): void {
   const cwd = process.cwd();
   const all = args.includes("--all");
-  const { events, scope, source } = loadMetricsEvents(cwd, all);
+  // --since(0.12.0 F-1) — 시간창 제한. 전체 재계산은 기존 표본이 신규 행동을 희석해 개선 여부와
+  // 무관하게 "변화 없음"으로 읽히게 만든다(RCA 후속 PR#2 착수조건). 해석 실패는 **명시적 실패**로
+  // 끝낸다 — 조용히 전체 집계로 떨어지면 희석된 수치를 신규 창 수치로 오독하게 되고, 그건 필터가
+  // 없는 것보다 나쁘다.
+  const sinceIdx = args.indexOf("--since");
+  const sinceSpec = sinceIdx >= 0 ? args[sinceIdx + 1] : undefined;
+  let since: Date | null = null;
+  if (sinceIdx >= 0) {
+    since = sinceSpec ? parseSince(sinceSpec) : null;
+    if (!since) {
+      console.error(
+        `🐢 --since 값을 해석하지 못했습니다: ${sinceSpec ?? "(없음)"}\n` +
+          `   사용: --since 2026-08-09T00:00:00Z  또는  --since 7d / 24h / 30m`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const loaded = loadMetricsEvents(cwd, all);
+  const source = loaded.source;
+  // 시간창은 병합 이벤트와 repo별 이벤트에 **동시에** 걸어야 한다 — 한쪽만 거르면 computeMetrics와
+  // classifyBlockOutcome이 서로 다른 모집단을 보게 된다.
+  const events = since ? filterEventsSince(loaded.events, since) : loaded.events;
+  const perRepoEvents = since ? loaded.perRepoEvents.map((evts) => filterEventsSince(evts, since)) : loaded.perRepoEvents;
+  const scope = since ? `${loaded.scope} · ${since.toISOString()} 이후` : loaded.scope;
   const m = computeMetrics(events);
 
-  // 진짜 M1(A2 사후대조) — 단일 repo 전용(extraction·scores는 repo-로컬 자산이라 --all 병합 부적합).
-  // 오탐율(행동신호)은 events만으로 항상 산출, 위반율은 scores.json(gbc score 산출물) 있을 때만.
-  let real: RealM1 | null = null;
+  // 오탐율(행동신호)은 events만으로 항상 산출(A-mode 무관). 위반율은 scores.json(gbc score 산출물)이
+  // 있을 때만이고 scores·extraction 둘 다 repo-로컬 자산이라 --all에서는 계산하지 않는다(joins=[]·
+  // scores=[]로 넘겨 violation.scored=0·sessions.total=0 — 0으로 뻥튀기가 아니라 "여기선 안 잰다"는
+  // 정직 표기, printMetricsReport가 crossRepo 분기에서 그 라인 자체를 숨긴다).
+  let real: RealM1;
+  let classifications: ReturnType<typeof classifyBlockOutcome>;
   if (!all) {
     const exPath = extractionPath(cwd);
     const records = parseExtraction(existsSync(exPath) ? readFileSync(exPath, "utf8") : "");
-    real = computeRealM1(joinBySession(events, records), classifyBlockOutcome(events), loadScores(cwd));
+    classifications = classifyBlockOutcome(events);
+    real = computeRealM1(joinBySession(events, records), classifications, loadScores(cwd));
+  } else {
+    // repo별 계산 후 집계 — loadMetricsEvents의 perRepoEvents 주석 참조(병합 이벤트에 직접
+    // classifyBlockOutcome을 돌리면 CLI 이벤트 session="" 교차repo 오귀속 위험).
+    classifications = classifyBlockOutcomeAcrossRepos(perRepoEvents);
+    real = computeRealM1([], classifications, []);
   }
+  // 침묵-누락(missing>0) 부분집합 — spec-empty block과 분리 집계(RCA 대상 모집단, ST2 명세).
+  // computeRealM1을 필터된 classifications로 재호출해도 violation/sessions은 joins·scores에서만
+  // 유도되므로(classifications 무관) falsePositive만 갈린다 — 부작용 없이 재사용 가능.
+  const silentOmissionClassifications = classifications.filter((c) => c.hasMissing);
+  const silentOmission = computeRealM1([], silentOmissionClassifications, []).falsePositive;
+  const selfCorrectedFast = countFastSelfCorrected(silentOmissionClassifications);
 
   if (args.includes("--json")) {
-    console.log(JSON.stringify(real ? { ...m, realM1: real } : m, null, 2));
+    console.log(
+      JSON.stringify(
+        { ...m, realM1: real, silentOmissionFalsePositive: silentOmission, selfCorrectedFast, crossRepo: all, since: since?.toISOString() ?? null },
+        null,
+        2,
+      ),
+    );
     return;
   }
 
-  printMetricsReport(scope, source, m, real);
+  printMetricsReport(scope, source, m, real, { selfCorrectedFast, crossRepo: all, silentOmission });
 }
 
 // ---------- gbc score (A2 사후대조 채점, 0.8.0) ----------
@@ -1193,14 +1360,22 @@ function usage(): void {
   gbc gate snapshot <on|off|status|list|clear>
                                       골든셋 캡처 토글·상태(판정 드리프트 회귀락, 로컬 전용)
   gbc gate snapshot replay [--samples N]
-                                      골든 케이스 재판정(temp 0)·드리프트 시 exit 1
+                                      골든 케이스 재판정(temp 0)·드리프트 시 exit 1.
+                                      근거주입이 걸렸던 케이스는 2단계(<id>#p2b)까지 재현 —
+                                      그 케이스는 judge 호출이 2배(× --samples)다.
   gbc run "<프롬프트>" [--yes] [--model <m>] [--max-turns <N>]
                                       (A-mode 스파이크) agent-sdk in-process 게이트 실행 — PreToolUse=gbc
                                       게이트(Edit/Write만 판정), canUseTool=사람-pause. agent-sdk 별도 설치 필요.
                                       ⚠️--yes=모든 도구 자동승인(Bash 포함 무관문) — 비대화형 전용, 신뢰 프롬프트만
   gbc tui [--model <m>]               풀스크린 TUI — ink/react/agent-sdk optionalDependency
                                       (engines>=22, 미설치 시 npm i ink react @anthropic-ai/claude-agent-sdk)
-  gbc metrics [--all] [--json]        계측 리포트(M1~M3 + 진짜 M1 사후대조; --all=등록 repo 병합)
+  gbc metrics [--all] [--json] [--since <시각>]
+                                      계측 리포트(M1~M3 + 진짜 M1 사후대조 + [P2b] 근거주입 롤업;
+                                      --all=등록 repo 병합). 오탐율은 전체/침묵-누락(missing>0)
+                                      부분집합을 나눠 표시한다(후자가 오탐 RCA 대상 모집단).
+                                      --since: 그 시각 이후만 집계(ISO 8601 또는 7d/24h/30m).
+                                      배포 전후 비교 시 필수 — 전체 재계산은 기존 표본이 신규
+                                      행동을 희석해 변화를 못 보이게 한다.
   gbc score [--json]                  (A-mode) extraction⨝events 사후대조 채점 — 세션 편집이 통과 당시
                                       명세를 커버했는지 모델 판정(후보당 1호출, 결과는 metrics에 반영)
   gbc repos add [경로]                크로스-repo 레지스트리에 추가(생략 시 현재 폴더)

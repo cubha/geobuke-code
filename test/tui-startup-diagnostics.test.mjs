@@ -98,3 +98,18 @@ test("spawn EACCES: 동일 분기(권한 거부 변형)", () => {
 test("spawn 관련 없는 EPERM/EACCES 문자열은 오분류하지 않는다(spawn 앵커 필수)", () => {
   assert.equal(classifyTuiStartupError("Error: EACCES: permission denied, open '/etc/passwd'", VERSIONS), null);
 });
+
+// ===== 0.12.0 ST13 — PowerShell 환경변수 형식 + cli.js 실측 우회경로 병기
+// (project_field_report_eperm_0_9_3.md: GBC_CLAUDE_PATH에 JS설치본 cli.js 지정 → 실측 성공,
+// 2026-07-15). 사외 Windows 사용자는 대부분 PowerShell을 쓰는데 기존 안내는 셸무관 `KEY=value`
+// 표기뿐이라 PowerShell에서 그대로 실행하면 실패한다(구문 상이). =====
+
+test("spawn EPERM: PowerShell 환경변수 설정 구문($env:) 병기", () => {
+  const out = classifyTuiStartupError("Error: spawn EPERM", VERSIONS);
+  assert.match(out, /\$env:GBC_CLAUDE_PATH/);
+});
+
+test("spawn EPERM: 실측 우회경로(JS 설치본 cli.js) 구체 예시 병기", () => {
+  const out = classifyTuiStartupError("Error: spawn EPERM", VERSIONS);
+  assert.match(out, /cli\.js/);
+});

@@ -129,7 +129,18 @@ export const MAX_GREP_SYMBOLS = 8;
 /** grep 총 타임아웃(ms) — Stop 훅 내부 예산. 초과 시 그때까지 모은 것만 사용. */
 export const GREP_TIMEOUT_MS = 4000;
 
-const IDENT_KEYWORDS = new Set([
+/**
+ * `realGrep`이 실제로 스캔하는 확장자 — **단일 소스**(0.12.0 F-4). `evidence.ts`의 근거수집기가
+ * 명세 케이스에서 파일명 심볼을 뽑을 때 같은 목록을 import해 쓴다. 각자 하드코딩하면 한쪽만
+ * 바뀌는 순간 "뽑았는데 grep이 그 파일을 아예 안 보는" 심볼이 생겨 예산만 먹는다(gbc Stop 훅
+ * scope 판정 rung2 "중복 존재" + scope-critic이 독립적으로 같은 경계를 지적, 2026-08-09).
+ * 회귀락: `test/evidence.test.mjs`의 드리프트 락 2건이 이 목록과 추출 결과의 동일성을 잠근다.
+ */
+export const GREP_INCLUDE_EXTS = ["ts", "js", "tsx", "jsx"];
+
+// export: evidence.ts(2026-08-07 RCA 후속)가 명세 케이스 텍스트의 식별자 추출에서도 동일
+// 불용어 집합을 재사용 — 두 곳이 각자 비슷한 리스트를 유지하면 드리프트한다(single source).
+export const IDENT_KEYWORDS = new Set([
   "function", "const", "let", "var", "class", "interface", "type", "return", "export",
   "import", "async", "await", "true", "false", "null", "void", "string", "number", "boolean",
   "if", "else", "for", "while", "new", "this", "from",
@@ -162,8 +173,12 @@ export function extractSymbols(editText: string): string[] {
  * 자기파일 비교용 정규 경로(0.6.1 R2) — 심링크를 실경로로 해소해 동일 실체를 같은 키로 만든다.
  * realpath 실패(파일 미존재: Write 직전 신규 파일·브로큰 링크)는 기존 lexical resolve 폴백 —
  * 비교 정밀도만 낮아질 뿐 수집 동작은 보존(비차단 권고 경로라 보안 경계 아님).
+ *
+ * export: `evidence.ts`의 F-8 삭제-근거 필터가 **같은 대조**(편집 대상 vs grep 매치 파일)를 하므로
+ * 단일 소스로 공유한다(0.12.0, security-auditor 지적). 각자 구현했더니 이쪽의 심링크 해소가
+ * 저쪽엔 없어, 심링크 경유 경로에서 필터가 조용히 fail-open했다.
  */
-function canonicalPath(cwd: string, p: string): string {
+export function canonicalPath(cwd: string, p: string): string {
   const abs = resolve(cwd, p);
   try {
     return realpathSync(abs);
@@ -182,12 +197,15 @@ export interface GrepCollectResult {
 /** grep 실행 주입(테스트용). 미지정 시 실제 `grep -rn`. */
 export type GrepRunner = (symbol: string, cwd: string) => Promise<string>;
 
-async function realGrep(symbol: string, cwd: string): Promise<string> {
+// export: evidence.ts(2026-08-07 RCA 후속 ST11)가 게이트 근거수집기에서 동일 grep 실행자를
+// 재사용 — self-file 필터링은 collectGrepContext(호출부)의 로직이지 realGrep 자체엔 없어 안전하게
+// 공유 가능(순수 I/O 실행부만 단일화, 필터 판단은 각자 호출부가 따로 한다).
+export async function realGrep(symbol: string, cwd: string): Promise<string> {
   try {
     const { stdout } = await execFileAsync(
       "grep",
       [
-        "-rn", "--include=*.ts", "--include=*.js", "--include=*.tsx", "--include=*.jsx",
+        "-rn", ...GREP_INCLUDE_EXTS.map((e) => `--include=*.${e}`),
         "--exclude-dir=node_modules", "--exclude-dir=.git", "--exclude-dir=dist", "--exclude-dir=.gbc",
         // "--"로 옵션 종결 — extractSymbols가 [A-Za-z_] 앵커라 현재는 "-" 시작 심볼이 없지만,
         // 패턴 확장 시 심볼이 grep 플래그로 해석되는 회귀를 방어(보안 QUICK W1).

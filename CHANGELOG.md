@@ -2,6 +2,50 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.12.0] - 2026-08-09
+
+**게이트 오탐 근본수정 — grep 근거주입(P2b) + 측정인프라 + 회귀락 + EPERM 안내 개선**
+
+RCA(braintrust 5렌즈 적대검토) 결과 침묵-누락 오탐의 실측 지분 4/5는 "절단선 밖 다른 파일에 이미 구현된 형제 케이스가 judge()에 불가시"였다. 이를 grep 근거 재주입으로 근본수정하고, 오탐 측정 인프라·회귀락을 함께 배치했다.
+
+### Added
+- **grep 근거주입(P2b, 유일한 판정 로직 변경)** — block 판정 시 missing 케이스 텍스트에서 심볼을 추출(`extractCaseSymbols`)해 저장소를 grep(`collectCaseEvidence`, self-file 포함)하고, 매치가 있으면 근거를 `judge()`에 재주입해 2단계 재판정한다. 매치 0건이면 재판정 생략(status quo 유지, 최악이 "개선 없음"이지 회귀가 아닌 안전 설계). `Write`(전체 덮어쓰기)는 근거수집을 억제한다(존재 자체를 구현 증거로 오논증하는 것을 방지). GATE_SYSTEM에 "심볼 존재 ≠ 구현 증거" 규칙 명시.
+- **오탐 행동신호 측정** — `gbc metrics --all`에 `hasMissing`/`appliedAt`/`countFastSelfCorrected` 반영, `GateEvent.fileBytes`/`truncated`(파일 크기·절단 여부 계측), `evidenceUsed`/`evidenceFlip`(근거주입 발화·판정변경 계측), gate-ack에 `missing[]` 기록.
+- **회귀락** — `test/cases.json`에 대형파일 절단 관련 대칭 4쌍(13~15번 + known-fail 12번) 추가, `npm run eval`(`src/eval/regression.ts`)에 `expectedFailing` 하네스. `verify.sh --eval` opt-in 플래그 + `package.json prepublishOnly`에 편입(발행 시 강제 게이트).
+- **EPERM 안내 개선** — spawn 거부 안내에 PowerShell 환경변수 설정 구문(`$env:GBC_CLAUDE_PATH`)과 실측 확인된 우회 경로(npm JS 설치본 `cli.js` 직접 지정) 구체 예시 병기(사외 Windows 현장보고 반영).
+
+### Fixed
+- 게이트 오탐의 근본원인이었던 "타 파일 기구현 형제 케이스 불가시" 문제를 절단 확대가 아닌 근거주입으로 해소(절단 확대는 예산·지연 트레이드오프만 키우고 근본원인을 안 건드림).
+
+**적용 범위(정직 표기)** — 근거주입은 grep `--include` 대상 확장자(`.ts`/`.js`/`.tsx`/`.jsx`)에서만 동작하고, `Write`(전체 덮어쓰기)와 `Edit`이 케이스 구현을 **삭제하는** 편집에서는 억제된다. 또한 근거가 "헬퍼가 존재한다" 수준이면 판정은 뒤집히지 않는다 — 자기완결형 구현(마이그레이션 블록 등)이 근거로 잡힐 때 오탐이 해소된다(eval 16↔17 대조군으로 실측).
+
+### Added (발행 전 검증 후속 — `/analyze` 도출 15건 반영)
+- **P2b 드리프트 감지** — `GoldenCase.evidenceContext`/`expectedAfterEvidence` 캡처 + `gbc gate snapshot replay`가 근거주입 2단계까지 재현(`<id>#p2b` 별도 outcome). `npm run eval`에 `evidence_context` 지원 + 대조 케이스 3건(16 근거有→pass / 17 동일편집 근거無→block / 18 심볼만 존재→block). **이 릴리스의 유일한 판정 로직 변경에 자동 검증이 0이던 상태를 해소**한다.
+- **`gbc metrics --since <ISO|7d|24h|30m>`** — 시간창 집계. 기존 표본이 신규 신호를 희석하던 문제(실측: 7일 창 block 83건 vs 전체 434건). 해석 실패는 조용한 전체집계 폴백이 아니라 명시적 실패(exit 1).
+- **`[P2b]` 계측 블록** — `gbc metrics`에 근거주입 발화·판정전환율·근거절단·grep예산 소진(개수/시간 구분)·수집실패·파일절단률 표시. `/gbc-monitor` 해석 가이드에도 항목 추가.
+
+### Fixed (발행 전 검증 후속)
+- **Edit 삭제형 self-file 근거 누수** — 편집 전 파일을 grep하는 구조상, 케이스 구현을 지우는 `Edit`이 자기가 지울 코드를 "이미 구현됨" 근거로 인용해 정당한 block을 뒤집을 수 있었다. `computeDeletionScope`로 삭제 범위와 겹치는 매치를 제외(`Write` 억제와 대칭).
+- **grep 대상 밖 확장자 심볼이 예산만 소모** — `GREP_INCLUDE_EXTS` 단일 소스화. 매치가 원천 불가능한 토큰(`auth.py`·`config.json`)이 `MAX_GREP_SYMBOLS`(8)를 먹어 정작 매치 가능한 심볼이 조회되지 못하던 문제.
+- **`evidenceFlip` 과소집계** — 길이 비교라 "개수는 같고 내용만 바뀐" 교체를 놓쳤다 → `sameMissingSet` 재사용(⑧ block-repeat 판정과 동일 기준).
+- **근거 총량 무제한** — `MAX_EVIDENCE_CONTEXT_CHARS`(8000) + 케이스 라벨 200자 캡. 심볼 캐시로 여러 케이스가 같은 매치를 복제해 최대 40KB가 프롬프트에 실릴 수 있었다.
+- **근거수집 지연 무계** — `EVIDENCE_TIME_BUDGET_MS`(8000). 남은 예산이 grep 1회 최악값보다 작으면 시작 자체를 막아 **선언값이 곧 실제 상한**이 되게 했다.
+- **근거수집 실패가 게이트를 열던 경로** — 수집 예외가 `runHookSafely`까지 올라가 fail-open ALLOW가 되던 것을 흡수해 원래 block을 유지하고 `evidenceFailed`로 계측(재판정 실패는 종전대로 값검사).
+- **예산 소진과 "근거 없음"이 구분 불가** — `budgetSkipped` + 사유(`count`/`time`) 기록. 해소법이 서로 다르다.
+- **API 트랜스포트 타임아웃 부재** — `GATE_API_LIMITS`(30s/1회) vs `BATCH_API_LIMITS`(60s/2회) 분화. 게이트 상한이 `gbc verify`의 코드 독해 판정까지 강제해 정당한 판정을 `unverifiable`로 강등시키던 결합을 끊고 회귀락으로 잠갔다.
+- **`prepublishOnly` eval 무한대기** — `GBC_EVAL_TIMEOUT_MS`(기본 15분) + 타임아웃 시 누적 결과·마지막 완료 케이스 출력 후 종료.
+- **교차repo "repo별 계산 후 집계" 불변식 무회귀락** — `classifyBlockOutcomeAcrossRepos` 추출 + 병합 계산이 실제로 다른 답을 준다는 것까지 단정하는 회귀락.
+- **골든 재캡처가 P2b 드리프트 락을 지우던 문제** — `goldenCaseId`에 근거가 없어, 같은 편집을 매치 0 상태로 다시 캡처하면 `upsertGolden` 전체 교체가 `evidenceContext`/`expectedAfterEvidence`를 날리고 replay가 조용히 2단계를 그만뒀다(=F-13이 막으려던 거짓안심의 쓰기 경로 재현). 새 캡처에 P2b 필드가 없으면 기존 것을 보존한다.
+- **근거에 실린 시크릿 미마스킹** — grep 근거는 **저장소 전역** 결과라 `currentFileContent`(편집 대상 1개 파일)보다 노출면이 넓은데, 소스에 하드코딩된 키가 심볼 매치로 걸리면 그대로 외부 API 프롬프트와 `.gbc/golden.json`에 실렸다. 조립 단계에서 `redactSecrets`(값만 마스킹, 줄·경로는 보존) 적용.
+- **삭제-근거 필터의 심링크 fail-open** — `relKey`가 자매 함수 `canonicalPath`의 realpath 해소를 물려받지 않아, 심링크 경유 편집 경로가 grep 실경로와 어긋나면 "이번 편집이 지우는 줄"이 안 걸러지고 근거로 남았다(= block→pass 오판, 이 가드의 설계 방향과 반대). `canonicalPath` 재사용으로 단일 소스화.
+- **`--since` 극단값 크래시** — `--since 99999999999d`가 `Invalid Date`(객체는 truthy)로 가드를 통과해 `toISOString()`에서 `RangeError`. 모듈이 선언한 "해석 실패=명시적 실패" 불변식대로 null 처리.
+- **골든셋 영속 저장분의 마스킹·크기 누락** — ST6이 `GoldenCase.currentFileContent`를 추가하면서 편집 대상 파일 원문(최대 1MB)이 마스킹 없이 `.gbc/golden.json`에 **영속 저장**되고 있었다. 같은 릴리스의 형제 필드 `evidenceContext`는 조립 시점에 `redactSecrets`를 거치는데 이쪽만 원문이었고, 골든셋엔 `events.jsonl`·`extraction.jsonl`과 달리 크기 상한도 로테이션도 없어 케이스마다 최대 1MB가 무한 누적됐다. 저장 직전 `redactSecrets` + `MAX_CURRENT_FILE`(8000) 절단을 적용한다 — 그 뒤는 `buildUserMessage`가 어차피 자르므로 replay 충실도에 기여할 수 없는 죽은 용량이고, 절단본을 저장해야 replay가 캡처 당시 judge가 본 것과 바이트 동일해진다. `fileBytes`/`truncated` 계측은 **절단 이전 원본**을 재는 별개 축이라 영향받지 않음을 회귀락으로 잠갔다.
+- **주석 정확성** — `defaultGateDeps`의 judge dynamic import를 "핫패스 zero-dep 보존"으로 설명하던 근거 정정. `cli.ts`가 `judge.js`를 정적 import하는 단일 진입점이라 이미 무효였고, 실익은 단위테스트 격리 하나다. `GoldenCase.currentFileContent` 주석도 정정(judge에 실린 8000자 절단본이 아니라 최대 1MB 원본).
+
+검증: `verify.sh --full` **1030/1030**(빌드 포함) · `npm run eval` hard **17/17**(FP0·FN0, known-fail 1건은 설계 의도대로) · scope 회귀 6/6 · scope-critic 전 SubTask(실결함 8건 포착·오탐 4건 반증 기록) · advisor(골든 재캡처 락 유실 포착) · security-auditor **Critical 0**(Warning 3건 중 시크릿 마스킹·심링크 fail-open 2건 반영, 프롬프트 인젝션 1건은 구조적 한계로 문서화).
+
+**재init 안내** — hook 계약(`settings.json` 배선·`src/hook.ts`)은 무변경이라 **게이트 동작에는 재init이 불필요**하다. 다만 `/gbc-monitor` 스킬 문서에 `[P2b]` 해석 항목이 추가됐고 `gbc init`은 SKILL.md를 **내용 복사**하므로, 기존 설치처에서 그 항목을 보려면 `gbc init --yes` 재실행이 필요하다(선택 사항).
+
 ## [0.11.3] - 2026-08-03
 
 **0.11.2 시안 divergence 잔여 2건 근본수정 — mini 타이틀 버전 이중표기·말풍선 클립보드 공백**

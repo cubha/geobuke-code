@@ -365,6 +365,72 @@ test("block 없는 이벤트만 → 빈 배열", () => {
   assert.deepEqual(classifyBlockOutcome([gateEv({ decision: "pass" }), cliEv("spec-add")]), []);
 });
 
+// ===== hasMissing/appliedAt 파티션 태그 (2026-08-07, RCA 후속) =====
+
+test("hasMissing: missing 비어있으면 false, 케이스 있으면 true — 판정 로직은 불변", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "s1", at: "2026-08-07T00:00:00Z", decision: "block", missing: [] }),
+    gateEv({ session: "s1", at: "2026-08-07T00:01:00Z", decision: "pass" }),
+    gateEv({ session: "s2", at: "2026-08-07T00:02:00Z", decision: "block", missing: ["케이스A"] }),
+    gateEv({ session: "s2", at: "2026-08-07T00:03:00Z", decision: "pass" }),
+  ]);
+  assert.equal(cls.length, 2);
+  assert.equal(cls[0].hasMissing, false, "spec-empty block(missing=[])");
+  assert.equal(cls[0].outcome, "self-corrected", "hasMissing과 outcome 판정은 독립");
+  assert.equal(cls[1].hasMissing, true, "침묵 누락 block(missing 비어있지 않음)");
+});
+
+test("hasMissing: missing 필드 자체가 없어도(undefined) false", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "s", at: "2026-08-07T00:00:00Z", decision: "block" }),
+    gateEv({ session: "s", at: "2026-08-07T00:01:00Z", decision: "pass" }),
+  ]);
+  assert.equal(cls[0].hasMissing, false);
+});
+
+test("appliedAt: 적용판정(pass)이 창을 닫으면 그 시각을 기록", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "s", at: "2026-08-07T00:00:00Z", decision: "block", missing: ["x"] }),
+    gateEv({ session: "s", at: "2026-08-07T00:02:00Z", decision: "pass" }),
+  ]);
+  assert.equal(cls[0].appliedAt, "2026-08-07T00:02:00Z");
+});
+
+test("appliedAt: 미적용(overridden/abandoned)은 undefined — Δt 계산 불가를 정직 표기", () => {
+  const cls = classifyBlockOutcome([gateEv({ session: "s", at: "2026-08-07T00:00:00Z", decision: "block", missing: ["x"] })]);
+  assert.equal(cls[0].outcome, "abandoned");
+  assert.equal(cls[0].appliedAt, undefined);
+});
+
+// ===== countFastSelfCorrected (2026-08-07, RCA 후속 — self-corrected 매그니튜드 하위집계) =====
+import { countFastSelfCorrected } from "../dist/scoring.js";
+
+test("countFastSelfCorrected: self-corrected 중 threshold 미만으로 닫힌 것만 센다", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "s1", at: "2026-08-07T00:00:00Z", decision: "block", missing: ["a"] }),
+    gateEv({ session: "s1", at: "2026-08-07T00:00:30Z", decision: "pass" }), // 30s — fast
+    gateEv({ session: "s2", at: "2026-08-07T01:00:00Z", decision: "block", missing: ["b"] }),
+    gateEv({ session: "s2", at: "2026-08-07T01:10:00Z", decision: "pass" }), // 10min — slow
+  ]);
+  assert.equal(countFastSelfCorrected(cls, 120_000), 1, "30s만 120s 미만");
+});
+
+test("countFastSelfCorrected: self-corrected가 아닌 outcome(resolved-spec 등)은 threshold와 무관하게 제외", () => {
+  const cls = classifyBlockOutcome([
+    gateEv({ session: "s", at: "2026-08-07T00:00:00Z", decision: "block", missing: ["a"] }),
+    cliEv("spec-add", { at: "2026-08-07T00:00:10Z" }),
+    gateEv({ session: "s", at: "2026-08-07T00:00:20Z", decision: "pass" }),
+  ]);
+  assert.equal(cls[0].outcome, "resolved-spec");
+  assert.equal(countFastSelfCorrected(cls, 120_000), 0, "10초여도 resolved-spec은 self-corrected가 아니므로 제외");
+});
+
+test("countFastSelfCorrected: appliedAt 없는(미적용) self-corrected는 없음 — abandoned/overridden은 애초에 self-corrected가 아니라 자연히 0", () => {
+  const cls = classifyBlockOutcome([gateEv({ session: "s", at: "2026-08-07T00:00:00Z", decision: "block", missing: ["a"] })]);
+  assert.equal(cls[0].outcome, "abandoned");
+  assert.equal(countFastSelfCorrected(cls), 0);
+});
+
 // ===== computeRealM1 (ST4 집계) =====
 import { computeRealM1 } from "../dist/scoring.js";
 
@@ -467,4 +533,34 @@ test("judgeM1Violation: mock invoke 라운드트립 + 호출 실패는 unscored(
   });
   assert.equal(fail.verdict, "unscored", "호출 실패 = 정직한 미채점");
   assert.match(fail.reason, /실패/);
+});
+
+import { classifyBlockOutcomeAcrossRepos } from "../dist/scoring.js";
+
+// ── F-6(0.12.0): "repo별 계산 후 집계" 불변식에 회귀락이 없었다 ──
+// 교차repo(--all)에서 block 해소 판정을 **병합 이벤트에 직접** 돌리면, CLI 이벤트의 session=""이
+// repo 경계를 넘어 뒤 repo의 spec-add를 앞 repo block의 해소로 오귀속한다. 지금까지 이 규율은
+// 주석과 호출부 한 줄에만 있었다 — 누가 `classifyBlockOutcome(events)`로 되돌려도 테스트가 침묵했다.
+
+const blockEv = (at, session, missing) => ({ at, session, specHash: "h", kind: "gate", decision: "block", missing });
+const passEv = (at, session) => ({ at, session, specHash: "h", kind: "gate", decision: "pass" });
+const specAddEv = (at) => ({ at, session: "", specHash: "h", kind: "spec-add" });
+
+test("classifyBlockOutcomeAcrossRepos: repo별로 계산해 합친다 — 병합 후 계산과 결과가 다르다(오귀속 차단)", () => {
+  // repoA: block → (사이에 아무 명세 변경 없이) 적용판정 = self-corrected
+  // repoB: 그 사이 시각의 spec-add(session="" CLI 이벤트, 자기 repo엔 block 없음)
+  const repoA = [blockEv("2026-08-09T00:00:00Z", "sA", ["케이스 X"]), passEv("2026-08-09T00:20:00Z", "sA")];
+  const repoB = [specAddEv("2026-08-09T00:10:00Z")];
+  const perRepo = classifyBlockOutcomeAcrossRepos([repoA, repoB]);
+  const merged = classifyBlockOutcome([...repoA, ...repoB]);
+  assert.equal(perRepo.length, 1);
+  assert.equal(merged.length, 1);
+  assert.equal(perRepo[0].outcome, "self-corrected", "자기 repo엔 명세 보강이 없었다");
+  assert.equal(merged[0].outcome, "resolved-spec", "병합하면 타 repo의 spec-add가 해소로 오귀속된다");
+  assert.notEqual(perRepo[0].outcome, merged[0].outcome, "두 계산이 같아지면 이 락은 무의미하다");
+});
+
+test("classifyBlockOutcomeAcrossRepos: 빈 입력·빈 repo는 그대로 빈 결과", () => {
+  assert.deepEqual(classifyBlockOutcomeAcrossRepos([]), []);
+  assert.deepEqual(classifyBlockOutcomeAcrossRepos([[], []]), []);
 });
