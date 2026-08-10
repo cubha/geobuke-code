@@ -13,18 +13,18 @@
 - **`buildUserMessage`/`judge()` editAnchors/`editOldStrings`** — 편집의 raw old_string(들)을 judge에 전달해 위 윈도우 계산에 사용. Write(전체 덮어쓰기)는 항상 빈 배열(old_string 자체가 없고, GATE_SYSTEM ★★ 규칙상 앵커가 의미 없음).
 - **`gate-core.ts` 배선** — `evaluateGate`가 `input.toolInput`에서 raw old_string(Edit/MultiEdit)을 뽑아 1차 judge 호출과 P2b 근거주입 2단계 재판정 호출 양쪽에 동일하게 전달(두 판정이 서로 다른 절단을 보는 일이 없게).
 - **골든셋 저장 절단도 P3 반영** — `forGoldenStorage`가 나이브 `slice(0, 8000)` 대신 `truncateCurrentFile`을 그대로 재현(`editOldStrings` 전달). 0.12.0 시점 가정("절단 이후는 죽은 용량")이 head+윈도우 절단으로 깨져, 나이브 slice가 윈도우로 살린 절단면 뒤쪽 구간을 저장 시점에 다시 지워버리던 fidelity 결함을 배선 중 발견해 함께 수정(F-13이 막으려던 "거짓 안심"의 재발, 이번엔 currentFileContent 저장 경로).
-- **eval 회귀** — `src/eval/regression.ts`에 `old_strings` 필드 배선. `test/cases.json` case12(0.12.0부터 `expectedFailing: true`로 존재하던 known-fail)에 앵커 추가 + 패딩 텍스트를 자기주장형("실제 로직 없음") → 중립으로 교체(실측 A/B로 편향 확인). 신규 case19: 앵커-형제 거리가 head+windowRadius를 넘는 경우 여전히 block임을 확인하는 음성 대조군(P3의 한계를 정직하게 문서화).
+- **eval 회귀 — known-fail 0으로 해소** — `src/eval/regression.ts`에 `old_strings` 필드 배선. `test/cases.json` case12는 0.12.0부터 `expectedFailing: true`(P3 착수 전 알려진 결함)였는데 **P3로 해소돼 하드게이트로 승격**했다(앵커 전달 시 실측 10/10 pass, 앵커 제거 시 6/6 block — 이 케이스가 이제 P3 동작 자체를 잠근다). 신규 case19: 앵커-형제 거리가 head+windowRadius를 넘는 경우 여전히 block임을 확인하는 음성 대조군(P3의 한계를 정직하게 문서화). 이로써 `cases.json`에 known-fail이 하나도 남지 않는다.
 
 ### Changed
-- `normalize.ts` `MAX_FIELD` 4000→8000: `judge.ts` `MAX_CURRENT_FILE`(8000)과 동일하게 맞춰 예산 불변식(content 예산 ≥ currentFile 예산)을 충족 — Write 시 새 내용과 구버전을 다른 기준으로 잘라 비교하던 것을 바로잡음(회귀판정 정확도).
+- `normalize.ts` `MAX_FIELD` 4000→8000: `judge.ts` `MAX_CURRENT_FILE`(8000)과 동일하게 맞춰 예산 불변식(content 예산 ≥ currentFile 예산)을 충족 — Write 시 새 내용과 구버전을 다른 기준으로 잘라 비교하던 것을 바로잡음(회귀판정 정확도). ⚠️ **이 상수는 Write의 `content`뿐 아니라 Edit/MultiEdit의 `old_string`/`new_string` 절단에도 함께 쓰이므로 편집 본문(`editText`) 최악 크기가 2배가 된다**(실측: Edit 8028→16028자, MultiEdit 5건 40151→80151자). 편집 본문이 덜 잘려 미탐이 줄어드는 이득과 프롬프트 증가라는 비용을 함께 지불하는 트레이드다 — 아래 "적용 범위·한계" 참조.
 - `judge.ts` `CLI_TIMEOUT_MS` 30000→45000, `GATE_API_LIMITS.timeoutMs` 30_000→45_000: 위 예산 증가에 맞춰 동반 조정(`BATCH_API_LIMITS` 60_000 미만 관계는 유지).
 
 ### 적용 범위·한계(정직 표기)
 - P3는 **편집이 실제로 일어난 위치 근처**의 형제만 살린다. 형제 구현이 head(4000자)·윈도우(±1500자) 어디에도 안 닿을 만큼 먼 곳(예: 파일 반대편, 다른 파일)에 있으면 여전히 오탐 가능 — 그건 P2b(grep 근거주입, 0.12.0)나 향후 P2a(작업단위 이력)의 영역이다. case19가 이 경계를 회귀락으로 고정한다.
-- 프롬프트에 실리는 원문 크기가 실질적으로 늘지 않는다(총 예산 8000자 그대로) — 지연·비용에 새 부담은 없다.
-- LLM 판정은 콘텐츠가 올바로 보여도 결정론적으로 뒤집히지 않을 수 있다(haiku 경계 케이스 확률적 판정, case12 실측 ~8/11 pass). "P3가 못 고쳤다"가 아니라 "확률을 개선하되 보장은 못한다"가 정확한 서술.
+- **[현재 파일 상태] 축은 예산 불변**(8000자 그대로 — 창의 *위치*만 재배치). 다만 위 `MAX_FIELD` 상향으로 **편집 본문(`editText`) 축은 최악값이 2배**가 되므로, 전체 프롬프트는 편집이 클수록 커진다. `CLI_TIMEOUT_MS`/`GATE_API_LIMITS`를 45s로 함께 올린 것이 이 증가분에 대한 대응이다.
+- `MultiEdit`은 `edits` 개수에 상한이 없어 편집 본문이 개수에 비례해 커진다(5건이면 최악 80KB). 이는 이번 릴리스가 만든 게 아니라 기존 구조(`computeDeletionScope`도 같은 미상한 배열을 순회)이나, `MAX_FIELD` 2배 상향으로 계수가 커졌다 — security-auditor Warning과 같은 축이라 **개수 캡을 후속 이슈로 이월**한다.
 
-검증: `verify.sh --full` **1050/1050**(빌드 포함) · `npm run eval` hard **18/18**(FP0·FN0, known-fail 1건은 설계 의도대로 유지) · scope 회귀 6/6 · scope-critic 전 SubTask(head 소실 가드·골든 저장 fidelity 버그 포착) · security-auditor **Critical 0**(Warning 1건=`editOldStrings`/`edits` 배열 개수 미상한 — `computeDeletionScope`(0.12.0 F-8)에 이미 있던 동형 패턴 재사용이라 이번 릴리스 신규 결함 아님, 캡은 후속 이슈로 이월. Info 3건 중 프롬프트 노출 조건 변화는 README "[현재 파일 상태] 절단(0.12.1 P3)" 절로 문서화, 나머지 2건은 이상 없음 확인).
+검증: `verify.sh --full` **1050/1050**(빌드 포함) · `npm run eval` hard **19/19**(FP0·FN0, **known-fail 0** — 0.12.0의 known-fail 1건이 P3로 해소돼 하드게이트 편입) · scope 회귀 6/6 · scope-critic 전 SubTask(head 소실 가드·골든 저장 fidelity 버그 포착) · security-auditor **Critical 0**(Warning 1건=`editOldStrings`/`edits` 배열 개수 미상한 — `computeDeletionScope`(0.12.0 F-8)에 이미 있던 동형 패턴 재사용이라 이번 릴리스 신규 결함 아님, 캡은 후속 이슈로 이월. Info 3건 중 프롬프트 노출 조건 변화는 README "[현재 파일 상태] 절단(0.12.1 P3)" 절로 문서화, 나머지 2건은 이상 없음 확인).
 
 **재init 안내** — hook 계약(`settings.json` 배선·`src/hook.ts`) 무변경 = **재init 불요**.
 
