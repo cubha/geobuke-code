@@ -349,9 +349,19 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
   // 둘 다 undefined — "0바이트"로 뻥튀기하지 않는다.
   const fileBytes = currentFileContent !== undefined ? Buffer.byteLength(currentFileContent, "utf8") : undefined;
   const truncated = fileBytes !== undefined ? fileBytes > CURRENT_FILE_TRUNCATION_LIMIT : undefined;
+  // 이번 편집의 old_string/new_string 쌍(0.12.1 P3 신설 + 0.12.0 P2b F-8 델리션 스코프와 공유) —
+  // Write는 항상 빈 배열(old_string 자체가 없고, editText의 clip된 old_string은 원본 위치 매칭에
+  // 못 쓴다 — RCA 함정 회피, 반드시 input.toolInput에서 직접 뽑는다).
+  const editList: { old_string?: string; new_string?: string }[] = isOverwriteEdit(toolName, input.toolInput ?? {})
+    ? []
+    : (input.toolInput?.edits ?? (input.toolInput?.old_string ? [{ old_string: input.toolInput.old_string, new_string: input.toolInput.new_string }] : []));
+  // 0.12.1 P3 — raw old_string(들)을 편집 앵커로 judge에 전달(head 뒤쪽 형제 윈도우 판별용).
+  const editOldStrings: string[] = editList
+    .map((e) => e.old_string)
+    .filter((s): s is string => typeof s === "string" && s.length > 0);
   const refreshP = deps.refreshDuringJudge ? deps.refreshDuringJudge() : null;
   // let: P2b 근거주입 2단계 재판정(아래 ⑥-2)이 성공하면 이 변수를 재판정 결과로 교체한다.
-  let verdict = await deps.judge(specText, editText, defers, resolved, { currentFileContent, cwd });
+  let verdict = await deps.judge(specText, editText, defers, resolved, { currentFileContent, cwd, editOldStrings });
   if (refreshP) await refreshP; // judge 동안 이미 완료 — 이 편집의 notice가 갱신된 캐시를 읽도록
   // fileBytes 없음(신규 파일 등)이면 키 자체를 생략 — undefined로 채워 넣지 않는다(기존 tool?:string
   // 등 선택필드 관례와 동일, "0바이트"로 오독될 여지 차단).
@@ -395,8 +405,8 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
     // F-8 — 이번 편집이 *지우는* self-file 줄은 근거에서 뺀다(Write 억제와 대칭인 Edit/MultiEdit
     // 축). 편집 전 파일을 grep하는 구조상, 케이스 구현을 삭제하는 Edit이 자기가 지울 코드를
     // "이미 구현됨"으로 인용해 정답인 block을 pass로 뒤집는 경로가 열려 있었다.
-    const editList = input.toolInput?.edits
-      ?? (input.toolInput?.old_string ? [{ old_string: input.toolInput.old_string, new_string: input.toolInput.new_string }] : []);
+    // editList는 위(0.12.1 P3 editOldStrings 계산)에서 이미 만들어졌다 — 여기서 다시 만들면 두
+    // 곳이 각자 판정해 드리프트한다(이 if 진입 자체가 !isOverwriteEdit라 Write 분기는 이미 배제됨).
     const deletion: DeletionScope | null =
       filePath && currentFileContent !== undefined
         ? computeDeletionScope(cwd, filePath, currentFileContent, editList)
@@ -435,6 +445,7 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
         currentFileContent,
         cwd,
         evidenceContext,
+        editOldStrings,
       });
       // ② fail-open은 값검사(try/catch 아님) — judge()는 절대 throw하지 않고 모든 실패를
       // failOpenVerdict로 흡수한다. verdict2.failOpen이면 재판정 자체를 신뢰 못 하므로 폐기하고

@@ -49,6 +49,31 @@ function spyJudge(verdict = { verdict: "pass", missing: [], reason: "ok" }) {
   return { fn, calls };
 }
 
+// ── P3(0.12.1) — raw old_string을 편집 앵커로 judge에 전달(head 뒤쪽 형제 윈도우 판별용) ──
+test("editOldStrings: Edit은 raw old_string을 그대로 opts에 담아 judge에 전달한다", async () => {
+  const j = spyJudge();
+  await evaluateGate(makeInput({ toolInput: { file_path: "src/foo.ts", old_string: "raw-anchor-text", new_string: "b" } }), makeDeps({ judge: j.fn }));
+  assert.deepEqual(j.calls[0][4]?.editOldStrings, ["raw-anchor-text"]);
+});
+
+test("editOldStrings: MultiEdit은 edits[].old_string 전부를 담는다", async () => {
+  const j = spyJudge();
+  await evaluateGate(
+    makeInput({
+      toolName: "MultiEdit",
+      toolInput: { file_path: "src/foo.ts", edits: [{ old_string: "a", new_string: "b" }, { old_string: "c", new_string: "d" }] },
+    }),
+    makeDeps({ judge: j.fn }),
+  );
+  assert.deepEqual(j.calls[0][4]?.editOldStrings, ["a", "c"]);
+});
+
+test("editOldStrings: Write(전체 덮어쓰기)는 항상 빈 배열 — old_string 자체가 없고 앵커도 성립하지 않는다", async () => {
+  const j = spyJudge();
+  await evaluateGate(makeInput({ toolName: "Write", toolInput: { file_path: "src/foo.ts", content: "new file body" } }), makeDeps({ judge: j.fn }));
+  assert.deepEqual(j.calls[0][4]?.editOldStrings, []);
+});
+
 test("passthrough: 게이트 대상 아닌 도구는 무출력 종료·무계측", async () => {
   const j = spyJudge();
   const d = await evaluateGate(makeInput({ toolName: "Read" }), makeDeps({ judge: j.fn }));
@@ -557,6 +582,8 @@ test("근거주입: 매치 있는 케이스 전부가 재판정에서 해소되�
   assert.equal(d.kind, "pass", "재판정이 전부 해소 → pass");
   assert.equal(d.event.evidenceUsed, true);
   assert.equal(d.event.evidenceFlip, true);
+  // 0.12.1 P3 — 2단계 재판정도 1차와 동일하게 편집 앵커를 받아야 head 뒤쪽 윈도우가 살아있다.
+  assert.deepEqual(judgeCalls[1][4]?.editOldStrings, ["a"], "재판정 호출도 1차와 동일한 editOldStrings를 받는다");
 });
 
 test("근거주입: 재판정이 missing 일부만 줄이면 block을 유지하되 missing이 축소된다", async () => {
