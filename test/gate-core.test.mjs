@@ -946,6 +946,29 @@ test("골든 캡처: currentFileContent는 redactSecrets를 거쳐 저장된다(
   assert.match(g.currentFileContent, /function login/, "코드 본문은 보존 — 값만 마스킹");
 });
 
+// 0.12.1 P3 — 골든 저장 절단이 head-only 나이브 slice면 편집앵커 윈도우가 살린 절단면 뒤쪽 구간이
+// 저장 시점에 다시 잘려나가 replay가 캡처 당시 judge가 실제로 본 것과 달라진다(F-13이 막으려던
+// "거짓 안심"의 재발 — 이번엔 evidenceContext가 아니라 currentFileContent 저장 경로에서).
+test("골든 캡처: currentFileContent 저장도 head+윈도우 절단을 반영한다(앵커 위치가 head 밖이어도 보존)", async () => {
+  const { CURRENT_FILE_TRUNCATION_LIMIT } = await import("../dist/gate-core.js");
+  const anchor = "SIBLING_MARKER_BEYOND_HEAD";
+  // head(4000)를 한참 넘긴 위치에 앵커 배치 — 줄 단위(개행 포함)라 truncateCurrentFile이 정상 동작.
+  const lines = Array.from({ length: 2000 }, (_, i) => (i === 1500 ? anchor : `line${i}`));
+  const huge = lines.join("\n");
+  const d = await evaluateGate(
+    makeInput({ toolInput: { file_path: "src/foo.ts", old_string: anchor, new_string: anchor + "_x" } }),
+    makeDeps({
+      isGoldenCapture: () => true,
+      readCurrentFile: () => huge,
+      judge: async () => ({ verdict: "block", missing: ["케이스 A 로그인 검증"], reason: "누락" }),
+    }),
+  );
+  const g = d.effects.goldenCapture;
+  assert.ok(g, "캡처가 있어야 함");
+  assert.ok(g.currentFileContent.length <= CURRENT_FILE_TRUNCATION_LIMIT, "여전히 예산 이내로 절단됨");
+  assert.match(g.currentFileContent, /SIBLING_MARKER_BEYOND_HEAD/, "head 밖 앵커 근처가 저장분에도 보존돼야 replay가 캡처 당시와 동일해짐");
+});
+
 test("골든 캡처: currentFileContent는 CURRENT_FILE_TRUNCATION_LIMIT로 절단해 저장한다(그 뒤는 judge가 어차피 못 봄)", async () => {
   const { CURRENT_FILE_TRUNCATION_LIMIT } = await import("../dist/gate-core.js");
   const huge = "x".repeat(CURRENT_FILE_TRUNCATION_LIMIT * 3);
