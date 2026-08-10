@@ -157,7 +157,7 @@ export type JudgeFn = (
   editText: string,
   defers: string[],
   resolved: string[],
-  opts?: { currentFileContent?: string; cwd?: string; evidenceContext?: string },
+  opts?: { currentFileContent?: string; cwd?: string; evidenceContext?: string; editOldStrings?: string[] },
 ) => Promise<Verdict>;
 
 /** evaluateGate 입력(트랜스포트가 자기 형식에서 정규화해 전달). */
