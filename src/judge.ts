@@ -3,9 +3,13 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Verdict, ReviewVerdict, ScopeQueueEntry, ScopeVerdict, AxisAVerdict, RungVerdict } from "./types.js";
+import { truncateCurrentFile, HEAD_BUDGET, WINDOW_RADIUS } from "./truncate.js";
 
 const DEFAULT_MODEL = "claude-haiku-4-5";
-const CLI_TIMEOUT_MS = 30000; // claude -p 폴백 상한(행 방지). 초과 시 kill → fail-open.
+// claude -p 폴백 상한(행 방지). 초과 시 kill → fail-open. 0.12.1 P3: MAX_FIELD 4000→8000
+// 동반 상향(normalize.ts)으로 프롬프트가 커진 만큼 30000→45000(BATCH_API_LIMITS 60_000 미만 유지
+// — 게이트가 배치 상한을 넘어서면 안 된다는 기존 관계식이 깨지지 않게).
+const CLI_TIMEOUT_MS = 45000;
 /** API 트랜스포트 요청 상한(0.12.0 F-15) — 호출 경로 성격에 따라 갈린다. */
 export interface ApiLimits {
   timeoutMs: number;
@@ -15,9 +19,9 @@ export interface ApiLimits {
  * **게이트 전용**(`judge` — PreToolUse 동기 차단). CLI 폴백의 `CLI_TIMEOUT_MS`와 동형: 판정 1회가
  * 이보다 오래 걸리면 fail-open으로 흘려보내는 게 사용자 편집을 무한 차단하는 것보다 낫다.
  * 재시도 1회 — SDK 기본(2회)이면 최악 지연이 timeout×3이 되는데, 동기 차단 경로에서는 지연을
- * 늘려가며 성공률을 사는 트레이드가 성립하지 않는다.
+ * 늘려가며 성공률을 사는 트레이드가 성립하지 않는다. 0.12.1 P3: CLI_TIMEOUT_MS와 동형으로 상향.
  */
-export const GATE_API_LIMITS: ApiLimits = { timeoutMs: 30_000, maxRetries: 1 };
+export const GATE_API_LIMITS: ApiLimits = { timeoutMs: 45_000, maxRetries: 1 };
 /**
  * **배치·비차단 경로**(`judgeReviewed` 코드독해 · `judgeScope` Stop 훅 · `judgeM1Violation`
  * 사후대조). 게이트 상한을 그대로 물리면 안 된다(scope-critic 지적, 2026-08-09): `judgeReviewed`는
@@ -201,6 +205,7 @@ function buildUserMessage(
   resolved: string[] = [],
   currentFileContent?: string,
   evidenceContext?: string,
+  editAnchors: string[] = [],
 ): string {
   const fmt = (xs: string[]): string => (xs.length > 0 ? xs.map((d) => `- ${d}`).join("\n") : "(없음)");
   const trimmed = (currentFileContent ?? "").trim();
@@ -208,9 +213,16 @@ function buildUserMessage(
   // 보여주면 모델이 "신규 파일"이라는 문구에 낚여 이미 pass로 정리됐던 무관 편집(step1)까지
   // 재검토해 block으로 뒤집는 오염이 관측됐다. 섹션 자체를 통째로 생략(placeholder 텍스트 자체가
   // 신호가 되지 않게) — GATE_SYSTEM도 "섹션이 없으면 diff만으로 판정"으로 맞춰 갱신.
-  const fileStateSection = trimmed
-    ? `\n\n[현재 파일 상태]\n${trimmed.length > MAX_CURRENT_FILE ? trimmed.slice(0, MAX_CURRENT_FILE) + "\n…(절단됨)" : trimmed}`
-    : "";
+  // 0.12.1 P3 — head-only 대신 head+편집앵커 윈도우 병합(truncate.ts). editAnchors 없으면(Write·
+  // 앵커 매치 실패) truncateCurrentFile이 자동으로 head-only 폴백과 동형 결과를 낸다.
+  const truncatedFile = trimmed
+    ? truncateCurrentFile(trimmed, editAnchors, {
+        totalBudget: MAX_CURRENT_FILE,
+        headBudget: HEAD_BUDGET,
+        windowRadius: WINDOW_RADIUS,
+      })
+    : null;
+  const fileStateSection = truncatedFile ? `\n\n[현재 파일 상태]\n${truncatedFile.text}` : "";
   // 2026-08-07 RCA 후속(P2b ST12) — grep 근거주입 2단계 재판정 전용. 비어있으면(1차 판정·근거 없음)
   // 섹션 자체를 생략(위 fileStateSection과 동일 관례 — placeholder가 오염 유발한 전례 반복 방지).
   const trimmedEvidence = (evidenceContext ?? "").trim();
@@ -457,9 +469,24 @@ export async function judge(
     invoke?: JudgeInvoke;
     /** 2026-08-07 RCA 후속(P2b ST12) — grep 근거주입 2단계 재판정에서만 채워짐(1차 판정은 undefined). */
     evidenceContext?: string;
+    /**
+     * 0.12.1 P3 — 이번 편집의 raw old_string(들). buildUserMessage가 [현재 파일 상태] 절단 시
+     * 이 위치 주변을 윈도우로 포함시킨다(head-only가 놓치던 절단면 뒤쪽 형제 보존). Write는 항상
+     * 빈 배열/미지정으로 호출해야 한다(호출부 책임 — old_string 자체가 없고, 있어도 "곧 사라질
+     * 구버전" 의미라 앵커가 성립하지 않는다).
+     */
+    editOldStrings?: string[];
   } = {},
 ): Promise<Verdict> {
-  const user = buildUserMessage(planSpec, editText, defers, resolved, opts.currentFileContent, opts.evidenceContext);
+  const user = buildUserMessage(
+    planSpec,
+    editText,
+    defers,
+    resolved,
+    opts.currentFileContent,
+    opts.evidenceContext,
+    opts.editOldStrings,
+  );
   const transport = selectedTransport();
   try {
     // opts.invoke(2026-08-07, RCA 후속 — judgeReviewed/judgeScope/judgeM1Violation과 동형 seam):

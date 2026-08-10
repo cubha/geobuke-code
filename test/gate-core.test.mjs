@@ -49,6 +49,31 @@ function spyJudge(verdict = { verdict: "pass", missing: [], reason: "ok" }) {
   return { fn, calls };
 }
 
+// ── P3(0.12.1) — raw old_string을 편집 앵커로 judge에 전달(head 뒤쪽 형제 윈도우 판별용) ──
+test("editOldStrings: Edit은 raw old_string을 그대로 opts에 담아 judge에 전달한다", async () => {
+  const j = spyJudge();
+  await evaluateGate(makeInput({ toolInput: { file_path: "src/foo.ts", old_string: "raw-anchor-text", new_string: "b" } }), makeDeps({ judge: j.fn }));
+  assert.deepEqual(j.calls[0][4]?.editOldStrings, ["raw-anchor-text"]);
+});
+
+test("editOldStrings: MultiEdit은 edits[].old_string 전부를 담는다", async () => {
+  const j = spyJudge();
+  await evaluateGate(
+    makeInput({
+      toolName: "MultiEdit",
+      toolInput: { file_path: "src/foo.ts", edits: [{ old_string: "a", new_string: "b" }, { old_string: "c", new_string: "d" }] },
+    }),
+    makeDeps({ judge: j.fn }),
+  );
+  assert.deepEqual(j.calls[0][4]?.editOldStrings, ["a", "c"]);
+});
+
+test("editOldStrings: Write(전체 덮어쓰기)는 항상 빈 배열 — old_string 자체가 없고 앵커도 성립하지 않는다", async () => {
+  const j = spyJudge();
+  await evaluateGate(makeInput({ toolName: "Write", toolInput: { file_path: "src/foo.ts", content: "new file body" } }), makeDeps({ judge: j.fn }));
+  assert.deepEqual(j.calls[0][4]?.editOldStrings, []);
+});
+
 test("passthrough: 게이트 대상 아닌 도구는 무출력 종료·무계측", async () => {
   const j = spyJudge();
   const d = await evaluateGate(makeInput({ toolName: "Read" }), makeDeps({ judge: j.fn }));
@@ -557,6 +582,8 @@ test("근거주입: 매치 있는 케이스 전부가 재판정에서 해소되�
   assert.equal(d.kind, "pass", "재판정이 전부 해소 → pass");
   assert.equal(d.event.evidenceUsed, true);
   assert.equal(d.event.evidenceFlip, true);
+  // 0.12.1 P3 — 2단계 재판정도 1차와 동일하게 편집 앵커를 받아야 head 뒤쪽 윈도우가 살아있다.
+  assert.deepEqual(judgeCalls[1][4]?.editOldStrings, ["a"], "재판정 호출도 1차와 동일한 editOldStrings를 받는다");
 });
 
 test("근거주입: 재판정이 missing 일부만 줄이면 block을 유지하되 missing이 축소된다", async () => {
@@ -917,6 +944,29 @@ test("골든 캡처: currentFileContent는 redactSecrets를 거쳐 저장된다(
   assert.ok(g, "캡처가 있어야 함");
   assert.ok(!g.currentFileContent.includes("sk-ant-abcdefghijklmnop"), "시크릿 원문이 남으면 안 됨");
   assert.match(g.currentFileContent, /function login/, "코드 본문은 보존 — 값만 마스킹");
+});
+
+// 0.12.1 P3 — 골든 저장 절단이 head-only 나이브 slice면 편집앵커 윈도우가 살린 절단면 뒤쪽 구간이
+// 저장 시점에 다시 잘려나가 replay가 캡처 당시 judge가 실제로 본 것과 달라진다(F-13이 막으려던
+// "거짓 안심"의 재발 — 이번엔 evidenceContext가 아니라 currentFileContent 저장 경로에서).
+test("골든 캡처: currentFileContent 저장도 head+윈도우 절단을 반영한다(앵커 위치가 head 밖이어도 보존)", async () => {
+  const { CURRENT_FILE_TRUNCATION_LIMIT } = await import("../dist/gate-core.js");
+  const anchor = "SIBLING_MARKER_BEYOND_HEAD";
+  // head(4000)를 한참 넘긴 위치에 앵커 배치 — 줄 단위(개행 포함)라 truncateCurrentFile이 정상 동작.
+  const lines = Array.from({ length: 2000 }, (_, i) => (i === 1500 ? anchor : `line${i}`));
+  const huge = lines.join("\n");
+  const d = await evaluateGate(
+    makeInput({ toolInput: { file_path: "src/foo.ts", old_string: anchor, new_string: anchor + "_x" } }),
+    makeDeps({
+      isGoldenCapture: () => true,
+      readCurrentFile: () => huge,
+      judge: async () => ({ verdict: "block", missing: ["케이스 A 로그인 검증"], reason: "누락" }),
+    }),
+  );
+  const g = d.effects.goldenCapture;
+  assert.ok(g, "캡처가 있어야 함");
+  assert.ok(g.currentFileContent.length <= CURRENT_FILE_TRUNCATION_LIMIT, "여전히 예산 이내로 절단됨");
+  assert.match(g.currentFileContent, /SIBLING_MARKER_BEYOND_HEAD/, "head 밖 앵커 근처가 저장분에도 보존돼야 replay가 캡처 당시와 동일해짐");
 });
 
 test("골든 캡처: currentFileContent는 CURRENT_FILE_TRUNCATION_LIMIT로 절단해 저장한다(그 뒤는 judge가 어차피 못 봄)", async () => {

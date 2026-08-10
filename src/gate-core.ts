@@ -20,6 +20,8 @@ import { readPendingReview } from "./review.js";
 // 패키지에 대한 것이지 순수·grep 유틸까지 확장 적용하지 않는다 — F-16 정정 반영).
 import { collectCaseEvidence, computeDeletionScope, formatEvidenceContext } from "./evidence.js";
 import { redactSecrets } from "./extraction.js";
+// truncate.ts도 evidence.ts와 동형 이유로 정적 import(순수·zero-dep, judge.js 같은 SDK 격리 필요 없음).
+import { truncateCurrentFile, HEAD_BUDGET, WINDOW_RADIUS } from "./truncate.js";
 import type { CaseEvidence, DeletionScope } from "./evidence.js";
 import type { EditToolInput, Verdict, GoldenCase, PendingReview } from "./types.js";
 import type { GateEvent } from "./metrics.js";
@@ -157,7 +159,7 @@ export type JudgeFn = (
   editText: string,
   defers: string[],
   resolved: string[],
-  opts?: { currentFileContent?: string; cwd?: string; evidenceContext?: string },
+  opts?: { currentFileContent?: string; cwd?: string; evidenceContext?: string; editOldStrings?: string[] },
 ) => Promise<Verdict>;
 
 /** evaluateGate 입력(트랜스포트가 자기 형식에서 정규화해 전달). */
@@ -219,19 +221,26 @@ const MAX_READ_BYTES = 1_000_000;
 export const CURRENT_FILE_TRUNCATION_LIMIT = 8000;
 
 /**
- * 골든셋에 **영속 저장**할 파일 내용의 정규화(0.12.0 ship 전 security-auditor 후속).
+ * 골든셋에 **영속 저장**할 파일 내용의 정규화(0.12.0 ship 전 security-auditor 후속, 0.12.1 P3 갱신).
  *
  * ⓐ `redactSecrets` — 전송(transient)과 디스크 영속(at-rest)은 노출면이 다르다. 같은 릴리스가
  *    추가한 형제 필드 `evidenceContext`는 조립 시점에 마스킹을 거치므로(evidence.ts
  *    formatEvidenceContext) 이쪽만 원문으로 남길 근거가 없다.
- * ⓑ `CURRENT_FILE_TRUNCATION_LIMIT` 절단 — replay가 이 값을 judge에 넘기면 `buildUserMessage`가
- *    어차피 같은 상한으로 자른다. 즉 그 뒤는 재현 충실도에 **기여할 수 없는** 죽은 용량인데,
- *    골든셋은 events.jsonl·extraction.jsonl과 달리 크기 상한도 로테이션도 없어 케이스마다 최대
- *    1MB(MAX_READ_BYTES)가 무한 누적됐다. 절단본을 저장해야 replay가 캡처 당시 judge가 본 것과
- *    바이트 동일해진다는 점에서 정확도와도 같은 방향이다.
+ * ⓑ 절단은 `truncateCurrentFile`(judge.ts의 buildUserMessage와 동일 로직)을 그대로 재현한다.
+ *    0.12.0 시점엔 head-only slice(0, LIMIT)였는데, **0.12.1 P3가 head-only를 head+편집앵커
+ *    윈도우로 바꾸면서 이 가정이 깨졌다** — 절단면 뒤쪽(예: offset 8264)의 앵커 윈도우가 실제
+ *    프롬프트엔 실리는데 나이브 slice(0,8000)로 저장하면 그 구간이 저장 시점에 통째로 사라져
+ *    replay가 캡처 당시 judge가 본 것과 달라진다(F-13이 막으려던 "거짓 안심"의 재발 — 이번엔
+ *    evidenceContext가 아니라 currentFileContent 저장 경로). editOldStrings를 그대로 넘겨 같은
+ *    앵커로 같은 윈도우를 재현한다.
  */
-function forGoldenStorage(text: string): string {
-  return redactSecrets(text).slice(0, CURRENT_FILE_TRUNCATION_LIMIT);
+function forGoldenStorage(text: string, editOldStrings: string[]): string {
+  const redacted = redactSecrets(text);
+  return truncateCurrentFile(redacted, editOldStrings, {
+    totalBudget: CURRENT_FILE_TRUNCATION_LIMIT,
+    headBudget: HEAD_BUDGET,
+    windowRadius: WINDOW_RADIUS,
+  }).text;
 }
 
 /**
@@ -349,9 +358,19 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
   // 둘 다 undefined — "0바이트"로 뻥튀기하지 않는다.
   const fileBytes = currentFileContent !== undefined ? Buffer.byteLength(currentFileContent, "utf8") : undefined;
   const truncated = fileBytes !== undefined ? fileBytes > CURRENT_FILE_TRUNCATION_LIMIT : undefined;
+  // 이번 편집의 old_string/new_string 쌍(0.12.1 P3 신설 + 0.12.0 P2b F-8 델리션 스코프와 공유) —
+  // Write는 항상 빈 배열(old_string 자체가 없고, editText의 clip된 old_string은 원본 위치 매칭에
+  // 못 쓴다 — RCA 함정 회피, 반드시 input.toolInput에서 직접 뽑는다).
+  const editList: { old_string?: string; new_string?: string }[] = isOverwriteEdit(toolName, input.toolInput ?? {})
+    ? []
+    : (input.toolInput?.edits ?? (input.toolInput?.old_string ? [{ old_string: input.toolInput.old_string, new_string: input.toolInput.new_string }] : []));
+  // 0.12.1 P3 — raw old_string(들)을 편집 앵커로 judge에 전달(head 뒤쪽 형제 윈도우 판별용).
+  const editOldStrings: string[] = editList
+    .map((e) => e.old_string)
+    .filter((s): s is string => typeof s === "string" && s.length > 0);
   const refreshP = deps.refreshDuringJudge ? deps.refreshDuringJudge() : null;
   // let: P2b 근거주입 2단계 재판정(아래 ⑥-2)이 성공하면 이 변수를 재판정 결과로 교체한다.
-  let verdict = await deps.judge(specText, editText, defers, resolved, { currentFileContent, cwd });
+  let verdict = await deps.judge(specText, editText, defers, resolved, { currentFileContent, cwd, editOldStrings });
   if (refreshP) await refreshP; // judge 동안 이미 완료 — 이 편집의 notice가 갱신된 캐시를 읽도록
   // fileBytes 없음(신규 파일 등)이면 키 자체를 생략 — undefined로 채워 넣지 않는다(기존 tool?:string
   // 등 선택필드 관례와 동일, "0바이트"로 오독될 여지 차단).
@@ -373,7 +392,7 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
       // (신규 파일 등) 키 자체 생략(undefined로 채우지 않음, fileMeta와 동일 관례).
       // 저장 형태는 `forGoldenStorage`를 거친다(types.ts GoldenCase.currentFileContent 참조) —
       // 위 fileBytes/truncated 계측은 **절단 이전 원본**을 재는 별개 축이라 영향받지 않는다.
-      ...(currentFileContent !== undefined ? { currentFileContent: forGoldenStorage(currentFileContent) } : {}),
+      ...(currentFileContent !== undefined ? { currentFileContent: forGoldenStorage(currentFileContent, editOldStrings) } : {}),
       expected: { verdict: verdict.verdict, missing: verdict.missing, reason: verdict.reason },
     };
   }
@@ -395,8 +414,8 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
     // F-8 — 이번 편집이 *지우는* self-file 줄은 근거에서 뺀다(Write 억제와 대칭인 Edit/MultiEdit
     // 축). 편집 전 파일을 grep하는 구조상, 케이스 구현을 삭제하는 Edit이 자기가 지울 코드를
     // "이미 구현됨"으로 인용해 정답인 block을 pass로 뒤집는 경로가 열려 있었다.
-    const editList = input.toolInput?.edits
-      ?? (input.toolInput?.old_string ? [{ old_string: input.toolInput.old_string, new_string: input.toolInput.new_string }] : []);
+    // editList는 위(0.12.1 P3 editOldStrings 계산)에서 이미 만들어졌다 — 여기서 다시 만들면 두
+    // 곳이 각자 판정해 드리프트한다(이 if 진입 자체가 !isOverwriteEdit라 Write 분기는 이미 배제됨).
     const deletion: DeletionScope | null =
       filePath && currentFileContent !== undefined
         ? computeDeletionScope(cwd, filePath, currentFileContent, editList)
@@ -435,6 +454,7 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
         currentFileContent,
         cwd,
         evidenceContext,
+        editOldStrings,
       });
       // ② fail-open은 값검사(try/catch 아님) — judge()는 절대 throw하지 않고 모든 실패를
       // failOpenVerdict로 흡수한다. verdict2.failOpen이면 재판정 자체를 신뢰 못 하므로 폐기하고

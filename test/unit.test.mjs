@@ -242,16 +242,34 @@ test("buildUserMessage: 8000바이트 이하 파일은 절단되지 않는다(�
   assert.doesNotMatch(m, /…\(절단됨\)/);
 });
 
-test("예산 불변식 known-gap 잠금: MAX_FIELD(Write 새내용, normalize.ts) < MAX_CURRENT_FILE(judge.ts) — 현재 거꾸로임을 고정, P3 대상", async () => {
+// ── P3 배선(0.12.1) — editAnchors가 head 뒤쪽 정당 기구현 형제를 윈도우로 살린다 ──
+test("buildUserMessage: editAnchors(old_string)로 절단면 뒤쪽 형제 위치를 지정하면 그 근처가 윈도우로 포함된다", () => {
+  const anchor = "function siblingAlreadyImplemented() { return 42; }";
+  const content = "A".repeat(12000) + "\n" + anchor + "\n" + "B".repeat(200);
+  const m = buildUserMessage("plan", "edit", [], [], content, undefined, [anchor]);
+  assert.match(m, /siblingAlreadyImplemented/, "앵커 지정 시 head-only였다면 잘렸을 형제가 윈도우로 보존돼야 함");
+  // 앵커 윈도우가 파일 끝(EOF)까지 닿아 뒤쪽엔 더 안 잘림 — 대신 head↔윈도우 사이 중간 구간
+  // 생략은 여전히 일어난다(head의 A 8000자 남짓이 빠짐). "여전히 원문보다 작다"로 확인한다.
+  assert.match(m, /…\(중간 생략\)/, "head와 윈도우 사이 생략은 마커로 표시돼야 함");
+  assert.ok(m.length < content.length, "원문 전체가 그대로 실리면 안 됨(예산 내 절단 유지)");
+});
+
+test("buildUserMessage: editAnchors 생략 시 기존 head-only 동작(하위호환, 7번째 인자 옵션)", () => {
+  const anchor = "function siblingAlreadyImplemented() { return 42; }";
+  const content = "A".repeat(12000) + "\n" + anchor + "\n" + "B".repeat(200);
+  const m = buildUserMessage("plan", "edit", [], [], content);
+  assert.doesNotMatch(m, /siblingAlreadyImplemented/, "앵커 없으면 head-only 그대로 — 회귀 없음");
+});
+
+test("예산 불변식(0.12.1 P3): MAX_FIELD(Write 새내용, normalize.ts) >= MAX_CURRENT_FILE(judge.ts)", async () => {
   const { MAX_FIELD } = await import("../dist/normalize.js");
   const { MAX_CURRENT_FILE } = await import("../dist/judge.js");
-  // "옳은 방향"은 content 예산 ≥ currentFile 예산(구버전과 새내용을 같은 기준으로 비교해야
-  // ★★ 회귀판정이 성립)인데, 현재는 반대(4000 < 8000)다. P3가 상수를 바꾸면 이 assert가
-  // 강제로 실패해 불변식을 마주치게 된다(scratch.md ST5 설계 그대로) — 그때 이 테스트를
-  // "MAX_FIELD >= MAX_CURRENT_FILE"로 뒤집어 갱신할 것.
+  // Write 시 새내용(MAX_FIELD)과 구버전([현재 파일 상태], MAX_CURRENT_FILE)을 같은 기준으로
+  // 비교해야 ★★ 회귀판정(구버전에만 있던 형제가 덮어쓰기로 사라지는지)이 성립한다. 예전엔
+  // 4000 < 8000으로 거꾸로였다(P3 착수 전 known-gap) — 이제 불변식을 강제한다.
   assert.ok(
-    MAX_FIELD < MAX_CURRENT_FILE,
-    `현재 사실(MAX_FIELD=${MAX_FIELD} < MAX_CURRENT_FILE=${MAX_CURRENT_FILE})이 바뀌었다면 P3가 착수된 것 — 이 테스트를 갱신하라`,
+    MAX_FIELD >= MAX_CURRENT_FILE,
+    `content 예산(MAX_FIELD=${MAX_FIELD})이 currentFile 예산(MAX_CURRENT_FILE=${MAX_CURRENT_FILE})보다 작으면 안 됨`,
   );
 });
 

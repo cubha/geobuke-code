@@ -48,6 +48,31 @@ test("judge: opts.invoke가 파싱 불가 텍스트를 반환해도 fail-open으
   assert.equal(v.failOpen, true);
 });
 
+// ── P3 배선(0.12.1) — opts.editOldStrings가 buildUserMessage의 editAnchors로 흘러간다 ──
+test("judge: opts.editOldStrings가 있으면 절단면 뒤쪽 앵커 위치 근처가 [현재 파일 상태]에 살아남는다", async () => {
+  const anchor = "function siblingAlreadyImplemented() { return 42; }";
+  const currentFileContent = "A".repeat(12000) + "\n" + anchor + "\n" + "B".repeat(200);
+  const calls = [];
+  const invoke = async (system, user) => {
+    calls.push(user);
+    return '{"verdict":"pass","missing":[],"reason":"ok"}';
+  };
+  await judge("plan", "edit", [], [], { invoke, currentFileContent, editOldStrings: [anchor] });
+  assert.match(calls[0], /siblingAlreadyImplemented/);
+});
+
+test("judge: opts.editOldStrings 생략 시 기존 head-only 동작(회귀 없음)", async () => {
+  const anchor = "function siblingAlreadyImplemented() { return 42; }";
+  const currentFileContent = "A".repeat(12000) + "\n" + anchor + "\n" + "B".repeat(200);
+  const calls = [];
+  const invoke = async (system, user) => {
+    calls.push(user);
+    return '{"verdict":"pass","missing":[],"reason":"ok"}';
+  };
+  await judge("plan", "edit", [], [], { invoke, currentFileContent });
+  assert.doesNotMatch(calls[0], /siblingAlreadyImplemented/);
+});
+
 // ── F-15(0.12.0): API 상한을 호출 경로별로 가른다 ──
 // 게이트(judge)는 PreToolUse 동기 차단이라 짧은 상한 + 적은 재시도가 맞지만, judgeReviewed는
 // MAX_REVIEW_CODE(12000자) 코드 독해라 같은 상한을 물리면 정당한 판정이 unverifiable로 강등된다
