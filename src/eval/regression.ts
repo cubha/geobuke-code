@@ -28,6 +28,13 @@ interface Case {
    * eval도 골든 replay와 똑같이 1차 판정만 재현해, 이 배치의 유일한 판정 로직 변경에 무신호였다.
    */
   evidence_context?: string;
+  /**
+   * 0.12.1 P3 — 편집의 raw old_string(들). 있으면 judge의 editOldStrings로 그대로 실어 head+윈도우
+   * 절단을 eval에서 재현한다. 이 필드 없이는 eval도 head-only 절단만 재현해 이 배치의 판정 로직
+   * 변경(P3)에 무신호다. gate-core.ts의 evaluateGate와 동일 계약 — 위치 매칭은 current_file 원문
+   * 안에서 정확히 일치하는 substring이어야 한다(clip된 edit_diff가 아니라 raw 텍스트).
+   */
+  old_strings?: string[];
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -72,6 +79,7 @@ for (const c of cases) {
   const v = await judge(c.plan_spec, c.edit_diff, [], [], {
     currentFileContent: c.current_file,
     evidenceContext: c.evidence_context,
+    editOldStrings: c.old_strings,
   });
   const ms = Date.now() - t0;
   const ok = v.verdict === c.expected;
