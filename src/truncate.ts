@@ -103,7 +103,11 @@ export function truncateCurrentFile(content: string, anchors: string[], budget: 
   }
 
   const headEndRaw = Math.min(budget.headBudget, budget.totalBudget, content.length);
-  const headEnd = shrinkToLineBoundary(content, headEndRaw, "backward");
+  const headEndAligned = shrinkToLineBoundary(content, headEndRaw, "backward");
+  // headBudget 안에 개행이 하나도 없으면(예: minified 단일행 파일) shrink가 0까지 당겨 head 자체가
+  // 사라진다 — "head는 무조건 보장" 원칙(scope-critic 지적)을 위해 이 경우만 줄 경계 정렬을
+  // 포기하고 원래 상한을 그대로 쓴다(줄 중간 절단보다 head 소실이 더 나쁘다).
+  const headEnd = headEndAligned > 0 ? headEndAligned : headEndRaw;
   const headRange: Range = { start: 0, end: headEnd };
 
   // head와 겹치는 부분은 윈도우에서 제거(중복 방지) — head 뒤(headEnd 이후)만 윈도우 후보.

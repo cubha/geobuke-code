@@ -5,7 +5,10 @@ import { join } from "node:path";
 import type { Verdict, ReviewVerdict, ScopeQueueEntry, ScopeVerdict, AxisAVerdict, RungVerdict } from "./types.js";
 
 const DEFAULT_MODEL = "claude-haiku-4-5";
-const CLI_TIMEOUT_MS = 30000; // claude -p 폴백 상한(행 방지). 초과 시 kill → fail-open.
+// claude -p 폴백 상한(행 방지). 초과 시 kill → fail-open. 0.12.1 P3: MAX_FIELD 4000→8000
+// 동반 상향(normalize.ts)으로 프롬프트가 커진 만큼 30000→45000(BATCH_API_LIMITS 60_000 미만 유지
+// — 게이트가 배치 상한을 넘어서면 안 된다는 기존 관계식이 깨지지 않게).
+const CLI_TIMEOUT_MS = 45000;
 /** API 트랜스포트 요청 상한(0.12.0 F-15) — 호출 경로 성격에 따라 갈린다. */
 export interface ApiLimits {
   timeoutMs: number;
@@ -15,9 +18,9 @@ export interface ApiLimits {
  * **게이트 전용**(`judge` — PreToolUse 동기 차단). CLI 폴백의 `CLI_TIMEOUT_MS`와 동형: 판정 1회가
  * 이보다 오래 걸리면 fail-open으로 흘려보내는 게 사용자 편집을 무한 차단하는 것보다 낫다.
  * 재시도 1회 — SDK 기본(2회)이면 최악 지연이 timeout×3이 되는데, 동기 차단 경로에서는 지연을
- * 늘려가며 성공률을 사는 트레이드가 성립하지 않는다.
+ * 늘려가며 성공률을 사는 트레이드가 성립하지 않는다. 0.12.1 P3: CLI_TIMEOUT_MS와 동형으로 상향.
  */
-export const GATE_API_LIMITS: ApiLimits = { timeoutMs: 30_000, maxRetries: 1 };
+export const GATE_API_LIMITS: ApiLimits = { timeoutMs: 45_000, maxRetries: 1 };
 /**
  * **배치·비차단 경로**(`judgeReviewed` 코드독해 · `judgeScope` Stop 훅 · `judgeM1Violation`
  * 사후대조). 게이트 상한을 그대로 물리면 안 된다(scope-critic 지적, 2026-08-09): `judgeReviewed`는

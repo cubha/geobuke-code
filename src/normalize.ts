@@ -1,10 +1,10 @@
 import type { EditToolInput } from "./types.js";
 
-// 프롬프트 비대화/지연 방지용 필드 절단 길이. export = 테스트에서 judge.ts MAX_CURRENT_FILE과의
-// 예산 불변식(content 예산 ≥ currentFile 예산)이 현재 거꾸로임을 잠그기 위함(2026-08-07 RCA — P3
-// 대상, 여기선 현행 사실만 고정). Write 시 새 내용은 이 값(4000)에서 잘리고 구버전은 judge.ts
-// MAX_CURRENT_FILE(8000)에서 잘려 비교 기준이 어긋난다 — 아직 수정 안 함.
-export const MAX_FIELD = 4000;
+// 프롬프트 비대화/지연 방지용 필드 절단 길이. judge.ts MAX_CURRENT_FILE과 값을 맞춘다(0.12.1 P3
+// — 예산 불변식 content 예산 ≥ currentFile 예산). Write 시 새 내용(이 값)과 구버전([현재 파일
+// 상태], MAX_CURRENT_FILE)을 같은 기준으로 잘라야 ★★ 회귀판정(구버전에만 있던 형제가 덮어쓰기로
+// 사라지는지)이 정확해진다 — 예전엔 4000 < 8000이라 새 내용만 먼저 잘려 거짓 회귀를 만들었다.
+export const MAX_FIELD = 8000;
 
 function clip(s: string | undefined): string {
   if (!s) return "";

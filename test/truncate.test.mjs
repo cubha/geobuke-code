@@ -83,6 +83,14 @@ test("mergeRanges: 빈 배열", () => {
   assert.deepEqual(mergeRanges([]), []);
 });
 
+test("truncateCurrentFile: headBudget 안에 개행이 전혀 없어도(단일행 minified 파일) head가 소실되지 않는다(scope-critic 지적)", () => {
+  const content = "x".repeat(30) + "\n" + "y".repeat(30); // 첫 30자 구간엔 개행 없음
+  const r = truncateCurrentFile(content, [], { totalBudget: 20, headBudget: 10, windowRadius: 3 });
+  assert.equal(r.truncated, true);
+  assert.ok(r.text.length > 0, "head가 완전히 비어버리면 안 됨");
+  assert.match(r.text, /^x{10}/, "줄 경계 정렬이 불가능하면 원래 상한(headBudget) 그대로 사용");
+});
+
 test("HEAD_BUDGET/WINDOW_RADIUS: MAX_CURRENT_FILE(8000) 예산 안에서 head+최소 1개 윈도우가 항상 성립하는 크기", async () => {
   const { MAX_CURRENT_FILE } = await import("../dist/judge.js");
   assert.ok(HEAD_BUDGET < MAX_CURRENT_FILE, "head가 전체 예산을 다 먹으면 윈도우가 설 자리가 없다");
