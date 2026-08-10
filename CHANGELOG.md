@@ -16,13 +16,17 @@
 - **eval 회귀 — known-fail 0으로 해소** — `src/eval/regression.ts`에 `old_strings` 필드 배선. `test/cases.json` case12는 0.12.0부터 `expectedFailing: true`(P3 착수 전 알려진 결함)였는데 **P3로 해소돼 하드게이트로 승격**했다(앵커 전달 시 실측 10/10 pass, 앵커 제거 시 6/6 block — 이 케이스가 이제 P3 동작 자체를 잠근다). 신규 case19: 앵커-형제 거리가 head+windowRadius를 넘는 경우 여전히 block임을 확인하는 음성 대조군(P3의 한계를 정직하게 문서화). 이로써 `cases.json`에 known-fail이 하나도 남지 않는다.
 
 ### Changed
-- `normalize.ts` `MAX_FIELD` 4000→8000: `judge.ts` `MAX_CURRENT_FILE`(8000)과 동일하게 맞춰 예산 불변식(content 예산 ≥ currentFile 예산)을 충족 — Write 시 새 내용과 구버전을 다른 기준으로 잘라 비교하던 것을 바로잡음(회귀판정 정확도). ⚠️ **이 상수는 Write의 `content`뿐 아니라 Edit/MultiEdit의 `old_string`/`new_string` 절단에도 함께 쓰이므로 편집 본문(`editText`) 최악 크기가 2배가 된다**(실측: Edit 8028→16028자, MultiEdit 5건 40151→80151자). 편집 본문이 덜 잘려 미탐이 줄어드는 이득과 프롬프트 증가라는 비용을 함께 지불하는 트레이드다 — 아래 "적용 범위·한계" 참조.
+- `normalize.ts` `MAX_FIELD` 4000→8000: `judge.ts` `MAX_CURRENT_FILE`(8000)과 동일하게 맞춰 예산 불변식(content 예산 = currentFile 예산)을 충족 — Write 시 새 내용은 4000에서, 구버전 `[현재 파일 상태]`는 8000에서 잘라 **다른 기준으로 비교**하던 것을 바로잡는다. 실사용 트랜스크립트 7,385건 실측 결과 이 비대칭은 드문 엣지가 아니었다: **Write `content`의 21.7%가 4000자를 초과**(p50 2,103 · p90 6,359)해, 다섯 중 하나꼴로 ★★ 덮어쓰기-회귀 규칙이 잘린 새 내용과 덜 잘린 구버전을 대조하고 있었다.
+  - 같은 상수가 Edit/MultiEdit의 `old_string`/`new_string`에도 적용되는데, 여기서도 **올리는 쪽이 옳다**: 잘린 `new_string`은 "이 편집이 형제 케이스를 구현했다"는 사실을 judge에게 감춰 정당한 편집을 차단한다(오탐). 비용은 실질적으로 없다 — Edit `new_string` p99가 3,607자라 **대다수 편집은 상수값과 무관하게 바이트 동일**하고, 4000을 넘는 건 0.75%(46/6,174)뿐이다.
+
+
 - `judge.ts` `CLI_TIMEOUT_MS` 30000→45000, `GATE_API_LIMITS.timeoutMs` 30_000→45_000: 위 예산 증가에 맞춰 동반 조정(`BATCH_API_LIMITS` 60_000 미만 관계는 유지).
 
 ### 적용 범위·한계(정직 표기)
 - P3는 **편집이 실제로 일어난 위치 근처**의 형제만 살린다. 형제 구현이 head(4000자)·윈도우(±1500자) 어디에도 안 닿을 만큼 먼 곳(예: 파일 반대편, 다른 파일)에 있으면 여전히 오탐 가능 — 그건 P2b(grep 근거주입, 0.12.0)나 향후 P2a(작업단위 이력)의 영역이다. case19가 이 경계를 회귀락으로 고정한다.
-- **[현재 파일 상태] 축은 예산 불변**(8000자 그대로 — 창의 *위치*만 재배치). 다만 위 `MAX_FIELD` 상향으로 **편집 본문(`editText`) 축은 최악값이 2배**가 되므로, 전체 프롬프트는 편집이 클수록 커진다. `CLI_TIMEOUT_MS`/`GATE_API_LIMITS`를 45s로 함께 올린 것이 이 증가분에 대한 대응이다.
-- `MultiEdit`은 `edits` 개수에 상한이 없어 편집 본문이 개수에 비례해 커진다(5건이면 최악 80KB). 이는 이번 릴리스가 만든 게 아니라 기존 구조(`computeDeletionScope`도 같은 미상한 배열을 순회)이나, `MAX_FIELD` 2배 상향으로 계수가 커졌다 — security-auditor Warning과 같은 축이라 **개수 캡을 후속 이슈로 이월**한다.
+- **[현재 파일 상태] 축은 예산 불변**(8000자 그대로 — 창의 *위치*만 재배치). `MAX_FIELD` 상향으로 편집 본문 축의 *최악값*은 2배가 되지만 실사용 분포에선 거의 움직이지 않는다(editText p99 5,046자, 8000 초과 0.16%). `CLI_TIMEOUT_MS`/`GATE_API_LIMITS` 45s 상향이 그 여유분을 덮는다.
+- **Write는 예산을 맞췄을 뿐 여전히 잘린다** — `content`의 7.5%는 8000자도 초과한다(p99 24,646 · max 44,184). 그 경우 ★★ 회귀 판정은 양쪽이 *대칭으로* 잘린 상태에서 이뤄진다. 비대칭보다는 낫지만 완전하진 않다.
+- `MultiEdit`은 `edits` 개수에 상한이 없어 편집 본문이 개수에 비례해 커진다(5건 가정 시 최악 80KB). 다만 **실사용 트랜스크립트 7,385건에서 MultiEdit 호출은 0회**라 현재로선 이론값이다. security-auditor Warning(앵커 개수 미상한)과 같은 축이므로 **개수 캡을 후속 이슈로 이월**한다.
 
 검증: `verify.sh --full` **1050/1050**(빌드 포함) · `npm run eval` hard **19/19**(FP0·FN0, **known-fail 0** — 0.12.0의 known-fail 1건이 P3로 해소돼 하드게이트 편입) · scope 회귀 6/6 · scope-critic 전 SubTask(head 소실 가드·골든 저장 fidelity 버그 포착) · security-auditor **Critical 0**(Warning 1건=`editOldStrings`/`edits` 배열 개수 미상한 — `computeDeletionScope`(0.12.0 F-8)에 이미 있던 동형 패턴 재사용이라 이번 릴리스 신규 결함 아님, 캡은 후속 이슈로 이월. Info 3건 중 프롬프트 노출 조건 변화는 README "[현재 파일 상태] 절단(0.12.1 P3)" 절로 문서화, 나머지 2건은 이상 없음 확인).
 
