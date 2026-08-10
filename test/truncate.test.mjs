@@ -56,8 +56,8 @@ test("truncateCurrentFile: 서로 가까운 두 앵커의 윈도우는 하나로
 
 test("truncateCurrentFile: 예산 초과 시 문서 뒤쪽 윈도우부터(남는 예산 부족) 드롭된다", () => {
   const content = makeLines(80); // 399자
-  // 서로 멀리 떨어진 두 앵커, 둘 다 넣으면 예산 초과 — 문서상 앞선 것만 남아야 함
-  const r = truncateCurrentFile(content, ["L020", "L070"], { totalBudget: 40, headBudget: 20, windowRadius: 3 });
+  // 서로 멀리 떨어진 두 앵커, 둘 다 넣으면(윈도우 각 15자) 남는 예산(20자)을 초과 — 문서상 앞선 것만 남아야 함
+  const r = truncateCurrentFile(content, ["L020", "L070"], { totalBudget: 40, headBudget: 20, windowRadius: 8 });
   assert.match(r.text, /L020/, "예산이 허용하는 앞쪽 윈도우는 포함");
   assert.doesNotMatch(r.text, /L070/, "예산 초과분(뒤쪽 윈도우)은 드롭");
 });
