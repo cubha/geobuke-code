@@ -2,6 +2,32 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.12.1] - 2026-08-10
+
+**게이트 오탐 근본수정 P3 — head+편집앵커 윈도우 절단**
+
+[[project_gate_false_positive_rca]]가 남긴 RCA 잔여(오탐 지분 1/4)를 근본수정한다. 0.12.0의 P2b(grep 근거주입)와 독립된 두 번째 판정 로직 변경 — [현재 파일 상태] 절단을 head-only(8000자)에서 "head 고정분(4000자) + 편집 위치(old_string) 주변 윈도우 병합"으로 바꿔, 절단면 뒤쪽 정당 기구현 형제 케이스가 판정에서 항상 보이지 않던 문제를 줄인다.
+
+### Added
+- **`src/truncate.ts`(신규, 순수함수)** — `truncateCurrentFile(content, anchors, budget)`: head 고정분은 항상 보장하고, 편집 앵커(raw old_string) 주변을 줄 경계 정렬로 윈도우에 포함시켜 병합한다. 예산 초과 윈도우는 문서 순서로 드롭(부분 포함 대신 — 결정성 우선). `headBudget` 안에 개행이 전혀 없는 파일(minified 단일행 등)에서 head가 통째로 사라지는 극단 케이스를 가드(scope-critic 포착).
+- **`buildUserMessage`/`judge()` editAnchors/`editOldStrings`** — 편집의 raw old_string(들)을 judge에 전달해 위 윈도우 계산에 사용. Write(전체 덮어쓰기)는 항상 빈 배열(old_string 자체가 없고, GATE_SYSTEM ★★ 규칙상 앵커가 의미 없음).
+- **`gate-core.ts` 배선** — `evaluateGate`가 `input.toolInput`에서 raw old_string(Edit/MultiEdit)을 뽑아 1차 judge 호출과 P2b 근거주입 2단계 재판정 호출 양쪽에 동일하게 전달(두 판정이 서로 다른 절단을 보는 일이 없게).
+- **골든셋 저장 절단도 P3 반영** — `forGoldenStorage`가 나이브 `slice(0, 8000)` 대신 `truncateCurrentFile`을 그대로 재현(`editOldStrings` 전달). 0.12.0 시점 가정("절단 이후는 죽은 용량")이 head+윈도우 절단으로 깨져, 나이브 slice가 윈도우로 살린 절단면 뒤쪽 구간을 저장 시점에 다시 지워버리던 fidelity 결함을 배선 중 발견해 함께 수정(F-13이 막으려던 "거짓 안심"의 재발, 이번엔 currentFileContent 저장 경로).
+- **eval 회귀** — `src/eval/regression.ts`에 `old_strings` 필드 배선. `test/cases.json` case12(0.12.0부터 `expectedFailing: true`로 존재하던 known-fail)에 앵커 추가 + 패딩 텍스트를 자기주장형("실제 로직 없음") → 중립으로 교체(실측 A/B로 편향 확인). 신규 case19: 앵커-형제 거리가 head+windowRadius를 넘는 경우 여전히 block임을 확인하는 음성 대조군(P3의 한계를 정직하게 문서화).
+
+### Changed
+- `normalize.ts` `MAX_FIELD` 4000→8000: `judge.ts` `MAX_CURRENT_FILE`(8000)과 동일하게 맞춰 예산 불변식(content 예산 ≥ currentFile 예산)을 충족 — Write 시 새 내용과 구버전을 다른 기준으로 잘라 비교하던 것을 바로잡음(회귀판정 정확도).
+- `judge.ts` `CLI_TIMEOUT_MS` 30000→45000, `GATE_API_LIMITS.timeoutMs` 30_000→45_000: 위 예산 증가에 맞춰 동반 조정(`BATCH_API_LIMITS` 60_000 미만 관계는 유지).
+
+### 적용 범위·한계(정직 표기)
+- P3는 **편집이 실제로 일어난 위치 근처**의 형제만 살린다. 형제 구현이 head(4000자)·윈도우(±1500자) 어디에도 안 닿을 만큼 먼 곳(예: 파일 반대편, 다른 파일)에 있으면 여전히 오탐 가능 — 그건 P2b(grep 근거주입, 0.12.0)나 향후 P2a(작업단위 이력)의 영역이다. case19가 이 경계를 회귀락으로 고정한다.
+- 프롬프트에 실리는 원문 크기가 실질적으로 늘지 않는다(총 예산 8000자 그대로) — 지연·비용에 새 부담은 없다.
+- LLM 판정은 콘텐츠가 올바로 보여도 결정론적으로 뒤집히지 않을 수 있다(haiku 경계 케이스 확률적 판정, case12 실측 ~8/11 pass). "P3가 못 고쳤다"가 아니라 "확률을 개선하되 보장은 못한다"가 정확한 서술.
+
+검증: `verify.sh --full` **1050/1050**(빌드 포함) · `npm run eval` hard **18/18**(FP0·FN0, known-fail 1건은 설계 의도대로 유지) · scope 회귀 6/6 · scope-critic 전 SubTask(head 소실 가드·골든 저장 fidelity 버그 포착) · security-auditor **Critical 0**(Warning 1건=`editOldStrings`/`edits` 배열 개수 미상한 — `computeDeletionScope`(0.12.0 F-8)에 이미 있던 동형 패턴 재사용이라 이번 릴리스 신규 결함 아님, 캡은 후속 이슈로 이월. Info 3건 중 프롬프트 노출 조건 변화는 README "[현재 파일 상태] 절단(0.12.1 P3)" 절로 문서화, 나머지 2건은 이상 없음 확인).
+
+**재init 안내** — hook 계약(`settings.json` 배선·`src/hook.ts`) 무변경 = **재init 불요**.
+
 ## [0.12.0] - 2026-08-09
 
 **게이트 오탐 근본수정 — grep 근거주입(P2b) + 측정인프라 + 회귀락 + EPERM 안내 개선**
