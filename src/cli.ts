@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 
 import { runPreToolUse, runStop, runSessionStart } from "./hook.js";
+import { resolveProjectRoot } from "./store.js";
 import {
   loadPlanSpec,
   computeSpecHash,
@@ -128,6 +129,8 @@ function logCli(cwd: string, kind: EventKind, specHash: string, missing?: string
 }
 
 // ---------- gbc init ----------
+// resolveProjectRoot 미적용(의도적, 0.12.2) — init은 "여기에 게이트를 설치"라는 명시적 위치
+// 지정 동작이라, 조상의 진짜 루트로 조용히 치환되면 사용자가 지정한 위치가 아닌 곳에 설치된다.
 async function cmdInit(args: string[]): Promise<void> {
   const cwd = process.cwd();
   const yes = args.includes("--yes") || args.includes("-y");
@@ -255,7 +258,7 @@ ${
 async function cmdStatus(): Promise<void> {
   // 버전 캐시가 stale면 갱신(status는 대화형이라 짧은 대기 허용). 실패는 무시(refreshCacheIfStale 내부).
   await refreshCacheIfStale(true);
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   const { text, source, warning } = loadPlanSpec(cwd);
   // R6 순수화로 loadPlanSpec이 stderr 대신 반환하는 컨테인먼트 경고를 CLI가 표면화.
   if (warning) console.error(warning);
@@ -287,7 +290,7 @@ async function cmdStatus(): Promise<void> {
 
 // ---------- gbc defer ----------
 function cmdDefer(args: string[]): void {
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   const sub = args[0];
   if (sub === "add") {
     const item = args.slice(1).join(" ").trim();
@@ -360,7 +363,7 @@ function cmdDefer(args: string[]): void {
 
 // ---------- gbc spec ----------
 function cmdSpec(args: string[]): void {
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   const sub = args[0];
   if (sub === "add") {
     const item = args.slice(1).join(" ").trim();
@@ -401,7 +404,7 @@ function cmdSpec(args: string[]): void {
  * defer는 건드리지 않는다 — 미해결 defer는 작업단위를 넘어 이월되는 별도 수명주기다.
  */
 function cmdDone(): void {
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   const beforeHash = curHash(cwd);
   const archived = archiveSpec(cwd);
   logCli(cwd, "done", beforeHash);
@@ -433,7 +436,7 @@ function verifySymbol(c: CaseVerdict): string {
  * 사용자 파일(package.json 등)은 수정하지 않는다. 실행도 하지 않는다(안내 출력만 — RCE 불변식 보존).
  */
 function cmdVerifyInit(): void {
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   const plan = scaffoldVerify(cwd);
   console.log(`🐢 verify 배선 스캐폴딩 — 감지 러너: ${plan.runner}`);
   for (const f of plan.files) console.log(`  📄 생성: ${f.rel}`);
@@ -449,7 +452,7 @@ function cmdVerifyInit(): void {
  * docs/design/DESIGN-verify-run-2026-07-05.md.
  */
 async function cmdVerifyRun(rest: string[]): Promise<void> {
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   // 재귀 가드(advisor #6b) — pin 명령이 --run을 재포함하면 10분 타이머 중첩 폭주.
   if (process.env.GBC_RUN_ACTIVE === "1") {
     console.error("🐢 --run 재귀 호출 거부 — pin 명령 안에서 'gbc verify --run'을 다시 부를 수 없습니다.");
@@ -494,7 +497,7 @@ async function cmdVerifyRun(rest: string[]): Promise<void> {
 async function cmdVerify(args: string[] = []): Promise<void> {
   if (args[0] === "--init") return cmdVerifyInit();
   if (args[0] === "--run") return cmdVerifyRun(args.slice(1));
-  return cmdVerifyReport(process.cwd());
+  return cmdVerifyReport(resolveProjectRoot(process.cwd()));
 }
 
 /** verify 읽기·판독 경로(공용) — lastEditAt 주입 시 provenance 기준을 대체(--run의 run-start 검사). */
@@ -547,7 +550,7 @@ async function cmdVerifyReport(cwd: string, lastEditAt?: string): Promise<void> 
 
 // ---------- gbc gate ----------
 async function cmdGate(args: string[]): Promise<void> {
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   if (args[0] === "reset") {
     logCli(cwd, "gate-reset", curHash(cwd));
     resetGate(cwd);
@@ -943,7 +946,7 @@ ${silentBlock}
 }
 
 function cmdMetrics(args: string[]): void {
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   const all = args.includes("--all");
   // --since(0.12.0 F-1) — 시간창 제한. 전체 재계산은 기존 표본이 신규 행동을 희석해 개선 여부와
   // 무관하게 "변화 없음"으로 읽히게 만든다(RCA 후속 PR#2 착수조건). 해석 실패는 **명시적 실패**로
@@ -1018,7 +1021,7 @@ function cmdMetrics(args: string[]): void {
  * 결과는 .gbc/scores.json 스냅샷으로 저장돼 gbc metrics의 위반율에 반영된다.
  */
 async function cmdScore(args: string[]): Promise<void> {
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   const exPath = extractionPath(cwd);
   const records = parseExtraction(existsSync(exPath) ? readFileSync(exPath, "utf8") : "");
   if (records.length === 0) {
@@ -1075,7 +1078,7 @@ async function cmdScore(args: string[]): Promise<void> {
  * ★재init은 '새로 깔린' 바이너리를 fresh spawn해야 신규 스킬·hook이 반영된다(현재 실행 중인 건 구버전).
  */
 function cmdUpdate(args: string[]): void {
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   const dry = args.includes("--dry-run");
   const isProject = existsSync(join(cwd, ".gbc"));
   const steps = ["npm i -g geobuke-code@latest", ...(isProject ? ["gbc init --yes"] : [])];
@@ -1115,6 +1118,8 @@ function cmdUpdate(args: string[]): void {
 /**
  * 크로스-repo 레지스트리 관리(0.2.9). 등록된 타 repo의 미해결 defer가 SessionStart에 환기된다.
  * 글로벌 ~/.gbc/repos.json. 경로 생략 시 현재 폴더(cwd).
+ * resolveProjectRoot 미적용(의도적, 0.12.2) — add/remove는 "이 경로를 정확히 등록/해제"라는
+ * 명시적 경로 지정 동작이라 gbc init과 동일한 이유로 조상 루트로 치환하면 안 된다.
  */
 function cmdRepos(args: string[]): void {
   const [sub, ...rest] = args;
@@ -1198,7 +1203,7 @@ function cmdRepos(args: string[]): void {
  * engine/gate-sdk는 동적 import — 이 경로에 진입할 때만 agent-sdk가 로드된다(B-모드 핫패스 무영향).
  */
 async function cmdRun(args: string[]): Promise<void> {
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   const autoAllow = args.includes("--yes") || args.includes("-y");
   const mi = args.indexOf("--model");
   const model = mi >= 0 ? args[mi + 1] : undefined;
@@ -1295,7 +1300,7 @@ function suppressNodeWarnings(): void {
 
 async function cmdTui(args: string[]): Promise<void> {
   suppressNodeWarnings();
-  const cwd = process.cwd();
+  const cwd = resolveProjectRoot(process.cwd());
   const mi = args.indexOf("--model");
   const model = mi >= 0 ? args[mi + 1] : undefined;
   try {
