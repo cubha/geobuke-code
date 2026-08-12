@@ -2,7 +2,7 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
-## [Unreleased]
+## [0.12.2] - 2026-08-13
 
 **프로젝트 루트 해석 발산 근본수정 — stray `.gbc` 마커 하이재킹**
 
@@ -19,7 +19,7 @@ daily-news-dispatch 실사용 리포트("SessionStart hook 미등록" 오탐)에
 - daily-news-dispatch·fa-support·codebase-viz 3개 repo에서 실측된 stray `.gbc` 13곳(격리 완료, 삭제 아닌 이동) — `gbc init`을 거친 적 없는 하위 디렉토리에 과거 읽기 호출로 생성된 화석.
 - init-staleness 안내("SessionStart hook 미등록")가 stray 마커 때문에 진짜 루트에서도 오탐하던 것 — 근본수정은 `resolveProjectRoot`에 있고, `notice.ts`/`install.ts`의 판정 로직·문구 자체는 원래도 정확했음을 종단 회귀로 확인(SessionStart·PreToolUse 두 진입점 모두).
 
-검증: `verify.sh --full` 예정(COMPLETE 게이트에서 1회) · 단위 테스트 다수 신규(store/doctor/unit/extraction) · scope-critic 전 SubTask(SubTask3 gbcDir 분리에서 withStoreLock lockDir mkdir 순서 문제 지적·반영, SubTask5 doctor 격리 실패 무음·폴백 침묵 지적·반영).
+검증: `verify.sh --full` **1073/1073**(빌드 포함) · 단위 테스트 다수 신규(store/doctor/unit/extraction) · scope-critic 전 SubTask(SubTask3 gbcDir 분리에서 withStoreLock lockDir mkdir 순서 문제 지적·반영, SubTask5 doctor 격리 실패 무음·폴백 침묵 지적·반영).
 
 **재init 안내** — hook 계약 무변경(`resolveProjectRoot`는 hook.ts 내부에서 이미 쓰이던 함수의 확장) = 재init 불요.
 
