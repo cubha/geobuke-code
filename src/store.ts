@@ -30,7 +30,29 @@ export function gbcDir(cwd: string): string {
 }
 
 /**
- * cwd에서 조상 디렉토리로 올라가며 .gbc가 있는 프로젝트 루트를 찾는다(0.9.3 ST1).
+ * dir이 gbc init으로 설치된 진짜 게이트 루트인지 판별(0.12.2 — 프로젝트 루트 해석 발산 근본수정).
+ *
+ * 근본원인(daily-news-dispatch 도그푸딩 실측, 2026-08-12): resolveProjectRoot는 최내곽 .gbc를
+ * 무조건 신뢰했다. 그런데 하위 디렉토리에서 gbc 관련 읽기가 한 번이라도 발생하면 gbcDir()의
+ * mkdir-on-access가 그 자리에 빈 .gbc를 남긴다(fossil). 이후 그 하위트리의 모든 세션은 상위의
+ * 진짜 spec.md를 영원히 못 보고 명세 0 상태로 판정된다(실측: 486이벤트 전부 specHash=""·block 148건).
+ *
+ * 판별 기준 = 형제 `.claude/skills/gate/` 존재 여부. gbc init만 이 디렉토리를 만들고(cli.ts cmdInit),
+ * 다른 어떤 read/write 경로도 만들지 않는다 — 순수 구조 판별이라 아래 두 함정을 피한다:
+ * - 빈 spec.md(방금 gbc init) → 여전히 true (내용 기반 판별이면 여기서 오탐)
+ * - `gbc done` 직후 spec.md가 비워짐(project_defer_spec_drift_rootcause 설계) → 여전히 true
+ * - 심링크는 신뢰하지 않는다(lstatSync는 심링크를 따라가지 않아 isDirectory()가 자연히 false).
+ */
+export function isRealGateRoot(dir: string): boolean {
+  try {
+    return lstatSync(join(dir, ".claude", "skills", "gate")).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * cwd에서 조상 디렉토리로 올라가며 .gbc가 있는 프로젝트 루트를 찾는다(0.9.3 ST1, 0.12.2 stray 스킵).
  *
  * 근본원인(fa-support 도그푸딩 오탐 리포트, 2026-07-13): loadPlanSpec은 cwd/.gbc/spec.md만 보고
  * 조상 walk-up이 없다 — 순차 파이프라인 중 hook 진입 시점의 cwd가 프로젝트 루트 하위 디렉토리면
@@ -42,6 +64,8 @@ export function gbcDir(cwd: string): string {
  *   프로젝트 명세 루트로 오인하면 안 된다.
  * - `.gbc`가 심링크면 신뢰하지 않고 계속 올라간다 — lstatSync는 심링크를 따라가지 않으므로
  *   isDirectory()가 자연히 false가 되어 걸러진다.
+ * - `.gbc`는 있지만 `isRealGateRoot`가 false면(stray/fossil) 그 지점을 건너뛰고 계속 올라간다
+ *   (0.12.2) — 진짜 루트를 상위에서 찾을 기회를 준다.
  * - 어디서도 못 찾으면 원래 cwd를 그대로 반환한다(신규 프로젝트의 gbcDir mkdir 동작 불변).
  */
 export function resolveProjectRoot(cwd: string, opts: { homeDir?: string } = {}): string {
@@ -52,7 +76,7 @@ export function resolveProjectRoot(cwd: string, opts: { homeDir?: string } = {})
     if (dir === home) break; // 홈 자신은 절대 후보에 넣지 않는다(전역 ~/.gbc 오인 방지)
     const marker = join(dir, ".gbc");
     try {
-      if (lstatSync(marker).isDirectory()) return dir;
+      if (lstatSync(marker).isDirectory() && isRealGateRoot(dir)) return dir;
     } catch {
       /* 없음 또는 접근 실패 — 다음 조상으로 */
     }

@@ -18,6 +18,7 @@ test("resolveProjectRoot: cwd 자신에 .gbc가 있으면 cwd 그대로(가장 �
   const root = tmpRoot();
   try {
     mkdirSync(join(root, ".gbc"));
+    mkdirSync(join(root, ".claude", "skills", "gate"), { recursive: true }); // 0.12.2: 진짜 루트 표식
     assert.equal(resolveProjectRoot(root, { homeDir: dirname(root) }), root);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -28,6 +29,7 @@ test("resolveProjectRoot: 하위 디렉토리에서 시작해도 .gbc 있는 조
   const root = tmpRoot();
   try {
     mkdirSync(join(root, ".gbc"));
+    mkdirSync(join(root, ".claude", "skills", "gate"), { recursive: true }); // 0.12.2: 진짜 루트 표식
     const sub = join(root, "a", "b", "c");
     mkdirSync(sub, { recursive: true });
     assert.equal(resolveProjectRoot(sub, { homeDir: dirname(root) }), root);
