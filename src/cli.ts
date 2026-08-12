@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // gbc — 거북이코드 CLI. zero-dep 인자 파싱(핫패스 보호).
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, relative } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import {
@@ -40,6 +40,7 @@ import { parseExtraction, extractionPath } from "./extraction.js";
 import { loadState, resetGate } from "./state.js";
 import { addDefer, ackDefer, loadDefers, resolveDefer, startDefer, withdrawDefer, reopenDefer, isClosedStatus, unresolvedDefers } from "./defer.js";
 import { loadRepos, addRepo, removeRepo, getVerifyRunPin, setVerifyRunPin } from "./repos.js";
+import { findStrayGbcMarkers, quarantineStrayMarkers } from "./doctor.js";
 import { resolveRunCommand, runRunnerCommand } from "./run.js";
 import { statVerifyResults } from "./junit.js";
 import { readPendingReview, clearPendingReview, resolveRefs } from "./review.js";
@@ -1195,6 +1196,56 @@ function cmdRepos(args: string[]): void {
   }
 }
 
+// ---------- gbc doctor (0.12.2 SubTask5) ----------
+/**
+ * 프로젝트 루트 해석 발산 사후 정리 — 하위 디렉토리에 남은 stray(화석) .gbc를 찾아 보고한다.
+ * 근본원인은 이미 고쳤다(resolveProjectRoot가 isRealGateRoot로 stray를 건너뜀 + gbcDir이 읽기에서
+ * 더는 마커를 만들지 않음) — 이 커맨드는 **과거에 이미 생긴** 화석의 사후 가시화·정리 전용이다.
+ * --fix 없으면 보고만(read-only). --fix면 삭제가 아니라 격리(포렌식 보존, quarantineStrayMarkers).
+ * 등록 repo(~/.gbc/repos.json)가 있으면 그걸 순회, 없으면 현재(resolveProjectRoot) 단일 repo만.
+ */
+function cmdDoctor(args: string[]): void {
+  const fix = args.includes("--fix");
+  const repos = loadRepos();
+  const usingFallback = repos.length === 0;
+  const targets = usingFallback ? [resolveProjectRoot(process.cwd())] : repos;
+  if (usingFallback) {
+    console.log(
+      "⚠️ 등록된 repo 없음(~/.gbc/repos.json) — 현재 폴더만 검사합니다. 여러 프로젝트를 쓴다면 'gbc repos add'로 등록 후 재실행하세요.",
+    );
+  }
+  let totalStray = 0;
+  for (const repo of targets) {
+    let found;
+    try {
+      found = findStrayGbcMarkers(repo);
+    } catch {
+      continue; // 접근 불가 repo는 건너뜀(진단 도구가 크래시하면 안 됨)
+    }
+    if (found.length === 0) continue;
+    totalStray += found.length;
+    console.log(`🐢 ${repo}`);
+    for (const m of found) {
+      console.log(`  ⚠️ stray .gbc: ${relative(repo, m.dir) || "."}  (형제 .claude/skills/gate/ 없음 — gbc init 이력 없음)`);
+    }
+    if (fix) {
+      const stamp = nowStamp();
+      const { moved, failed } = quarantineStrayMarkers(repo, found, { stamp });
+      console.log(`  → ${moved.length}/${found.length}건 격리(.gbc-quarantine-${stamp}/ — 삭제 아님, 필요 시 직접 확인 후 정리)`);
+      for (const f of failed) {
+        console.log(`  ✗ 격리 실패: ${relative(repo, f.marker.dir) || "."} — ${f.reason}`);
+      }
+    }
+  }
+  if (totalStray === 0) {
+    console.log("🐢 gbc doctor — stray .gbc 화석 없음.");
+    return;
+  }
+  if (!fix) {
+    console.log(`\n총 ${totalStray}건 발견(read-only 보고). 격리하려면: gbc doctor --fix`);
+  }
+}
+
 // ---------- gbc run (A-mode 스파이크, 0.7.0 A1) ----------
 /**
  * gbc run "<프롬프트>" [--yes] [--model <m>] — A-mode 엔진 실행(agent-sdk in-process 게이트).
@@ -1386,6 +1437,8 @@ function usage(): void {
   gbc repos add [경로]                크로스-repo 레지스트리에 추가(생략 시 현재 폴더)
   gbc repos list                      등록된 repo + 미해결 defer 수
   gbc repos remove [경로]             레지스트리에서 제거
+  gbc doctor [--fix]                  하위 디렉토리의 stray(화석) .gbc 마커 탐지(등록 repo 순회,
+                                      없으면 현재 repo). --fix=삭제 아닌 격리(.gbc-quarantine-<시각>/)
   gbc hook pre-tool-use               (내부) PreToolUse hook
   gbc hook stop                       (내부) Stop hook
   gbc hook session-start              (내부) SessionStart hook (미해결 defer 알림)
@@ -1429,6 +1482,8 @@ async function main(): Promise<void> {
       return cmdScore(rest);
     case "repos":
       return cmdRepos(rest);
+    case "doctor":
+      return cmdDoctor(rest);
     case undefined:
     case "help":
     case "--help":

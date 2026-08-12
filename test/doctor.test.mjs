@@ -108,8 +108,9 @@ test("quarantineStrayMarkers: 삭제가 아니라 .gbc-quarantine-<stamp>/로 �
     makeStray(sub);
     writeFileSync(join(sub, ".gbc", "events.jsonl"), '{"at":"t1"}\n', "utf8");
     const found = findStrayGbcMarkers(root);
-    const moved = quarantineStrayMarkers(root, found, { stamp: "2026-08-12" });
+    const { moved, failed } = quarantineStrayMarkers(root, found, { stamp: "2026-08-12" });
     assert.equal(moved.length, 1);
+    assert.deepEqual(failed, []);
     assert.equal(existsSync(join(sub, ".gbc")), false, "원래 자리에서 사라져야 한다");
     assert.equal(existsSync(moved[0].quarantinedPath), true, "격리 위치에 보존돼야 한다");
     assert.match(
@@ -121,6 +122,31 @@ test("quarantineStrayMarkers: 삭제가 아니라 .gbc-quarantine-<stamp>/로 �
       readFileSync(join(moved[0].quarantinedPath, "events.jsonl"), "utf8"),
       /"at":"t1"/,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// scope-critic 지적(2026-08-12) — 개별 이동 실패를 조용히 삼키면 "N건 중 몇 건만 격리됐는지" 사용자가
+// 알 수 없다. found와 moved의 차집합을 failed로 명시 반환한다(원인 문자열 포함, 재시도 판단 근거).
+test("quarantineStrayMarkers: 이동 도중 사라진 항목은 failed로 보고하고 나머지는 계속 격리한다", () => {
+  const root = tmpRoot();
+  try {
+    makeRealRoot(root);
+    const ok = join(root, "packages", "ok");
+    const gone = join(root, "packages", "gone");
+    makeStray(ok);
+    makeStray(gone);
+    const found = findStrayGbcMarkers(root);
+    // "gone" 쪽만 quarantine 실행 직전에 사라지게 만들어 renameSync 실패를 유도한다(권한오류 등 실전
+    // 실패의 대리 재현 — ENOENT).
+    rmSync(join(gone, ".gbc"), { recursive: true, force: true });
+    const { moved, failed } = quarantineStrayMarkers(root, found, { stamp: "2026-08-12" });
+    assert.equal(moved.length, 1);
+    assert.equal(moved[0].dir, ok);
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].marker.dir, gone);
+    assert.ok(failed[0].reason.length > 0, "실패 사유 문자열이 있어야 한다");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
