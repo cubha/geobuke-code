@@ -5,7 +5,7 @@
 // (이 경우 append/load 둘 다 완전 no-op — 파일에 아예 아무것도 남기지 않는다).
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { gbcDir, readJsonObject, writeJson, withStoreLock } from "./store.js";
+import { gbcDirPath, ensureGbcDir, readJsonObject, writeJson, withStoreLock } from "./store.js";
 import { redactSecrets } from "./extraction.js";
 
 export interface PromptHistoryOpts {
@@ -15,7 +15,7 @@ export interface PromptHistoryOpts {
 const MAX_ENTRIES_PER_REPO = 100;
 
 function promptHistoryPath(opts: PromptHistoryOpts): string {
-  return join(gbcDir(opts.homeDir ?? homedir()), "prompt-history.json");
+  return join(gbcDirPath(opts.homeDir ?? homedir()), "prompt-history.json");
 }
 
 export function isPromptHistoryDisabled(): boolean {
@@ -44,6 +44,7 @@ export function loadPromptHistory(repoId: string, opts: PromptHistoryOpts = {}):
  * commitSubmit의 히스토리 dedup 규약과 대칭 — 같은 텍스트가 히스토리에 반복 적재되지 않게). */
 export function appendPromptHistory(repoId: string, text: string, opts: PromptHistoryOpts = {}): void {
   if (isPromptHistoryDisabled()) return;
+  ensureGbcDir(opts.homeDir ?? homedir()); // withStoreLock의 lockDir mkdir이 디렉토리 존재를 전제(0.12.2)
   withStoreLock(promptHistoryPath(opts), () => {
     const map = readMap(opts);
     const existing = map[repoId] ?? [];

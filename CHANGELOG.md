@@ -2,6 +2,27 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.12.2] - 2026-08-13
+
+**프로젝트 루트 해석 발산 근본수정 — stray `.gbc` 마커 하이재킹**
+
+daily-news-dispatch 실사용 리포트("SessionStart hook 미등록" 오탐)에서 시작한 RCA. 최초 가설(git worktree)은 braintrust 5렌즈 검토 후 실측으로 반증됐다 — 실제 원인은 하위 디렉토리(`local-agent/`)에 남은 stray `.gbc` 마커가 `resolveProjectRoot`의 조상 walk-up을 가로채, 진짜 루트(spec.md·`.claude/settings.json` 有)를 영원히 못 보고 명세 0 상태로 판정하던 구조적 결함. shadow 스토어 실측: 486이벤트 전부 `specHash:""`, `block` 148건이 명세를 못 본 채 차단됐고 이 이벤트들은 `gbc metrics --all`에 전량 미집계였다.
+
+### Added
+- **`isRealGateRoot(dir)`(`src/store.ts`, 순수함수)** — 형제 `.claude/skills/gate/`(gbc init만 만드는 설치 마커) 존재로 real/stray `.gbc`를 구조적으로 판별. 내용(spec.md 비어있음 등) 기반이 아니라, 방금 `gbc init`한 빈 프로젝트·`gbc done` 직후에도 오탐하지 않는다.
+- **`resolveProjectRoot` stray 스킵** — 조상 walk-up 중 `.gbc`를 찾아도 `isRealGateRoot`가 false면(화석) 건너뛰고 계속 올라간다.
+- **`gbcDirPath()`(순수 경로)·`ensureGbcDir()`(mkdir)** — 기존 `gbcDir()`(읽기 경로에서도 mkdir하던 것, 화석 생성의 근본원인)를 분리. 이걸 쓰던 17개 파일을 읽기/쓰기 경로별로 개별 감사해 배선(`config.ts`·`defer.ts`·`extraction.ts`·`golden.ts`·`hook.ts`·`metrics.ts`·`notice.ts`·`prompt-history.ts`·`repos.ts`·`review.ts`·`scaffold.ts`·`scope.ts`·`scoring.ts`·`session-map.ts`·`spec.ts`·`state.ts`·`tui/app.tsx`). `withStoreLock` 사용처는 lockDir mkdir 자체가 `.gbc` 존재를 전제하므로 호출 전 별도 `ensureGbcDir` 추가.
+- **`cli.ts` 13개 커맨드에 `resolveProjectRoot` 배선** — hook과 달리 CLI는 조상 walk-up을 안 해 "CLI vs hook 루트해석 발산"이 있었다(하위 디렉토리에서 `gbc status`/`gbc spec add` 등을 실행하면 상위 진짜 루트를 못 봤다). `gbc init`·`gbc repos add/remove`는 "이 경로에 정확히 설치/등록"이라는 명시적 위치 지정 동작이라 의도적으로 제외.
+- **`gbc doctor [--fix]`(신규 커맨드, `src/doctor.ts`)** — 과거(이 릴리스 이전)에 이미 생긴 화석 `.gbc`의 사후 탐지·격리. 등록 repo(`gbc repos`) 순회, `--fix` 없으면 보고만(read-only), 있으면 삭제 아닌 격리(`<repo>/.gbc-quarantine-<시각>/`, 포렌식 보존). node_modules·.git 제외, 심링크 미추적, 이미 격리된 디렉토리 재탐지 안 함(멱등).
+
+### Fixed
+- daily-news-dispatch·fa-support·codebase-viz 3개 repo에서 실측된 stray `.gbc` 13곳(격리 완료, 삭제 아닌 이동) — `gbc init`을 거친 적 없는 하위 디렉토리에 과거 읽기 호출로 생성된 화석.
+- init-staleness 안내("SessionStart hook 미등록")가 stray 마커 때문에 진짜 루트에서도 오탐하던 것 — 근본수정은 `resolveProjectRoot`에 있고, `notice.ts`/`install.ts`의 판정 로직·문구 자체는 원래도 정확했음을 종단 회귀로 확인(SessionStart·PreToolUse 두 진입점 모두).
+
+검증: `verify.sh --full` **1073/1073**(빌드 포함) · 단위 테스트 다수 신규(store/doctor/unit/extraction) · scope-critic 전 SubTask(SubTask3 gbcDir 분리에서 withStoreLock lockDir mkdir 순서 문제 지적·반영, SubTask5 doctor 격리 실패 무음·폴백 침묵 지적·반영).
+
+**재init 안내** — hook 계약 무변경(`resolveProjectRoot`는 hook.ts 내부에서 이미 쓰이던 함수의 확장) = 재init 불요.
+
 ## [0.12.1] - 2026-08-10
 
 **게이트 오탐 근본수정 P3 — head+편집앵커 윈도우 절단**

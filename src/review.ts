@@ -4,16 +4,17 @@
 //   제시 → 사용자 분류(--spec refs / --defer refs)를 일괄 addSpecCase/addDefer로 적용 후 clear.
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { gbcDir, readJson, writeJson } from "./store.js";
+import { gbcDirPath, ensureGbcDir, readJson, writeJson } from "./store.js";
 import { selectByRef } from "./text.js";
 import type { PendingReview } from "./types.js";
 
 function pendingPath(cwd: string): string {
-  return join(gbcDir(cwd), "pending-review.json");
+  return join(gbcDirPath(cwd), "pending-review.json");
 }
 
 /** 펜딩-검토 레코드 기록(block 시점). 기존 펜딩을 덮어쓴다(가장 최근 block만 유효). */
 export function writePendingReview(cwd: string, p: PendingReview): void {
+  ensureGbcDir(cwd);
   writeJson(pendingPath(cwd), p);
 }
 

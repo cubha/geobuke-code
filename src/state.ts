@@ -1,10 +1,10 @@
 import { join } from "node:path";
-import { gbcDir, readJson, writeJson, withStoreLock } from "./store.js";
+import { gbcDirPath, ensureGbcDir, readJson, writeJson, withStoreLock } from "./store.js";
 import { nowIso } from "./time.js";
 import type { GateState } from "./types.js";
 
 function statePath(cwd: string): string {
-  return join(gbcDir(cwd), "state.json");
+  return join(gbcDirPath(cwd), "state.json");
 }
 
 export function loadState(cwd: string): GateState | null {
@@ -27,6 +27,7 @@ export function isGated(cwd: string, specHash: string): boolean {
  * 시간차)까지 막는 완전한 수정은 아니다 — 그 경합은 별도 리팩토링 범위(호출부 재구성 필요).
  */
 export function markGated(cwd: string, specHash: string, reason: string): void {
+  ensureGbcDir(cwd); // withStoreLock의 lockDir mkdir이 .gbc 존재를 전제(0.12.2)
   withStoreLock(statePath(cwd), () => {
     const state: GateState = { specHash, gated: true, lastReason: reason, at: nowIso() };
     writeJson(statePath(cwd), state);
@@ -35,6 +36,7 @@ export function markGated(cwd: string, specHash: string, reason: string): void {
 
 /** 작업단위 리셋 — 다음 편집에서 다시 게이트 발동. withStoreLock — markGated와 동일 이유. */
 export function resetGate(cwd: string): void {
+  ensureGbcDir(cwd); // withStoreLock의 lockDir mkdir이 .gbc 존재를 전제(0.12.2)
   withStoreLock(statePath(cwd), () => {
     const s = loadState(cwd);
     const state: GateState = {

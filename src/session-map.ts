@@ -3,14 +3,14 @@
 // 동위(store.ts gbcDir(homedir()) 관례): 크로스프로젝트 데이터라 project .gbc/가 아니라 홈.
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { gbcDir, readJsonObject, writeJson, withStoreLock } from "./store.js";
+import { gbcDirPath, ensureGbcDir, readJsonObject, writeJson, withStoreLock } from "./store.js";
 
 export interface SessionMapOpts {
   homeDir?: string;
 }
 
 function sessionMapPath(opts: SessionMapOpts): string {
-  return join(gbcDir(opts.homeDir ?? homedir()), "session-map.json");
+  return join(gbcDirPath(opts.homeDir ?? homedir()), "session-map.json");
 }
 
 /**
@@ -35,6 +35,7 @@ export function getLastSessionId(repoId: string, opts: SessionMapOpts = {}): str
 // lost-update(한쪽의 갱신이 다른 쪽 rename에 덮여 사라짐)를 막지 못한다.
 
 export function setLastSessionId(repoId: string, sessionId: string, opts: SessionMapOpts = {}): void {
+  ensureGbcDir(opts.homeDir ?? homedir()); // withStoreLock의 lockDir mkdir이 디렉토리 존재를 전제(0.12.2)
   withStoreLock(sessionMapPath(opts), () => {
     const map = readMap(opts);
     map[repoId] = sessionId;
@@ -43,6 +44,7 @@ export function setLastSessionId(repoId: string, sessionId: string, opts: Sessio
 }
 
 export function clearLastSessionId(repoId: string, opts: SessionMapOpts = {}): void {
+  ensureGbcDir(opts.homeDir ?? homedir()); // withStoreLock의 lockDir mkdir이 디렉토리 존재를 전제(0.12.2)
   withStoreLock(sessionMapPath(opts), () => {
     const map = readMap(opts);
     if (!(repoId in map)) return;

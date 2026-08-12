@@ -3,10 +3,10 @@
 // (~/.gbc/api-key·~/.gbc/version-check.json과 동위. gbcDir(homedir())가 ~/.gbc를 보장.)
 import { homedir } from "node:os";
 import { join, resolve, isAbsolute } from "node:path";
-import { gbcDir, readJsonArray, readJsonObject, writeJson, withStoreLock } from "./store.js";
+import { gbcDirPath, ensureGbcDir, readJsonArray, readJsonObject, writeJson, withStoreLock } from "./store.js";
 
 function reposPath(): string {
-  return join(gbcDir(homedir()), "repos.json");
+  return join(gbcDirPath(homedir()), "repos.json");
 }
 
 /**
@@ -29,6 +29,7 @@ export function loadRepos(): string[] {
  */
 export function addRepo(path: string): string[] {
   const abs = resolve(path);
+  ensureGbcDir(homedir()); // withStoreLock의 lockDir mkdir이 ~/.gbc 존재를 전제(0.12.2)
   return withStoreLock(reposPath(), () => {
     const repos = loadRepos();
     if (!repos.includes(abs)) {
@@ -42,6 +43,7 @@ export function addRepo(path: string): string[] {
 /** repo 등록 해제(절대경로 정규화). 반환=해제 후 전체 목록. withStoreLock — addRepo와 동일 이유. */
 export function removeRepo(path: string): string[] {
   const abs = resolve(path);
+  ensureGbcDir(homedir()); // withStoreLock의 lockDir mkdir이 ~/.gbc 존재를 전제(0.12.2)
   return withStoreLock(reposPath(), () => {
     const repos = loadRepos();
     const next = repos.filter((r) => r !== abs);
@@ -57,7 +59,7 @@ export function removeRepo(path: string): string[] {
 // 벡터가 구조적으로 소멸한다(repos.json 동위·미러). 절대 .gbc/config.json으로 옮기지 말 것.
 
 function verifyRunPath(): string {
-  return join(gbcDir(homedir()), "verify-run.json");
+  return join(gbcDirPath(homedir()), "verify-run.json");
 }
 
 /** verify-run.json 판독 — non-object(null·배열 등) 내용은 빈 객체로 방어(크래시 방지, security-auditor Info). */
@@ -75,6 +77,7 @@ export function getVerifyRunPin(repoPath: string): string | null {
 /** repo별 러너 명령 pin 저장(덮어쓰기). withStoreLock — addRepo와 동일한 read-modify-write 보호. */
 export function setVerifyRunPin(repoPath: string, cmd: string): void {
   const abs = resolve(repoPath);
+  ensureGbcDir(homedir()); // withStoreLock의 lockDir mkdir이 ~/.gbc 존재를 전제(0.12.2)
   withStoreLock(verifyRunPath(), () => {
     const raw = readVerifyRunMap();
     raw[abs] = cmd;

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { gbcDir, readJson, writeJson } from "./store.js";
+import { gbcDirPath, ensureGbcDir, readJson, writeJson } from "./store.js";
 
 /**
  * 프로젝트 로컬 토글 설정 (.gbc/config.json).
@@ -14,7 +14,7 @@ interface GbcConfig {
 }
 
 function configPath(cwd: string): string {
-  return join(gbcDir(cwd), "config.json");
+  return join(gbcDirPath(cwd), "config.json");
 }
 
 function readConfig(cwd: string): GbcConfig {
@@ -30,6 +30,7 @@ function getFlag(cwd: string, key: keyof GbcConfig): boolean {
 function setFlag(cwd: string, key: keyof GbcConfig, value: boolean): void {
   const cfg = readConfig(cwd);
   cfg[key] = value;
+  ensureGbcDir(cwd);
   writeJson(configPath(cwd), cfg);
 }
 

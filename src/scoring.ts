@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { GateEvent } from "./metrics.js";
 import type { ExtractionRecord } from "./extraction.js";
-import { gbcDir } from "./store.js";
+import { gbcDirPath, ensureGbcDir } from "./store.js";
 
 /**
  * 한 세션의 게이트 판정 + 엔진 추출 묶음. scorable=false는 extraction 없는 B-모드 세션(stdin hook만) —
@@ -194,7 +194,7 @@ export function formatEditsForScore(edits: ExtractionRecord[]): string {
 
 /** .gbc/scores.json 경로 — gbc score의 스냅샷 산출물(채점은 재실행 시 덮어씀). */
 export function scoresPath(cwd: string): string {
-  return join(gbcDir(cwd), "scores.json");
+  return join(gbcDirPath(cwd), "scores.json");
 }
 
 /** scores.json 로드. 부재·깨짐은 [](채점 없음으로 정직 처리 — metrics가 rate:null 표시). */
@@ -215,6 +215,7 @@ export function loadScores(cwd: string): SessionScore[] {
 /** scores.json 저장(스냅샷 덮어쓰기). 실패는 삼킨다(채점 출력 자체는 이미 화면에 있음). */
 export function saveScores(cwd: string, scores: SessionScore[], at: string): void {
   try {
+    ensureGbcDir(cwd);
     writeFileSync(scoresPath(cwd), JSON.stringify({ at, scores }, null, 2) + "\n", "utf8");
   } catch {
     /* fail-silent */

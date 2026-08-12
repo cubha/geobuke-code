@@ -4,11 +4,11 @@
 // cwd를 프로젝트 루트로 정정한다. read-only — mkdir 부작용은 여전히 gbcDir()가 담당(분리 유지).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawn } from "node:child_process";
-import { resolveProjectRoot, writeJson, readJson, withStoreLock } from "../dist/store.js";
+import { resolveProjectRoot, isRealGateRoot, gbcDirPath, ensureGbcDir, writeJson, readJson, withStoreLock } from "../dist/store.js";
 
 function tmpRoot() {
   return mkdtempSync(join(tmpdir(), "gbc-store-test-"));
@@ -18,6 +18,7 @@ test("resolveProjectRoot: cwd 자신에 .gbc가 있으면 cwd 그대로(가장 �
   const root = tmpRoot();
   try {
     mkdirSync(join(root, ".gbc"));
+    mkdirSync(join(root, ".claude", "skills", "gate"), { recursive: true }); // 0.12.2: 진짜 루트 표식
     assert.equal(resolveProjectRoot(root, { homeDir: dirname(root) }), root);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -28,6 +29,7 @@ test("resolveProjectRoot: 하위 디렉토리에서 시작해도 .gbc 있는 조
   const root = tmpRoot();
   try {
     mkdirSync(join(root, ".gbc"));
+    mkdirSync(join(root, ".claude", "skills", "gate"), { recursive: true }); // 0.12.2: 진짜 루트 표식
     const sub = join(root, "a", "b", "c");
     mkdirSync(sub, { recursive: true });
     assert.equal(resolveProjectRoot(sub, { homeDir: dirname(root) }), root);
@@ -86,6 +88,133 @@ test("resolveProjectRoot: 순수성 — 파일시스템을 변경하지 않는�
     mkdirSync(sub, { recursive: true });
     resolveProjectRoot(sub, { homeDir: dirname(root) });
     assert.equal(existsSync(join(root, ".gbc")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ===== gbcDirPath(순수)·ensureGbcDir(mkdir) 분리 (0.12.2 SubTask3) =====
+// 옛 gbcDir()는 읽기 경로에서도 존재하지 않으면 mkdir했다 — 등록 repo를 순회하며 메트릭 존재만
+// 확인하는 호출조차 하위 디렉토리에 빈 .gbc를 남겨(daily-news-dispatch 실측) resolveProjectRoot의
+// walk-up을 가로챘다. 읽기는 gbcDirPath(부작용 없음), 쓰기 직전만 ensureGbcDir을 쓴다.
+
+test("gbcDirPath: 순수 경로 조립 — 디렉토리를 만들지 않는다", () => {
+  const root = tmpRoot();
+  try {
+    const dir = gbcDirPath(root);
+    assert.equal(dir, join(root, ".gbc"));
+    assert.equal(existsSync(dir), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureGbcDir: 없으면 만들고 경로를 반환한다(신규 프로젝트 첫 쓰기는 여전히 성공)", () => {
+  const root = tmpRoot();
+  try {
+    const dir = ensureGbcDir(root);
+    assert.equal(dir, join(root, ".gbc"));
+    assert.equal(existsSync(dir), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureGbcDir: 이미 있으면 그대로 반환(멱등, 재생성 시도 없음)", () => {
+  const root = tmpRoot();
+  try {
+    const first = ensureGbcDir(root);
+    const second = ensureGbcDir(root);
+    assert.equal(first, second);
+    assert.equal(existsSync(second), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ===== isRealGateRoot + stray .gbc 하이재킹 방지 (0.12.2 — daily-news-dispatch 도그푸딩 실측) =====
+// 실측(2026-08-12): daily-news-dispatch/local-agent/.gbc(stray)가 resolveProjectRoot의 innermost
+// walk-up을 가로채, 실제 루트(daily-news-dispatch/.gbc, spec.md 有)를 영원히 못 보게 함 — 486개
+// 이벤트가 전부 specHash=""로 오판. gbc init이 .gbc와 함께 반드시 설치하는 .claude/skills/gate/의
+// 존재 여부로 real/stray를 구분한다(내용 기반 판별은 빈 spec.md·gbc done 직후 오탐하므로 기각).
+
+test("isRealGateRoot: .claude/skills/gate/ 형제가 있으면 true", () => {
+  const root = tmpRoot();
+  try {
+    mkdirSync(join(root, ".gbc"));
+    mkdirSync(join(root, ".claude", "skills", "gate"), { recursive: true });
+    assert.equal(isRealGateRoot(root), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("isRealGateRoot: .claude/skills/gate/ 형제가 없으면 false(stray)", () => {
+  const root = tmpRoot();
+  try {
+    mkdirSync(join(root, ".gbc"));
+    assert.equal(isRealGateRoot(root), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("isRealGateRoot: 빈 spec.md(방금 gbc init)여도 gate스킬이 있으면 true(내용무관 구조판별)", () => {
+  const root = tmpRoot();
+  try {
+    mkdirSync(join(root, ".gbc"));
+    writeFileSync(join(root, ".gbc", "spec.md"), "");
+    mkdirSync(join(root, ".claude", "skills", "gate"), { recursive: true });
+    assert.equal(isRealGateRoot(root), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("isRealGateRoot: skills/gate가 심링크면 신뢰하지 않는다(false)", () => {
+  const root = tmpRoot();
+  try {
+    mkdirSync(join(root, ".gbc"));
+    const real = join(root, "real-skill-target");
+    mkdirSync(real);
+    mkdirSync(join(root, ".claude", "skills"), { recursive: true });
+    symlinkSync(real, join(root, ".claude", "skills", "gate"), "dir");
+    assert.equal(isRealGateRoot(root), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveProjectRoot: 하위 stray .gbc(형제 gate스킬 없음)를 건너뛰고 상위 진짜 루트를 찾는다(daily-news-dispatch 재현)", () => {
+  const root = tmpRoot();
+  try {
+    mkdirSync(join(root, ".gbc"));
+    mkdirSync(join(root, ".claude", "skills", "gate"), { recursive: true });
+    const sub = join(root, "local-agent");
+    mkdirSync(join(sub, ".gbc"), { recursive: true }); // stray — 형제 gate스킬 없음
+    assert.equal(resolveProjectRoot(sub, { homeDir: dirname(root) }), root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveProjectRoot: 모두 stray면 원래 cwd로 fallback(기존 불변식 보존)", () => {
+  const root = tmpRoot();
+  try {
+    const sub = join(root, "a");
+    mkdirSync(join(sub, ".gbc"), { recursive: true }); // stray — 형제 gate스킬 없음, root에도 없음
+    assert.equal(resolveProjectRoot(sub, { homeDir: dirname(root) }), sub);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveProjectRoot: cwd 자신이 real이면 그대로 반환(회귀 없음)", () => {
+  const root = tmpRoot();
+  try {
+    mkdirSync(join(root, ".gbc"));
+    mkdirSync(join(root, ".claude", "skills", "gate"), { recursive: true });
+    assert.equal(resolveProjectRoot(root, { homeDir: dirname(root) }), root);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

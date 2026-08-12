@@ -20,7 +20,7 @@ import {
   reopenDefer,
 } from "../dist/defer.js";
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
-import { addSpecCase, readSpecCases, clearSpec, archiveSpec, pruneSpecArchive } from "../dist/spec.js";
+import { addSpecCase, readSpecCases, clearSpec, archiveSpec, pruneSpecArchive, resolveSpecText } from "../dist/spec.js";
 import {
   buildBlockReason,
   shouldCacheVerdict,
@@ -610,6 +610,81 @@ test("SessionStart 상태줄: muted + 미해결 defer면 음소거 환기 1줄, 
   }
 });
 
+// 0.12.2 SubTask3 — cli.ts는 hook.ts와 달리 resolveProjectRoot를 쓰지 않아, 하위 디렉토리에서
+// 실행한 CLI 명령이 상위 진짜 루트를 못 보고 그 자리에 새 .gbc 화석을 만들던 "CLI vs hook 루트해석
+// 발산"(daily-news-dispatch 실측의 2차 재현 경로). gbc status를 하위 디렉토리에서 실행해도 상위의
+// 진짜 spec.md를 봐야 한다.
+test("gbc status: 하위 디렉토리에서 실행해도 상위 진짜 루트(spec.md)를 해석해 사용한다(gbc init 제외 루트해석)", () => {
+  const proj = tmp();
+  const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  const env = { ...process.env, GBC_NO_UPDATE_NOTICE: "1" };
+  try {
+    // 진짜 루트 표식: .gbc/spec.md + .claude/skills/gate/(gbc init만 만드는 구조 판별자, 0.12.2)
+    mkdirSync(join(proj, ".claude", "skills", "gate"), { recursive: true });
+    mkdirSync(join(proj, ".gbc"), { recursive: true });
+    writeFileSync(join(proj, ".gbc", "spec.md"), "# 작업 명세\n\n- [ ] 진짜 루트 케이스\n", "utf8");
+    const sub = join(proj, "sub", "dir");
+    mkdirSync(sub, { recursive: true });
+    const out = execFileSync(process.execPath, [cli, "status"], { cwd: sub, env, encoding: "utf8" });
+    assert.doesNotMatch(out, /명세 소스: \(없음\)/, "하위 디렉토리에서도 상위 spec.md를 찾아야 한다");
+    const specSourceLine = out.split("\n").find((l) => l.includes("명세 소스:"));
+    assert.match(specSourceLine, /spec\.md \(\d+자\)/, "루트의 실제 spec.md 내용이 보여야 한다");
+    // 하위 디렉토리 자체에는 화석 .gbc가 생기지 않아야 한다(읽기가 마커를 만들면 안 됨, 0.12.2 SubTask2+3).
+    assert.equal(existsSync(join(proj, "sub", ".gbc")), false);
+    assert.equal(existsSync(join(sub, ".gbc")), false);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+// 0.12.2 SubTask4 — 이 세션의 발단이 된 실제 증상: 하위 디렉토리(daily-news-dispatch/local-agent
+// 재현)에 stray .gbc가 있으면, SessionStart hook이 실제로 등록돼 있는 진짜 루트에서도 "SessionStart
+// hook 미등록 — gbc init --yes 재실행을 권장합니다" 오탐 안내가 떴다. 근본원인은 안내 문구 자체가
+// 아니라 hook.ts가 stray를 가로채 readProjectSettings(cwd)가 엉뚱한(설정 없는) 디렉토리를 읽던 것
+// — SubTask2(isRealGateRoot)가 resolveProjectRoot 안에서 이미 고쳤으므로, 여기서는 hook 두 진입점
+// (SessionStart·PreToolUse) 모두에서 오탐이 사라졌음을 종단 회귀로 고정한다(문구 자체를 손댈 필요가
+// 없었다는 것 자체가 SubTask2의 발견 — 계획 당시 예상과 달리 "문구 정정"이 아니라 "검증"이 본질).
+test("SessionStart·PreToolUse: 하위 stray .gbc가 있어도 진짜 루트의 SessionStart hook을 정확히 인식한다(오탐 소멸, daily-news-dispatch 재현)", () => {
+  const proj = tmp();
+  const home = tmp();
+  const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  delete env.GBC_NO_UPDATE_NOTICE;
+  try {
+    // 진짜 루트: gbc init --yes로 SessionStart hook 등록 + gate 스킬 설치.
+    execFileSync(process.execPath, [cli, "init", "--yes"], { cwd: proj, env, encoding: "utf8" });
+    // .gbc 마커 실체화(init은 .claude만 만들고 .gbc는 지연생성 — spec.add로 진짜 명세도 채운다).
+    execFileSync(process.execPath, [cli, "spec", "add", "진짜 루트 케이스"], { cwd: proj, env, encoding: "utf8" });
+    // stray .gbc: local-agent 재현 — 형제 .claude/skills/gate 없음(gbc init 거친 적 없음).
+    const strayDir = join(proj, "local-agent");
+    mkdirSync(join(strayDir, ".gbc"), { recursive: true });
+
+    const ssOut = execFileSync(process.execPath, [cli, "hook", "session-start"], {
+      cwd: strayDir,
+      env,
+      input: JSON.stringify({ cwd: strayDir, source: "startup" }),
+      encoding: "utf8",
+    });
+    assert.doesNotMatch(ssOut, /SessionStart hook 미등록/, "SessionStart 진입점에서 오탐 소멸");
+
+    const preOut = execFileSync(process.execPath, [cli, "hook", "pre-tool-use"], {
+      cwd: strayDir,
+      env,
+      input: JSON.stringify({
+        tool_name: "Write",
+        cwd: strayDir,
+        session_id: "sess-hijack-repro",
+        tool_input: { file_path: join(strayDir, "ack-checkbox-mockup.html"), content: "<html></html>" },
+      }),
+      encoding: "utf8",
+    });
+    assert.doesNotMatch(preOut, /SessionStart hook 미등록/, "PreToolUse 진입점에서도 오탐 소멸");
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("gbc status: Stop 리마인드 음소거 상태를 표기", () => {
   const proj = tmp();
   const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
@@ -765,6 +840,18 @@ test("archiveSpec: 본문 아카이브 후 spec 비움, 빈 spec은 null (ST3)",
     assert.equal(readSpecCases(dir).length, 0);
     // 비운 뒤 재호출은 다시 null
     assert.equal(archiveSpec(dir), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 0.12.2 SubTask3 — resolveSpecText는 읽기 전용(A2 사후대조)인데 옛 구현은 gbcDir()를 호출해
+// 존재하지 않는 cwd/미스매치 해시에도 .gbc 화석을 남겼다(read-triggers-mkdir 결함 인스턴스).
+test("resolveSpecText: 모르는 해시·.gbc 없는 cwd에서도 .gbc를 새로 만들지 않는다", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gbc-resolve-nomkdir-"));
+  try {
+    assert.equal(resolveSpecText(dir, "deadbeefdeadbeef"), null);
+    assert.equal(existsSync(join(dir, ".gbc")), false, "읽기 호출이 .gbc 마커를 생성하면 안 된다");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1524,6 +1611,19 @@ test("readEventsMerged: 파일이 전혀 없으면(최초 실행) 빈 배열", (
   const dir = tmp();
   try {
     assert.deepEqual(readEventsMerged(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 0.12.2 SubTask3 — 읽기가 마커를 만들면 안 된다(daily-news-dispatch 하이재킹의 근본원인). registered
+// repo를 순회하며 존재만 확인하는 `gbc metrics --all` 류 호출이 그 자체로 .gbc 화석을 남기던 결함.
+test("readEventsMerged/eventsPath: .gbc가 없는 디렉토리에서 읽어도 .gbc를 새로 만들지 않는다", () => {
+  const dir = tmp();
+  try {
+    assert.deepEqual(readEventsMerged(dir), []);
+    assert.equal(existsSync(eventsPath(dir)), false);
+    assert.equal(existsSync(join(dir, ".gbc")), false, "읽기 호출이 .gbc 마커를 생성하면 안 된다");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

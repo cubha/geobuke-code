@@ -66,7 +66,7 @@ import { createTabRegistry, ensureTab, removeTab, setActiveTab, updateTabStatus,
 import { createSubmitQueue, enqueue, dequeueNext, clearRepo, countFor, type SubmitQueue } from "./queue.js";
 import { createApprovalQueue, pushApproval, peekApproval, shiftApproval, countApprovalsFor, type ApprovalQueueState } from "./approval-queue.js";
 import { appendText, appendSegments, getBuffer, type ScrollBuffers, type EntryRole } from "./scrollback.js";
-import { gbcDir } from "../store.js";
+import { ensureGbcDir } from "../store.js";
 import { nowIso } from "../time.js";
 import { Segments } from "./ui/Segments.js";
 import { ApprovalBox } from "./ui/ApprovalBox.js";
@@ -422,7 +422,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           reason,
           nowIso(),
         );
-        writeFileSync(join(gbcDir(tabsRef.current.activeTabId), "crash-dump.txt"), text, "utf8");
+        writeFileSync(join(ensureGbcDir(tabsRef.current.activeTabId), "crash-dump.txt"), text, "utf8");
       } catch {
         // 크래시 와중의 부가 기능 — 실패해도 원래 종료·에러 흐름을 절대 막지 않는다.
       }

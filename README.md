@@ -291,6 +291,7 @@ gbc verify                                                   # 사다리 리포�
 | `gbc repos add [경로]` | 크로스-repo 레지스트리에 추가(생략 시 현재 폴더) |
 | `gbc repos list` | 등록된 repo + 각 repo의 미해결 defer 수 + **게이트 건강성**(hook 부재/구식 코호트) |
 | `gbc repos remove [경로]` | 레지스트리에서 제거 |
+| `gbc doctor [--fix]` | 하위 디렉토리에 남은 stray(화석) `.gbc` 마커 탐지·격리(0.12.2, [프로젝트 루트 해석](#프로젝트-루트-해석--stray-gbc-마커) 참조). `--fix` 없으면 보고만, 있으면 삭제 아닌 격리 |
 | `/gbc-monitor` 스킬 | 위 관측 명령(status·metrics --all·repos list·snapshot status)을 묶어 조회·해석하는 **읽기전용** 표면. 상태 변경은 `/gate` |
 
 우회: `GBC_NO_GATE=1` (계측됨 — 우회 자체가 게이트 가치 측정 데이터). scope 사후 판정 우회: `GBC_NO_SCOPE=1`. scope 모델 상향: `GBC_SCOPE_MODEL=claude-sonnet-4-6`(기본 haiku).
@@ -416,6 +417,21 @@ gbc repos list                # 등록 현황 + 각 repo 미해결 defer 수
 
 - **검사 대상**: 게이트 hook(`PreToolUse`)·SessionStart hook의 **등록 여부**. 둘 다 cliPath 없이 결정론적으로 판정된다.
 - **검사 안 하는 것**: hook 명령의 *freshness*(구버전 prefix 등). gbc는 단일 전역 설치지만 각 repo의 hook 명령엔 설치 시점의 절대경로가 구워져 있어, 현재 런타임 경로로 타 repo를 stale 판정하면 false-positive가 난다. 명령이 구식인지는 그 repo에서 `gbc status`로 확인한다(진짜 사후대조 freshness는 A-mode 과제).
+
+### 프로젝트 루트 해석 — stray `.gbc` 마커
+
+hook(`PreToolUse`/`Stop`/`SessionStart`)이나 CLI가 받는 cwd가 프로젝트 루트의 하위 디렉토리일 수 있다(에이전트 세션이 서브패키지 안에서 작업 중이거나, 서브에이전트가 cwd를 옮긴 경우 등). gbc는 git이 `.git`을 찾듯 조상 디렉토리로 올라가며 `.gbc`를 찾는다(`resolveProjectRoot`).
+
+이때 **`.gbc`가 하나가 아니라 여러 겹**일 수 있다 — 과거 버전(0.12.2 이전)에서 하위 디렉토리를 한 번이라도 읽으면 그 자리에 빈 `.gbc`가 생기던 결함(`gbcDir()`의 mkdir-on-read)이 있었다. 이 화석이 하위에 남아 있으면, 조상 walk-up이 **진짜 루트보다 먼저 화석을 만나 거기서 멈춰버려** 진짜 루트의 `spec.md`·`.claude/settings.json`을 영원히 못 보게 된다(모든 판정이 "명세 소스: (없음)"으로 조용히 오판됨).
+
+0.12.2부터 gbc는 `.gbc`를 찾을 때마다 **형제 `.claude/skills/gate/`(gbc init만 만드는 설치 마커) 존재 여부**로 진짜/화석을 구분한다 — 형제가 없으면 화석으로 보고 계속 조상으로 올라간다. 이 판별은 내용(spec.md 비어있음 등)이 아니라 구조만 보므로, 방금 `gbc init`한 빈 프로젝트나 `gbc done` 직후(spec.md가 의도적으로 비워짐)에도 오탐하지 않는다.
+
+과거에 이미 생긴 화석은 근본수정만으로는 사라지지 않는다(더는 판정을 가로채지 않을 뿐, 디스크엔 남아 있다). `gbc doctor`로 찾아 정리한다:
+
+```bash
+gbc doctor          # 등록 repo(gbc repos)를 순회해 화석 .gbc 보고만(read-only)
+gbc doctor --fix    # 삭제가 아니라 <repo>/.gbc-quarantine-<시각>/ 로 격리(포렌식 보존)
+```
 
 ## 계측 (M1~M3)
 

@@ -1,11 +1,11 @@
 import { join } from "node:path";
-import { gbcDir, readJsonArray, writeJson, withStoreLock } from "./store.js";
+import { gbcDirPath, ensureGbcDir, readJsonArray, writeJson, withStoreLock } from "./store.js";
 import { normalizeCase, selectByRef } from "./text.js";
 import { nowIso } from "./time.js";
 import type { DeferEntry, DeferStatus, RawDeferEntry } from "./types.js";
 
 function deferPath(cwd: string): string {
-  return join(gbcDir(cwd), "defers.json");
+  return join(gbcDirPath(cwd), "defers.json");
 }
 
 /**
@@ -50,6 +50,7 @@ function save(cwd: string, defers: DeferEntry[]): void {
  * 전체를 락으로 감싸 다른 프로세스(gbc CLI 단발 vs TUI 장수 프로세스)의 lost-update를 막는다.
  */
 export function addDefer(cwd: string, item: string): { entry: DeferEntry; added: boolean } {
+  ensureGbcDir(cwd); // withStoreLock의 lockDir mkdir이 .gbc 존재를 전제(0.12.2)
   return withStoreLock(deferPath(cwd), () => {
     const defers = loadDefers(cwd);
     const normalized = normalizeCase(item);
@@ -74,6 +75,7 @@ export function addDefer(cwd: string, item: string): { entry: DeferEntry; added:
  * withStoreLock — addDefer와 동일 이유(read-modify-write 보호).
  */
 export function ackDefer(cwd: string, item: string): { entry: DeferEntry; added: boolean } {
+  ensureGbcDir(cwd); // withStoreLock의 lockDir mkdir이 .gbc 존재를 전제(0.12.2)
   return withStoreLock(deferPath(cwd), () => {
     const defers = loadDefers(cwd);
     const normalized = normalizeCase(item);
@@ -140,6 +142,7 @@ function transition(
   eligibleFrom: DeferStatus[],
   opts: { strictEligible?: boolean } = {},
 ): DeferEntry[] {
+  ensureGbcDir(cwd); // withStoreLock의 lockDir mkdir이 .gbc 존재를 전제(0.12.2)
   return withStoreLock(deferPath(cwd), () => {
     const defers = loadDefers(cwd);
     let targets = selectTargets(defers, ref, eligibleFrom);

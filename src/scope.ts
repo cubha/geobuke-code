@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { promisify } from "node:util";
 import { join, resolve } from "node:path";
-import { gbcDir, readJsonArray, writeJson } from "./store.js";
+import { gbcDirPath, ensureGbcDir, readJsonArray, writeJson } from "./store.js";
 import type { ScopeQueueEntry, ScopeVerdict } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -21,7 +21,7 @@ export const MAX_SCOPE_CONTEXT_CHARS = 4000;
 
 /** scope 판정 대기 큐 파일 경로 (.gbc/scope-queue.json). */
 export function scopeQueuePath(cwd: string): string {
-  return join(gbcDir(cwd), "scope-queue.json");
+  return join(gbcDirPath(cwd), "scope-queue.json");
 }
 
 /**
@@ -32,6 +32,7 @@ export function enqueueScope(cwd: string, entry: ScopeQueueEntry): void {
   const q = readScopeQueue(cwd);
   q.push(entry);
   const capped = q.length > MAX_SCOPE_QUEUE ? q.slice(q.length - MAX_SCOPE_QUEUE) : q;
+  ensureGbcDir(cwd);
   writeJson(scopeQueuePath(cwd), capped);
 }
 
@@ -42,6 +43,7 @@ export function readScopeQueue(cwd: string): ScopeQueueEntry[] {
 
 /** 큐 비우기(Stop 훅이 판정 후 호출 — 그 턴 판정분 회수). */
 export function clearScopeQueue(cwd: string): void {
+  ensureGbcDir(cwd);
   writeJson(scopeQueuePath(cwd), []);
 }
 
