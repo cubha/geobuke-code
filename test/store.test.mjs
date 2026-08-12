@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, symlinkSync, rmSync, existsSync, readdirSync, r
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawn } from "node:child_process";
-import { resolveProjectRoot, isRealGateRoot, writeJson, readJson, withStoreLock } from "../dist/store.js";
+import { resolveProjectRoot, isRealGateRoot, gbcDirPath, ensureGbcDir, writeJson, readJson, withStoreLock } from "../dist/store.js";
 
 function tmpRoot() {
   return mkdtempSync(join(tmpdir(), "gbc-store-test-"));
@@ -88,6 +88,45 @@ test("resolveProjectRoot: 순수성 — 파일시스템을 변경하지 않는�
     mkdirSync(sub, { recursive: true });
     resolveProjectRoot(sub, { homeDir: dirname(root) });
     assert.equal(existsSync(join(root, ".gbc")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ===== gbcDirPath(순수)·ensureGbcDir(mkdir) 분리 (0.12.2 SubTask3) =====
+// 옛 gbcDir()는 읽기 경로에서도 존재하지 않으면 mkdir했다 — 등록 repo를 순회하며 메트릭 존재만
+// 확인하는 호출조차 하위 디렉토리에 빈 .gbc를 남겨(daily-news-dispatch 실측) resolveProjectRoot의
+// walk-up을 가로챘다. 읽기는 gbcDirPath(부작용 없음), 쓰기 직전만 ensureGbcDir을 쓴다.
+
+test("gbcDirPath: 순수 경로 조립 — 디렉토리를 만들지 않는다", () => {
+  const root = tmpRoot();
+  try {
+    const dir = gbcDirPath(root);
+    assert.equal(dir, join(root, ".gbc"));
+    assert.equal(existsSync(dir), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureGbcDir: 없으면 만들고 경로를 반환한다(신규 프로젝트 첫 쓰기는 여전히 성공)", () => {
+  const root = tmpRoot();
+  try {
+    const dir = ensureGbcDir(root);
+    assert.equal(dir, join(root, ".gbc"));
+    assert.equal(existsSync(dir), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureGbcDir: 이미 있으면 그대로 반환(멱등, 재생성 시도 없음)", () => {
+  const root = tmpRoot();
+  try {
+    const first = ensureGbcDir(root);
+    const second = ensureGbcDir(root);
+    assert.equal(first, second);
+    assert.equal(existsSync(second), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

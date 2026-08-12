@@ -20,7 +20,7 @@ import {
   reopenDefer,
 } from "../dist/defer.js";
 import { isGated, markGated, resetGate, loadState } from "../dist/state.js";
-import { addSpecCase, readSpecCases, clearSpec, archiveSpec, pruneSpecArchive } from "../dist/spec.js";
+import { addSpecCase, readSpecCases, clearSpec, archiveSpec, pruneSpecArchive, resolveSpecText } from "../dist/spec.js";
 import {
   buildBlockReason,
   shouldCacheVerdict,
@@ -765,6 +765,18 @@ test("archiveSpec: 본문 아카이브 후 spec 비움, 빈 spec은 null (ST3)",
     assert.equal(readSpecCases(dir).length, 0);
     // 비운 뒤 재호출은 다시 null
     assert.equal(archiveSpec(dir), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 0.12.2 SubTask3 — resolveSpecText는 읽기 전용(A2 사후대조)인데 옛 구현은 gbcDir()를 호출해
+// 존재하지 않는 cwd/미스매치 해시에도 .gbc 화석을 남겼다(read-triggers-mkdir 결함 인스턴스).
+test("resolveSpecText: 모르는 해시·.gbc 없는 cwd에서도 .gbc를 새로 만들지 않는다", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gbc-resolve-nomkdir-"));
+  try {
+    assert.equal(resolveSpecText(dir, "deadbeefdeadbeef"), null);
+    assert.equal(existsSync(join(dir, ".gbc")), false, "읽기 호출이 .gbc 마커를 생성하면 안 된다");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1524,6 +1536,19 @@ test("readEventsMerged: 파일이 전혀 없으면(최초 실행) 빈 배열", (
   const dir = tmp();
   try {
     assert.deepEqual(readEventsMerged(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 0.12.2 SubTask3 — 읽기가 마커를 만들면 안 된다(daily-news-dispatch 하이재킹의 근본원인). registered
+// repo를 순회하며 존재만 확인하는 `gbc metrics --all` 류 호출이 그 자체로 .gbc 화석을 남기던 결함.
+test("readEventsMerged/eventsPath: .gbc가 없는 디렉토리에서 읽어도 .gbc를 새로 만들지 않는다", () => {
+  const dir = tmp();
+  try {
+    assert.deepEqual(readEventsMerged(dir), []);
+    assert.equal(existsSync(eventsPath(dir)), false);
+    assert.equal(existsSync(join(dir, ".gbc")), false, "읽기 호출이 .gbc 마커를 생성하면 안 된다");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

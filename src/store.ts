@@ -22,9 +22,21 @@ export function readJsonObject<T extends Record<string, unknown>>(path: string, 
   return typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as T) : defaultValue;
 }
 
-/** .gbc 디렉토리 경로 보장 */
-export function gbcDir(cwd: string): string {
-  const dir = join(cwd, ".gbc");
+/**
+ * .gbc 디렉토리의 순수 경로(부작용 없음, 0.12.2 SubTask3) — 읽기 전용 호출부는 반드시 이쪽을 쓴다.
+ *
+ * 근본원인(0.12.2): 옛 gbcDir()는 읽기 경로에서도 존재하지 않으면 mkdir했다. 등록 repo를 순회하며
+ * 메트릭 존재만 확인하는 호출(`gbc metrics --all`의 eventsPath existsSync 체크 등)이 그 자체로
+ * 하위 디렉토리에 빈 .gbc를 남겼고, 이 화석이 resolveProjectRoot의 innermost walk-up을 가로채
+ * 상위 진짜 spec.md를 영원히 못 보게 만들었다(daily-news-dispatch 실측: 486이벤트 전부 specHash="").
+ */
+export function gbcDirPath(cwd: string): string {
+  return join(cwd, ".gbc");
+}
+
+/** .gbc 디렉토리 경로 보장(필요하면 생성) — 쓰기 직전에만 호출한다(0.12.2, 읽기는 gbcDirPath). */
+export function ensureGbcDir(cwd: string): string {
+  const dir = gbcDirPath(cwd);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return dir;
 }
