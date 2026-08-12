@@ -610,6 +610,33 @@ test("SessionStart 상태줄: muted + 미해결 defer면 음소거 환기 1줄, 
   }
 });
 
+// 0.12.2 SubTask3 — cli.ts는 hook.ts와 달리 resolveProjectRoot를 쓰지 않아, 하위 디렉토리에서
+// 실행한 CLI 명령이 상위 진짜 루트를 못 보고 그 자리에 새 .gbc 화석을 만들던 "CLI vs hook 루트해석
+// 발산"(daily-news-dispatch 실측의 2차 재현 경로). gbc status를 하위 디렉토리에서 실행해도 상위의
+// 진짜 spec.md를 봐야 한다.
+test("gbc status: 하위 디렉토리에서 실행해도 상위 진짜 루트(spec.md)를 해석해 사용한다(gbc init 제외 루트해석)", () => {
+  const proj = tmp();
+  const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  const env = { ...process.env, GBC_NO_UPDATE_NOTICE: "1" };
+  try {
+    // 진짜 루트 표식: .gbc/spec.md + .claude/skills/gate/(gbc init만 만드는 구조 판별자, 0.12.2)
+    mkdirSync(join(proj, ".claude", "skills", "gate"), { recursive: true });
+    mkdirSync(join(proj, ".gbc"), { recursive: true });
+    writeFileSync(join(proj, ".gbc", "spec.md"), "# 작업 명세\n\n- [ ] 진짜 루트 케이스\n", "utf8");
+    const sub = join(proj, "sub", "dir");
+    mkdirSync(sub, { recursive: true });
+    const out = execFileSync(process.execPath, [cli, "status"], { cwd: sub, env, encoding: "utf8" });
+    assert.doesNotMatch(out, /명세 소스: \(없음\)/, "하위 디렉토리에서도 상위 spec.md를 찾아야 한다");
+    const specSourceLine = out.split("\n").find((l) => l.includes("명세 소스:"));
+    assert.match(specSourceLine, /spec\.md \(\d+자\)/, "루트의 실제 spec.md 내용이 보여야 한다");
+    // 하위 디렉토리 자체에는 화석 .gbc가 생기지 않아야 한다(읽기가 마커를 만들면 안 됨, 0.12.2 SubTask2+3).
+    assert.equal(existsSync(join(proj, "sub", ".gbc")), false);
+    assert.equal(existsSync(join(sub, ".gbc")), false);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test("gbc status: Stop 리마인드 음소거 상태를 표기", () => {
   const proj = tmp();
   const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
