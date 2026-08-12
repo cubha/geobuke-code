@@ -25,6 +25,13 @@ export function readProjectSettings(cwd: string): Settings {
  * - SessionStart 미등록: 0.2.1 이하 init 코호트(가장 흔한 staleness). PreToolUse 경로로만 도달 가능.
  * - PreToolUse 명령 구식: 옛 bash 키주입 prefix 등.
  * 둘 다 아니면 "".
+ *
+ * ⚠️ 이 함수는 `settings`(호출부가 읽어온 .claude/settings.json)의 **정확성을 전제**한다 — 순수
+ * 함수 자신은 어느 cwd에서 읽었는지 모른다. 0.12.2 이전엔 하위 stray .gbc가 resolveProjectRoot를
+ * 가로채(SubTask2 이전) hook.ts가 엉뚱한(설정 없는) 디렉토리의 settings.json을 읽어 진짜 루트에
+ * SessionStart hook이 있어도 "미등록"으로 오탐했다(이 세션의 발단 버그). 근본수정은 **여기가 아니라**
+ * store.ts의 resolveProjectRoot(isRealGateRoot 술어)에 있다 — 이 함수의 계약(정확한 settings가
+ * 들어오면 정확히 판단한다)은 원래도 맞았다. 회귀락: hook.test 계열의 daily-news-dispatch 재현 테스트.
  */
 export function buildInitStalenessNotice(settings: Settings, cliPath: string): string {
   const stale = hasStalePreToolUse(settings, cliPath);
