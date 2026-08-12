@@ -2,7 +2,7 @@
 // redaction은 무동작 tautology 위험이 커 RED-first가 load-bearing.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -101,6 +101,8 @@ test("appendExtraction: 파일이 상한 이상이면 .1로 1세대 로테이션
     const p = extractionPath(cwd);
     const backup = join(cwd, ".gbc", "extraction.1.jsonl");
     // 이미 큰 파일이 있는 상태로 만든 뒤 append → 로테이션 발동
+    // extractionPath는 0.12.2부터 순수 경로(부작용 없음)라 .gbc를 직접 만들어야 한다.
+    mkdirSync(join(cwd, ".gbc"), { recursive: true });
     writeFileSync(p, "x".repeat(500) + "\n");
     appendExtraction(cwd, { at: "t", session: "s1", kind: "result" }, { maxBytes: 100 });
     assert.ok(existsSync(backup), "백업 .1 생성");

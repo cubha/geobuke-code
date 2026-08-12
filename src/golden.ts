@@ -2,7 +2,7 @@
 // 단위테스트 대상. judge 재실행(LLM·네트워크)·캡처 훅·CLI 출력은 비결정이라 여기 없음.
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { gbcDir, readJsonArray, writeJson } from "./store.js";
+import { gbcDirPath, ensureGbcDir, readJsonArray, writeJson } from "./store.js";
 import type { GoldenCase, GoldenExpected, VerdictKind } from "./types.js";
 
 /** judge 출력의 비교 가능한 최소형(replay 결과) */
@@ -99,7 +99,7 @@ export function summarizeReplay(outcomes: ReplayOutcome[]): ReplaySummary {
 
 // ---------- IO (ST-A2-2에서 구현) ----------
 function goldenPath(cwd: string): string {
-  return join(gbcDir(cwd), "golden.json");
+  return join(gbcDirPath(cwd), "golden.json");
 }
 
 export function loadGolden(cwd: string): GoldenCase[] {
@@ -107,9 +107,11 @@ export function loadGolden(cwd: string): GoldenCase[] {
 }
 
 export function addGoldenCase(cwd: string, c: GoldenCase): void {
+  ensureGbcDir(cwd);
   writeJson(goldenPath(cwd), upsertGolden(loadGolden(cwd), c));
 }
 
 export function clearGolden(cwd: string): void {
+  ensureGbcDir(cwd);
   writeJson(goldenPath(cwd), []);
 }

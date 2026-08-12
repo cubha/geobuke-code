@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
-import { gbcDir } from "./store.js";
+import { gbcDirPath, ensureGbcDir } from "./store.js";
 import { normalizeCase } from "./text.js";
 import { nowStamp } from "./time.js";
 
@@ -68,7 +68,7 @@ export function resolveSpecText(cwd: string, specHash: string): string | null {
     /* 현행 로드 실패 → archive 시도 */
   }
   try {
-    const dir = join(gbcDir(cwd), "spec.archive");
+    const dir = join(gbcDirPath(cwd), "spec.archive");
     if (!existsSync(dir)) return null;
     const hit = readdirSync(dir)
       .filter((f) => f.startsWith(`${specHash}-`) && f.endsWith(".md"))
@@ -89,7 +89,7 @@ export function resolveSpecText(cwd: string, specHash: string): string | null {
 // 주 경로는 에이전트가 .gbc/spec.md를 직접 작성하는 것이고, 이 CLI는 한 줄 케이스 추가용 보조.
 
 function specPath(cwd: string): string {
-  return join(gbcDir(cwd), "spec.md");
+  return join(gbcDirPath(cwd), "spec.md");
 }
 
 /**
@@ -106,6 +106,7 @@ export function addSpecCase(cwd: string, item: string): boolean {
   if (readSpecCases(cwd).some((c) => c === normalized)) return false;
   const path = specPath(cwd);
   const line = `- [ ] ${normalized}\n`;
+  ensureGbcDir(cwd);
   if (existsSync(path)) {
     appendFileSync(path, line, "utf8");
   } else {
@@ -128,6 +129,7 @@ export function readSpecCases(cwd: string): string[] {
 
 /** 작업단위 완료 시 spec.md를 비운다 (다음 작업단위로 깨끗이 넘어가기). */
 export function clearSpec(cwd: string): void {
+  ensureGbcDir(cwd);
   writeFileSync(specPath(cwd), "", "utf8");
 }
 
@@ -175,7 +177,8 @@ export function archiveSpec(cwd: string): string | null {
   if (!existsSync(path)) return null;
   const raw = readFileSync(path, "utf8");
   if (raw.trim() === "") return null;
-  const dir = join(gbcDir(cwd), "spec.archive");
+  ensureGbcDir(cwd);
+  const dir = join(gbcDirPath(cwd), "spec.archive");
   mkdirSync(dir, { recursive: true });
   const archivePath = join(dir, `${computeSpecHash(raw)}-${nowStamp()}.md`);
   writeFileSync(archivePath, raw, "utf8");

@@ -3,7 +3,7 @@
 // ⚠️ 진짜 M1(post-gate 시나리오위반율)은 A-mode 사후대조 필요 — B-모드는 churn 약신호만.
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { gbcDir } from "./store.js";
+import { gbcDirPath, ensureGbcDir } from "./store.js";
 import { serializeCapped } from "./jsonl-line.js";
 import { rotateJsonlIfOversize } from "./jsonl-rotate.js";
 
@@ -359,7 +359,7 @@ export const MAX_EVENTS_BYTES = 5 * 1024 * 1024;
 
 /** .gbc/events.jsonl 경로. */
 export function eventsPath(cwd: string): string {
-  return join(gbcDir(cwd), "events.jsonl");
+  return join(gbcDirPath(cwd), "events.jsonl");
 }
 
 /** events.jsonl에 이벤트 1줄 append — 상한 이상이면 append 전에 1세대 로테이션(jsonl-rotate.ts,
@@ -368,6 +368,7 @@ export function logEvent(cwd: string, event: GateEvent, opts: { maxBytes?: numbe
   if (process.env.GBC_NO_METRICS === "1") return;
   const maxBytes = opts.maxBytes ?? MAX_EVENTS_BYTES;
   try {
+    ensureGbcDir(cwd);
     const path = eventsPath(cwd);
     rotateJsonlIfOversize(path, maxBytes);
     appendFileSync(path, serializeEvent(event) + "\n");

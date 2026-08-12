@@ -4,7 +4,7 @@
 // 리포터 템플릿 기록. 사용자 파일(package.json·설정)은 절대 수정하지 않는다(비파괴).
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { gbcDir } from "./store.js";
+import { ensureGbcDir } from "./store.js";
 import { JUNIT_DEFAULT_REL } from "./junit.js";
 
 /** 감지 가능한 러너. node-test=스크립트에 node --test 존재, none=미감지(제로설치 폴백 대상). */
@@ -150,7 +150,7 @@ export function scaffoldVerify(cwd: string): ScaffoldPlan {
     }
   }
   const plan = buildScaffoldPlan(detectRunner(pkg));
-  gbcDir(cwd); // .gbc 보장
+  ensureGbcDir(cwd); // .gbc 보장
   for (const f of plan.files) {
     writeFileSync(join(cwd, f.rel), f.content, "utf8");
   }

@@ -13,7 +13,7 @@ import { readProjectSettings, buildUpdateNotice, wasNotified, markNotified } fro
 import { refreshVersionCache, shouldRefreshCache, refreshCacheIfStale } from "./version.js";
 import { appendFileSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { gbcDir, resolveProjectRoot, basenameOf } from "./store.js";
+import { ensureGbcDir, resolveProjectRoot, basenameOf } from "./store.js";
 import { nowIso } from "./time.js";
 import { logEvent } from "./metrics.js";
 import {
@@ -107,7 +107,7 @@ function emit(obj: unknown): void {
 
 function logBypass(cwd: string, toolName: string): void {
   try {
-    appendFileSync(join(gbcDir(cwd), "bypass.log"), `${nowIso()} ${toolName}\n`);
+    appendFileSync(join(ensureGbcDir(cwd), "bypass.log"), `${nowIso()} ${toolName}\n`);
   } catch {
     /* 계측 실패는 무시 */
   }
@@ -117,7 +117,7 @@ function logBypass(cwd: string, toolName: string): void {
 function logFailOpen(cwd: string, toolName: string, reason: string): void {
   try {
     appendFileSync(
-      join(gbcDir(cwd), "failopen.log"),
+      join(ensureGbcDir(cwd), "failopen.log"),
       `${nowIso()} ${toolName} ${reason}\n`,
     );
   } catch {

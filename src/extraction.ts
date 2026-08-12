@@ -8,7 +8,7 @@
 //  · 사이즈 상한 초과 시 1세대 로테이션(.jsonl→.1.jsonl) — 무한 성장 차단, 최근분 보존.
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { gbcDir } from "./store.js";
+import { gbcDirPath, ensureGbcDir } from "./store.js";
 import { MAX_LINE, serializeCapped } from "./jsonl-line.js";
 import { rotateJsonlIfOversize } from "./jsonl-rotate.js";
 
@@ -115,7 +115,7 @@ export function parseExtraction(raw: string): ExtractionRecord[] {
 
 /** .gbc/extraction.jsonl 경로. */
 export function extractionPath(cwd: string): string {
-  return join(gbcDir(cwd), "extraction.jsonl");
+  return join(gbcDirPath(cwd), "extraction.jsonl");
 }
 
 /**
@@ -132,6 +132,7 @@ export function appendExtraction(
   if (process.env.GBC_NO_EXTRACTION === "1") return;
   const maxBytes = opts.maxBytes ?? MAX_EXTRACTION_BYTES;
   try {
+    ensureGbcDir(cwd);
     const path = extractionPath(cwd);
     rotateJsonlIfOversize(path, maxBytes);
     appendFileSync(path, serializeRecord(rec) + "\n");

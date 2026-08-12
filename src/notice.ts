@@ -3,7 +3,7 @@
 // 게이트 판정과 완전 독립 — 안내 실패가 게이트 결정에 절대 영향 주지 않는다(fail-silent).
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { gbcDir } from "./store.js";
+import { gbcDirPath, ensureGbcDir } from "./store.js";
 import { nowIso } from "./time.js";
 import { hasStalePreToolUse, hasSessionStartHook } from "./install.js";
 import { readVersionCache, buildVersionNotice } from "./version.js";
@@ -40,7 +40,7 @@ export function buildInitStalenessNotice(settings: Settings, cliPath: string): s
 }
 
 function notifiedPath(cwd: string): string {
-  return join(gbcDir(cwd), "notified.json");
+  return join(gbcDirPath(cwd), "notified.json");
 }
 
 /** 이 세션에서 이미 안내했는지 — 같은 session_id면 true. dedup(세션당 1회). fail-silent. */
@@ -56,6 +56,7 @@ export function wasNotified(cwd: string, session: string): boolean {
 /** 이 세션을 '안내함'으로 기록. 기록 실패는 무시(안내가 게이트를 방해하지 않게). */
 export function markNotified(cwd: string, session: string): void {
   try {
+    ensureGbcDir(cwd);
     writeFileSync(notifiedPath(cwd), JSON.stringify({ session, at: nowIso() }));
   } catch {
     /* 안내 기록 실패는 무시(fail-silent) */
