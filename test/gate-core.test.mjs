@@ -25,6 +25,9 @@ function makeDeps(over = {}) {
     // 기본값 = 매치 없음(빈 배열) — 기존 block 테스트 전부가 evidence 미사용 상태를 그대로 유지하게
     // 한다. ST12 재판정을 검증하는 테스트만 over.collectCaseEvidence로 명시 오버라이드한다.
     collectCaseEvidence: over.collectCaseEvidence ?? (async (_cwd, missing) => missing.map((c) => ({ case: c, context: "", matched: false }))),
+    // 0.12.3 P2a — 기본값 = 빈 원장(기존 테스트 전부가 적용이력 미사용 상태를 그대로 유지). 배선을
+    // 검증하는 테스트만 over.loadApplied로 명시 오버라이드한다.
+    loadApplied: over.loadApplied ?? (() => []),
   };
 }
 /** makeInput/makeDeps 기본 loadPlanSpec 텍스트의 명세 해시 — 재발화 억제 테스트가 "같은 작업단위"를
@@ -1111,4 +1114,124 @@ test("근거주입: 2차 판정이 missing을 늘려도 그 결과를 채택하�
   assert.equal(d.event.evidenceUsed, true);
   assert.equal(d.event.evidenceFlip, true, "missing이 늘어난 것도 판정 변경이다");
   assert.deepEqual(d.event.missing, ["케이스 A 로그인 검증", "케이스 B 중복 이메일"]);
+});
+
+// ── 0.12.3 P2a — 작업단위 적용이력 배선(이 배치의 유일한 판정 로직 변경) ──
+// 캐시분기(④) 이후·judge 호출(⑤) 직전에 applied.ts의 원장을 읽어 [이 작업단위에서 이미 적용된
+// 편집] 섹션을 조립한다. 1차 judge와 P2b 2차 재판정 양쪽에 전달, 읽기 실패는 fail-open([]로
+// 흡수, 게이트를 더 엄격하게 만들지 않는다), Write는 self-file 엔트리를 제외한다(GATE_SYSTEM ★★
+// 규칙 대칭 — evidence.ts의 F-8/Write 억제와 같은 계열).
+
+test("applied: loadApplied가 logHash(빈 명세는 '')로 호출된다 — specHash 상수 오염 재방지", async () => {
+  const calls = [];
+  await evaluateGate(makeInput(), makeDeps({ loadApplied: (cwd, specHash) => { calls.push([cwd, specHash]); return []; } }));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][1], DEFAULT_SPEC_HASH);
+});
+
+test("applied: 빈 명세는 loadApplied에 ''로 호출된다(원장 조회 자체를 empty sentinel로 방어)", async () => {
+  const calls = [];
+  await evaluateGate(
+    makeInput(),
+    makeDeps({
+      loadPlanSpec: () => ({ text: "", source: ".gbc/spec.md" }),
+      loadApplied: (cwd, specHash) => { calls.push(specHash); return []; },
+    }),
+  );
+  assert.deepEqual(calls, [""]);
+});
+
+test("applied: 원장에 엔트리가 있으면 1차 judge 호출의 appliedContext에 실린다", async () => {
+  const judgeCalls = [];
+  await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async (...args) => { judgeCalls.push(args); return { verdict: "pass", missing: [], reason: "ok" }; },
+      loadApplied: () => [{ at: "t1", tool: "Edit", file: "other.ts", digest: "이미 구현된 내용" }],
+    }),
+  );
+  assert.match(judgeCalls[0][4]?.appliedContext ?? "", /other\.ts/);
+  assert.match(judgeCalls[0][4]?.appliedContext ?? "", /이미 구현된 내용/);
+});
+
+test("applied: 원장이 비어있으면 appliedContext는 undefined(플레이스홀더 오염 방지 — evidenceContext와 동일 관례)", async () => {
+  const judgeCalls = [];
+  await evaluateGate(makeInput(), makeDeps({ judge: async (...args) => { judgeCalls.push(args); return { verdict: "pass", missing: [], reason: "ok" }; } }));
+  assert.equal(judgeCalls[0][4]?.appliedContext, undefined);
+});
+
+test("applied: P2b 2차 재판정 호출에도 동일한 appliedContext가 실린다", async () => {
+  const judgeCalls = [];
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async (...args) => {
+        judgeCalls.push(args);
+        const opts = args[4];
+        if (opts?.evidenceContext) return { verdict: "pass", missing: [], reason: "근거로 확인" };
+        return { verdict: "block", missing: ["케이스 A 로그인 검증"], reason: "누락" };
+      },
+      collectCaseEvidence: async (cwd, missing) => missing.map((c) => ({ case: c, context: "src/auth.ts:10: ok", matched: true })),
+      loadApplied: () => [{ at: "t1", tool: "Edit", file: "other.ts", digest: "적용본" }],
+    }),
+  );
+  assert.equal(judgeCalls.length, 2);
+  assert.match(judgeCalls[0][4]?.appliedContext ?? "", /적용본/, "1차에도 실림");
+  assert.match(judgeCalls[1][4]?.appliedContext ?? "", /적용본/, "2차 재판정에도 동일하게 실림");
+  assert.equal(d.kind, "pass");
+});
+
+test("applied: Write(전체 덮어쓰기)는 같은 파일의 과거 엔트리를 제외한다(GATE_SYSTEM ★★ 대칭)", async () => {
+  const judgeCalls = [];
+  await evaluateGate(
+    makeInput({ toolName: "Write", toolInput: { file_path: "src/foo.ts", content: "new body" } }),
+    makeDeps({
+      judge: async (...args) => { judgeCalls.push(args); return { verdict: "pass", missing: [], reason: "ok" }; },
+      loadApplied: () => [
+        { at: "t1", tool: "Edit", file: "foo.ts", digest: "자기파일 과거편집" },
+        { at: "t2", tool: "Edit", file: "bar.ts", digest: "다른파일 편집" },
+      ],
+    }),
+  );
+  const ctx = judgeCalls[0][4]?.appliedContext ?? "";
+  assert.doesNotMatch(ctx, /자기파일 과거편집/, "덮어쓰기 대상 파일 자신의 과거 엔트리는 빠져야 함");
+  assert.match(ctx, /다른파일 편집/, "다른 파일 엔트리는 유지");
+});
+
+test("applied: Edit(부분 편집)은 자기 파일의 과거 엔트리도 유지한다(Write와 달리 self-file 필터 없음)", async () => {
+  const judgeCalls = [];
+  await evaluateGate(
+    makeInput({ toolInput: { file_path: "src/foo.ts", old_string: "a", new_string: "b" } }),
+    makeDeps({
+      judge: async (...args) => { judgeCalls.push(args); return { verdict: "pass", missing: [], reason: "ok" }; },
+      loadApplied: () => [{ at: "t1", tool: "Edit", file: "foo.ts", digest: "이전 편집" }],
+    }),
+  );
+  assert.match(judgeCalls[0][4]?.appliedContext ?? "", /이전 편집/);
+});
+
+test("applied: loadApplied가 throw해도 게이트는 계속 진행한다(fail-open — 새 메커니즘 실패가 게이트를 더 엄격하게 만들지 않음)", async () => {
+  const judgeCalls = [];
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async (...args) => { judgeCalls.push(args); return { verdict: "pass", missing: [], reason: "ok" }; },
+      loadApplied: () => { throw new Error("disk read failure"); },
+    }),
+  );
+  assert.equal(judgeCalls.length, 1, "원장 읽기 실패가 judge 호출 자체를 막지 않는다");
+  assert.equal(judgeCalls[0][4]?.appliedContext, undefined);
+  assert.equal(d.kind, "pass");
+  assert.equal(d.event.appliedFailed, true, "실패가 조용히 사라지지 않고 이벤트에 남는다");
+});
+
+test("applied: 정상 케이스는 이벤트에 appliedFailed 키 자체가 없다(다른 계측 필드와 동일 관례)", async () => {
+  const d = await evaluateGate(makeInput(), makeDeps({ loadApplied: () => [{ at: "t1", tool: "Edit", file: "other.ts", digest: "x" }] }));
+  assert.equal(d.event.appliedFailed, undefined);
+  assert.equal(d.event.appliedCount, 1);
+});
+
+test("applied: appliedCount는 judge에 실제로 실린 엔트리 수(원장 엔트리 없으면 키 생략)", async () => {
+  const d = await evaluateGate(makeInput(), makeDeps());
+  assert.equal(d.event.appliedCount, undefined);
 });
