@@ -261,6 +261,37 @@ test("buildUserMessage: editAnchors 생략 시 기존 head-only 동작(하위호
   assert.doesNotMatch(m, /siblingAlreadyImplemented/, "앵커 없으면 head-only 그대로 — 회귀 없음");
 });
 
+// ── [이 작업단위에서 이미 적용된 편집] (0.12.3 P2a, 8번째 인자) — 작업단위 구현이력 부재 근본수정.
+// 게이트가 매 편집을 백지 재평가하던 근본원인은 gbc엔 PostToolUse가 없어 "방금 그 편집이 실제
+// 적용됐다"는 사실 자체를 알 방법이 없었던 것(RCA: 동일 케이스 4회 재차단, 그 사이 모델은 순차
+// 구현 중이었음). applied.ts(SubTask1)가 조립한 텍스트를 이 섹션에 그대로 싣는다.
+
+test("buildUserMessage: appliedContext 제공 시 [이 작업단위에서 이미 적용된 편집] 섹션에 원문 포함", () => {
+  const m = buildUserMessage("plan", "edit", [], [], undefined, undefined, [], "1. [a.ts] 이미 구현된 내용");
+  assert.match(m, /\[이 작업단위에서 이미 적용된 편집\]/);
+  assert.match(m, /1\. \[a\.ts\] 이미 구현된 내용/);
+});
+
+test("buildUserMessage: appliedContext 생략/빈 문자열이면 섹션 자체를 생략(플레이스홀더 오염 방지, 기존 관례와 동일)", () => {
+  const withoutArg = buildUserMessage("plan", "edit", [], []);
+  assert.doesNotMatch(withoutArg, /이미 적용된 편집/);
+  const withEmpty = buildUserMessage("plan", "edit", [], [], undefined, undefined, [], "");
+  assert.doesNotMatch(withEmpty, /이미 적용된 편집/);
+});
+
+test("buildUserMessage: [이 작업단위에서 이미 적용된 편집] 섹션은 [현재 편집] 앞에 위치", () => {
+  const m = buildUserMessage("plan", "edit-marker-xyz", [], [], undefined, undefined, [], "applied-marker-abc");
+  const appliedIdx = m.indexOf("applied-marker-abc");
+  const editIdx = m.indexOf("edit-marker-xyz");
+  assert.notEqual(appliedIdx, -1);
+  assert.ok(appliedIdx < editIdx);
+});
+
+test("GATE_SYSTEM: 적용이력 섹션 근거로 missing 판정에서 제외하되 부재 자체를 미구현 증거로 삼지 말라는 규칙 포함", () => {
+  assert.match(GATE_SYSTEM, /이 작업단위에서 이미 적용된 편집/);
+  assert.match(GATE_SYSTEM, /missing에 넣지 마라/);
+});
+
 test("예산 불변식(0.12.1 P3): MAX_FIELD(Write 새내용, normalize.ts) >= MAX_CURRENT_FILE(judge.ts)", async () => {
   const { MAX_FIELD } = await import("../dist/normalize.js");
   const { MAX_CURRENT_FILE } = await import("../dist/judge.js");
