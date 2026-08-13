@@ -295,6 +295,44 @@ test("GATE_SYSTEM: 적용이력 섹션 근거로 missing 판정에서 제외하�
   assert.match(GATE_SYSTEM, /missing에 넣지 마라/);
 });
 
+test("GATE_SYSTEM: 적용이력 규칙이 섹션 내용을 '편집 원문(코드)'으로 명시한다 (F-1)", () => {
+  // F-1의 근본원인 = 규칙↔데이터 형상 불일치. 규칙은 요약형("…적용 완료")을 전제해 쓰였는데
+  // formatAppliedContext는 원시 코드형만 낸다 → 모델이 코드를 보고도 어느 케이스를 충족하는지
+  // 단정하지 못하고 다시 차단했다(실측: 프로덕션형 block 3/3 = 대조군과 동일).
+  const rule = GATE_SYSTEM.split("\n").find((l) => l.includes("[이 작업단위에서 이미 적용된 편집]"));
+  assert.ok(rule, "적용이력 규칙 줄이 존재해야 한다");
+  assert.match(rule, /코드/, "섹션 내용이 코드임을 밝혀야 한다(요약·설명문이 아니다)");
+  assert.match(rule, /원문/, "'편집 원문'이라는 사실 고지가 있어야 한다");
+});
+
+test("GATE_SYSTEM: 적용이력 규칙이 grep 근거 규칙과 같은 판독 기준(로직 실재=배제/심볼만=누락유지)을 준다 (F-1)", () => {
+  const rule = GATE_SYSTEM.split("\n").find((l) => l.includes("[이 작업단위에서 이미 적용된 편집]"));
+  assert.ok(rule);
+  // ★★★(grep 근거)이 원시 라인에 대해 주는 것과 동형의 판독 기준 — 이게 없으면 모델은 코드를
+  // 받고도 판단 기준이 없어 보수적으로 차단한다.
+  assert.match(rule, /실제로 구현/, "로직이 실제로 있으면 배제하라는 기준");
+  assert.match(rule, /로직/, "로직 실재 여부가 판단 축임을 명시");
+  assert.match(rule, /심볼|시그니처|TODO/, "심볼·시그니처만이면 누락 유지라는 반대편 기준");
+});
+
+test("GATE_SYSTEM: 적용이력 규칙이 '다른 파일·호출지점 부재'를 미구현 근거로 삼지 말라고 못 박는다 (F-1)", () => {
+  const rule = GATE_SYSTEM.split("\n").find((l) => l.includes("[이 작업단위에서 이미 적용된 편집]"));
+  assert.ok(rule);
+  // 실측된 오차단 사유 3종이 전부 이 축이었다: "관리자 페이지 적용 여부가 불명확" ·
+  // "설정 화면에서 호출되지 않음" · "복호화 후 마스킹하는 통합 로직 누락". 같은 작업단위의
+  // 순차 구현은 원래 파일이 나뉘고 호출부가 뒤에 온다 — 그걸 미구현 증거로 쓰면 안 된다.
+  assert.match(rule, /다른 파일|호출/, "다른 파일·호출지점 부재를 근거로 삼지 말라는 지침");
+});
+
+test("GATE_SYSTEM: 적용이력 규칙이 절단 2종(항목 생략·본문 절단)을 모두 다룬다 (F-1)", () => {
+  const rule = GATE_SYSTEM.split("\n").find((l) => l.includes("[이 작업단위에서 이미 적용된 편집]"));
+  assert.ok(rule);
+  // formatAppliedContext는 "…(N건 생략)"(항목 탈락)을, summarizeAppliedEdit은 "…(절단됨)"
+  // (본문 400자 캡)을 낸다. ★★★는 전자만 다루면 됐지만 적용이력은 둘 다 발생한다.
+  assert.match(rule, /생략/, "항목 생략 표시 처리");
+  assert.match(rule, /절단/, "본문 절단 표시 처리");
+});
+
 test("예산 불변식(0.12.1 P3): MAX_FIELD(Write 새내용, normalize.ts) >= MAX_CURRENT_FILE(judge.ts)", async () => {
   const { MAX_FIELD } = await import("../dist/normalize.js");
   const { MAX_CURRENT_FILE } = await import("../dist/judge.js");
