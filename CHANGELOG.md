@@ -2,6 +2,29 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.12.3] - 2026-08-13
+
+**작업단위 구현이력 부재 근본수정(P2a) + TUI `!bash`**
+
+게이트 오탐 RCA([[project_gate_false_positive_rca]])가 남긴 두 번째 갈래. 결정적 증거: 동일 침묵-누락 케이스가 03:02→03:17→03:17→03:23 **4회 재차단**되는 동안 모델은 그 케이스를 실제로 순차 구현 중이었다. 원인은 gbc에 `PostToolUse` hook이 없어 "방금 그 편집이 실제로 적용됐다"는 사실 자체를 알 방법이 없었던 것 — 게이트가 매 편집을 백지 상태로 재평가했다.
+
+### Added — 작업단위 적용이력(P2a, 이 릴리스의 유일한 판정 로직 변경)
+- **`.gbc/applied.json` 원장(`src/applied.ts` 신규)** — 작업단위(specHash)별로 실제 적용된 편집(새 내용만, `old_string`은 담지 않음)을 FIFO 20건까지 보관. 기록·조회 시점 둘 다 빈 명세("")는 절대 취급하지 않는다(빈-spec 상수 해시가 원장을 교차 작업단위로 오염시키던 2026-06-22 결함의 재발 방지 패턴 재사용). digest는 기록 시점에 `redactSecrets`+400자 캡을 거쳐 이후 판정 전송·골든 영속 저장이 전부 이 값을 재사용한다(마스킹 지점 단일화).
+- **`gbc hook post-tool-use`(신규, `src/hook.ts`)** — 사용자가 승인한 편집이 **실제로 적용된 뒤**에만 발화하는(hook 계약상 거부되면 발화 자체가 없음) 새 진입점. 실패해도 조용히 흡수하고 항상 exit 0(게이트 판정에 관여하지 않는다 — 새 메커니즘의 장애가 게이트를 더 엄격하게 만들지 않는다).
+- **judge 프롬프트 `[이 작업단위에서 이미 적용된 편집]` 섹션** — 같은 작업단위에서 이미 디스크에 반영된 편집을 사실고지형으로 제시해, 형제 케이스가 다른 위치(다른 파일 포함)에서 이미 구현됐으면 missing에서 제외하도록 한다. 섹션이 비면 통째로 생략(플레이스홀더가 판정을 오염시킨 0.9.3 전례 회피). `gate-core.ts`가 캐시분기 이후·1차 judge 호출 직전에 원장을 읽어 1차·P2b 2차 재판정 양쪽에 동일하게 전달하며, 원장 읽기 실패는 fail-open(빈 컨텍스트로 진행, `appliedFailed` 계측)한다. `Write`(전체 덮어쓰기)는 self-file 엔트리를 제외한다(`GATE_SYSTEM` ★★ 규칙 대칭).
+- **`gbc metrics`가 계측하는 신규 필드**: `appliedCount`(judge에 실린 엔트리 수)·`appliedDropped`(프롬프트 총량 캡 초과분)·`appliedFailed`(원장 읽기 예외) + `EventKind: "applied"`(hook 발화 자체의 존재 신호 — "gate 이벤트는 있는데 applied가 0"이면 이 hook이 미설치/사망했다는 뜻).
+- eval 회귀에 원장 유무 대칭쌍(케이스20/21) 추가 — `npm run eval` hard **21/21**. 골든 캡처·`gbc gate snapshot replay`도 `appliedContext`를 재현한다.
+
+### Added — TUI `!bash`(Task C)
+- **입력창에서 `!<command>`를 직접 타이핑하면 셸 명령을 실행**한다(Claude Code CLI `!` 프리픽스와 동일 계열). **사람이 직접 타이핑하는 입력이라 모델 도구 경로가 아니고, `evaluateGate`(게이트 판정)를 전혀 경유하지 않는다** — 게이트 thesis와 무충돌(사람 직접입력은 애초 게이트 범위 밖).
+- 실행은 argv 배열 `spawn(cmd, args, {shell:false})`(셸 문자열 통짜 실행 금지 — 이 저장소의 `realGrep`·`buildPreCommand`와 동일 안전기준). 따라서 파이프·리다이렉트·`$()` 명령치환·변수확장은 지원하지 않는다(따옴표는 공백 포함 인자를 묶는 용도일 뿐). `stdin`은 무시(대화형 명령이 매달리지 않게), 30초 타임아웃·64KB 출력 상한 초과 시 즉시 종료. 출력은 ANSI/제어문자를 스트립해 스크롤백에 표시하고 200줄 초과 시 head+tail만 남긴다. `GBC_NO_BANG=1`로 끌 수 있다.
+- `?` 도움말 패널에 `!cmd` 단축키 추가.
+
+### ⚠️ 재init 필요(breaking hook 계약 변경)
+`PostToolUse` hook이 신설돼 `.claude/settings.json` 등록 형상이 바뀐다. **0.12.2 이하에서 `gbc init`한 프로젝트는 `gbc init --yes` 재실행이 필요하다**(머지·멱등·자동 백업) — 재실행하지 않으면 작업단위 적용이력이 전혀 쌓이지 않아 위 P2a 기능이 무동작 상태로 남는다(게이트 자체는 계속 정상 동작). 미등록 시 `gbc status`/`gbc repos --health`가 `PostToolUse hook 미등록`을 안내한다.
+
+검증: `verify.sh --no-build` 1143/1143(SubTask별) · `npm run eval` hard 21/21(FP0/FN0)·scope 6/6 · scope-critic 8회 전 SubTask 통과(DECISION_CHANGED:no) · tmux 실터미널 6항목 실측(`!bash` 정상출력·변수확장 차단·대용량절단·spawnError·스트리밍중거절·HelpPanel 오버플로 없음) · `gbc init --dev --yes` 자기적용 + 임시 워크스페이스 실 LLM 3콜 종단(block→PostToolUse 기록→후속편집 pass, `appliedCount:1` 실측).
+
 ## [0.12.2] - 2026-08-13
 
 **프로젝트 루트 해석 발산 근본수정 — stray `.gbc` 마커 하이재킹**
