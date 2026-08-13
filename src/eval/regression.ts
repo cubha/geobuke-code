@@ -6,6 +6,8 @@ import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { judge, judgeScope, selectedTransport } from "../judge.js";
+import { buildEvalAppliedContext } from "./applied-input.js";
+import type { EvalAppliedEdit } from "./applied-input.js";
 import type { ScopeQueueEntry } from "../types.js";
 
 interface Case {
@@ -36,12 +38,16 @@ interface Case {
    */
   old_strings?: string[];
   /**
-   * 0.12.3 P2a — applied.ts formatAppliedContext가 조립하는 [이 작업단위에서 이미 적용된 편집]
-   * 원문을 eval에서 재현하기 위한 필드. 있으면 judge에 그대로 실어 "적용이력이 주어졌을 때 모델이
-   * 옳게 판정하는가"를 잰다. evidence_context/old_strings와 동일 이유(없으면 이 배치의 판정 로직
-   * 변경에 eval이 무신호가 된다).
+   * 0.12.3 P2a — [이 작업단위에서 이미 적용된 편집] 섹션을 eval에서 재현하기 위한 필드.
+   *
+   * ⚠️ **조립된 문자열이 아니라 raw 편집 입력**을 선언한다(F-1, 2026-08-13). 처음엔 조립 결과를
+   * 손으로 적는 `applied_context: string`이었는데, 사람이 쓴 요약형("…적용 완료")과 프로덕션
+   * formatAppliedContext가 내는 원시 코드형이 달라 **eval이 프로덕션이 낼 수 없는 입력을 재고
+   * 있었다**(실측: 요약형 pass 3/3 vs 프로덕션형 block 3/3 — 21/21 green이 거짓안심). 이제
+   * applied-input.ts가 프로덕션 함수(buildAppliedEntry→formatAppliedContext)로 조립하므로
+   * 형상 불일치가 구조적으로 불가능하다. test/eval-cases.test.mjs가 이 규율을 락한다.
    */
-  applied_context?: string;
+  applied_edits?: EvalAppliedEdit[];
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -87,7 +93,8 @@ for (const c of cases) {
     currentFileContent: c.current_file,
     evidenceContext: c.evidence_context,
     editOldStrings: c.old_strings,
-    appliedContext: c.applied_context,
+    // 조립은 프로덕션 함수가 한다(F-1) — 케이스가 문자열을 손으로 적지 않는다.
+    appliedContext: buildEvalAppliedContext(c.applied_edits),
   });
   const ms = Date.now() - t0;
   const ok = v.verdict === c.expected;

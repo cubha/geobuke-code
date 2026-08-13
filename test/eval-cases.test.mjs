@@ -19,8 +19,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { buildAppliedEntry, formatAppliedContext } from "../dist/applied.js";
 
-// eval 하네스가 실제로 쓰는 조립 seam. **동적** import — 정적이면 모듈 부재가 이 파일 전체를 죽여
-// 나머지 계약 락의 판정을 가린다(RED 사유가 뭉개진다).
+// eval 하네스가 실제로 쓰는 조립 seam은 **동적** import로 연다 — 정적이면 모듈 부재가 이 파일
+// 전체를 죽여 나머지 계약 락의 판정을 가린다(RED 사유가 뭉개진다).
 const EVAL_APPLIED_ROOT = "/repo";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -45,12 +45,13 @@ test("형상 계약: 적용이력 신호를 가진 케이스가 최소 1건 존�
   );
 });
 
-test("형상 계약: applied_edits는 프로덕션 buildAppliedEntry가 실제로 엔트리를 만들어내는 입력이어야 한다", () => {
+test("형상 계약: applied_edits는 프로덕션 buildAppliedEntry가 실제로 엔트리를 만들어내는 입력이어야 한다", async () => {
+  const { evalAbsPath } = await import("../dist/eval/applied-input.js");
   for (const c of cases) {
     for (const [i, e] of (c.applied_edits ?? []).entries()) {
       const entry = buildAppliedEntry(
         e.tool ?? "Edit",
-        { file_path: `${EVAL_APPLIED_ROOT}/${e.file}`, new_string: e.new_string, content: e.content },
+        { file_path: evalAbsPath(e.file), new_string: e.new_string, content: e.content },
         EVAL_APPLIED_ROOT,
         "2026-01-01T00:00:00.000Z",
       );
@@ -73,7 +74,7 @@ test("형상 계약: eval이 judge에 싣는 문자열이 프로덕션 formatApp
     const entries = c.applied_edits.map((e, i) =>
       buildAppliedEntry(
         e.tool ?? "Edit",
-        { file_path: `${EVAL_APPLIED_ROOT}/${e.file}`, new_string: e.new_string, content: e.content },
+        { file_path: mod.evalAbsPath(e.file), new_string: e.new_string, content: e.content },
         EVAL_APPLIED_ROOT,
         `2026-01-01T00:0${i}:00.000Z`,
       ),
