@@ -563,6 +563,32 @@ test("golden capture: readCurrentFile이 null(신규 파일 등)이면 currentFi
   assert.equal("currentFileContent" in d.effects.goldenCapture, false);
 });
 
+// 0.12.3 P2a — SubTask3에서 계획했으나 누락됐던 골든 캡처 배선(발견 즉시 SubTask6에서 보정).
+// appliedContext 없이 골든을 캡처하면 replay가 1차 판정에서조차 이 배치의 판정 로직 변경(P2a)에
+// 무신호가 된다 — evidenceContext 누락이 낳았던 F-13(거짓 안심)의 재발 패턴과 동형.
+test("golden capture: appliedContext가 있으면 goldenCapture.appliedContext에 그대로 담긴다", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "pass", missing: [], reason: "ok" }),
+      isGoldenCapture: () => true,
+      loadApplied: () => [{ at: "t1", tool: "Edit", file: "other.ts", digest: "적용본" }],
+    }),
+  );
+  assert.match(d.effects.goldenCapture.appliedContext ?? "", /적용본/);
+});
+
+test("golden capture: 원장이 비었으면 appliedContext 키 자체가 없다(undefined로 채우지 않음, 다른 선택필드와 동일 관례)", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "pass", missing: [], reason: "ok" }),
+      isGoldenCapture: () => true,
+    }),
+  );
+  assert.equal("appliedContext" in d.effects.goldenCapture, false);
+});
+
 // ── P2b 근거주입 2단계 재판정 (2026-08-07, 게이트 오탐 RCA ST12 — 이 배치의 유일한 판정 로직 변경) ──
 
 test("근거주입: 매치 있는 케이스 전부가 재판정에서 해소되면 block→pass로 뒤집힌다(evidenceUsed·evidenceFlip=true)", async () => {
