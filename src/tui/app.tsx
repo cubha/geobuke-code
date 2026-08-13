@@ -66,6 +66,7 @@ import { createTabRegistry, ensureTab, removeTab, setActiveTab, updateTabStatus,
 import { createSubmitQueue, enqueue, dequeueNext, clearRepo, countFor, type SubmitQueue } from "./queue.js";
 import { createApprovalQueue, pushApproval, peekApproval, shiftApproval, countApprovalsFor, type ApprovalQueueState } from "./approval-queue.js";
 import { appendText, appendSegments, getBuffer, type ScrollBuffers, type EntryRole } from "./scrollback.js";
+import { parseBangInput, runBangCommand, formatBangOutput } from "./bang.js";
 import { ensureGbcDir } from "../store.js";
 import { nowIso } from "../time.js";
 import { Segments } from "./ui/Segments.js";
@@ -324,6 +325,9 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // ST1(0.9.4 T1)→ST11(0.10.0 A3b): 세션 프로세스 재사용이 이제 repoId별로 여러 개 살아있을 수
   // 있다(opt-in 탭 = in-flight 탭만 상주). Map으로 전환 — buildSessionOptionsForRepo(ST2)가 cwd를
   // 항상 repoId로 강제하므로 이 Map의 키와 각 세션의 실제 cwd가 어긋날 수 없다(원자 결박).
+  // 0.12.3 Task C — !bash 실행 중인 repoId 집합. sessionsRef와 동일한 repo별 격리 원칙(Set 키=repoId) —
+  // 다른 탭에서의 !bash 실행이 이 탭의 중첩실행 가드에 영향을 주지 않는다.
+  const bangRunningRef = useRef(new Set<string>());
   const sessionsRef = useRef(new Map<string, EngineSession>());
   // ST3(0.9.4 T2)→ST11: partial 델타 어셈블러도 repoId별. index별 누적 안전성 근거는 기존과 동일
   // (bridge.ts DeltaAssembler 주석) — 탭마다 독립된 인스턴스라 교차오염 자체가 물리적으로 불가능.
@@ -1197,12 +1201,54 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         if (!text) return;
         const repoId = tabsRef.current.activeTabId;
         // ST3-2 — 세션간 영속(로컬 편의기능, 실패해도 이번 턴 자체는 정상 진행 — setLastSessionId와
-        // 동일 관례). GBC_NO_PROMPT_HISTORY=1이면 prompt-history.ts 내부에서 이미 no-op.
+        // 동일 관례). GBC_NO_PROMPT_HISTORY=1이면 prompt-history.ts 내부에서 이미 no-op. !bash도
+        // 히스토리에 남는다(위로가기로 재실행 편의 — 일반 프롬프트와 차별할 이유가 없다).
         try {
           appendPromptHistory(repoId, text);
         } catch {
           // 로컬 편의기능 — 실패해도 이번 턴 자체는 이미 정상 진행됨.
         }
+
+        // 0.12.3 Task C — !bash: 사람이 직접 셸 명령을 실행(모델 도구 경로 아님, evaluateGate 미경유
+        // — 2026-08-03 제품결정 확정). GBC_NO_BANG=1이면 이 분기를 건너뛰어 텍스트가 그대로 기존
+        // 프롬프트 경로로 간다(탈출구). 모델 턴을 만들지 않으므로 submitQueue·tab status를 일절
+        // 안 건드린다 — 아래 큐잉/runTurnThenDrain 경로와 완전히 분리된 별도 흐름이다.
+        if (process.env.GBC_NO_BANG !== "1") {
+          const parsed = parseBangInput(text);
+          if (parsed.kind === "empty") {
+            pushLine(repoId, "🐢 사용법: !<command> [args...]", "dim");
+            return;
+          }
+          if (parsed.kind === "error") {
+            pushLine(repoId, `⚠ ${parsed.reason}`, "warn");
+            return;
+          }
+          if (parsed.kind === "command") {
+            // 스트리밍 중 거절 — 라이브 델타 영역(scheduleStreamDelta/commitStream)과 !bash의 정적
+            // 라인 append가 뒤섞이는 렌더 리스크를 원천 차단한다. 큐잉하지 않는다(모델 프롬프트와
+            // 달리 "나중에 실행"은 사용자가 원하는 의미가 아닐 수 있어 별도 SubTask를 쓸 가치가 없다).
+            if (isRepoStreaming(tabsRef.current, repoId)) {
+              pushLine(repoId, "⚠ 응답 스트리밍 중에는 !bash를 실행할 수 없습니다. 끝난 뒤 다시 시도하세요.", "warn");
+              return;
+            }
+            if (bangRunningRef.current.has(repoId)) {
+              pushLine(repoId, "⚠ 이미 !bash 명령이 실행 중입니다.", "warn");
+              return;
+            }
+            pushSegments(repoId, [{ text: "$ ", tone: "accent" }, { text: text.slice(1), tone: "plain" }], "user");
+            bangRunningRef.current.add(repoId);
+            void runBangCommand(parsed.cmd, parsed.args, { cwd: repoId })
+              .then((result) => {
+                for (const line of formatBangOutput(result)) pushLine(repoId, line, "dim");
+              })
+              .finally(() => {
+                bangRunningRef.current.delete(repoId);
+              });
+            return;
+          }
+          // parsed.kind === "not-bang" — 아래 기존 프롬프트 경로로 그대로 진행.
+        }
+
         // ⚠️ state.streaming이 아니라 isRepoStreaming(tab status) — 이유는 interrupt-stream 주석과
         // 동일(탭을 이탈했다 복귀해도 정확). 진행 중이면 잃지 않고 대기열에 쌓는다(ST1-1 큐잉 —
         // 이전엔 이 조건에서 제출 자체가 조용히 버려졌다).
