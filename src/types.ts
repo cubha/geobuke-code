@@ -197,6 +197,14 @@ export interface GoldenCase {
   evidenceContext?: string;
   /** 위 근거를 실었을 때의 재판정 결과(선택) — replay의 2단계 비교 기준. */
   expectedAfterEvidence?: GoldenExpected;
+  /**
+   * applied.ts formatAppliedContext가 조립한 [이 작업단위에서 이미 적용된 편집] 원문(선택,
+   * 0.12.3 P2a). 캡처 당시 1차·P2b 2차 재판정 양쪽에 실제로 실린 값과 동일 — replay(cli.ts
+   * cmdGateSnapshotReplay)가 이 값 없이 재현하면 이 배치의 유일한 판정 로직 변경에 무신호가
+   * 된다(evidenceContext 누락이 낳았던 F-13 재발 패턴). 원장이 비어있었으면 undefined(다른
+   * 선택 필드와 동일 관례 — "빈 문자열"로 채우지 않는다).
+   */
+  appliedContext?: string;
 }
 
 /**

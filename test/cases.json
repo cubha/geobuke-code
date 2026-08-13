@@ -128,5 +128,18 @@
       "  if (!/^\\d{16}$/.test(cardNumber)) return '카드번호 형식이 올바르지 않습니다';"
     ],
     "expected": "block"
+  },
+  {
+    "id": "20-적용이력_다른파일선행편집_오탐해소",
+    "plan_spec": "API 키 관리:\n- [ ] 설정 화면에서 API 키 저장 시 암호화해서 보관한다\n- [ ] 관리자 키 목록 페이지에서 API 키를 마스킹(끝 4자리만 노출) 표시한다",
+    "edit_diff": "--- src/settings.ts\n- export async function saveApiKey(key) {\n-   await db.put('apiKey', key);\n- }\n+ export async function saveApiKey(key) {\n+   const enc = await encryptMeta(key);\n+   await db.put('apiKey', enc);\n+ }",
+    "applied_context": "1. [src/admin/keys-page.tsx] 관리자 키 목록 페이지에 API 키 마스킹(끝 4자리만 노출) 렌더링 로직 적용 완료 (최신)",
+    "expected": "pass"
+  },
+  {
+    "id": "21-적용이력_대조군_원장없으면_정탐유지",
+    "plan_spec": "API 키 관리:\n- [ ] 설정 화면에서 API 키 저장 시 암호화해서 보관한다\n- [ ] 관리자 키 목록 페이지에서 API 키를 마스킹(끝 4자리만 노출) 표시한다",
+    "edit_diff": "--- src/settings.ts\n- export async function saveApiKey(key) {\n-   await db.put('apiKey', key);\n- }\n+ export async function saveApiKey(key) {\n+   const enc = await encryptMeta(key);\n+   await db.put('apiKey', enc);\n+ }",
+    "expected": "block"
   }
 ]

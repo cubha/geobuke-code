@@ -656,6 +656,7 @@ async function cmdGateSnapshotReplay(cwd: string, args: string[]): Promise<void>
       const v = await judge(c.spec, c.edit, c.defers, c.resolved ?? [], {
         temperature: 0,
         currentFileContent: c.currentFileContent,
+        appliedContext: c.appliedContext,
       });
       votes[v.verdict]++;
       lastMissing = v.missing;
@@ -677,6 +678,7 @@ async function cmdGateSnapshotReplay(cwd: string, args: string[]): Promise<void>
         temperature: 0,
         currentFileContent: c.currentFileContent,
         evidenceContext: c.evidenceContext,
+        appliedContext: c.appliedContext,
       });
       p2bVotes[v.verdict]++;
       p2bMissing = v.missing;

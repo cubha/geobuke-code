@@ -35,6 +35,13 @@ interface Case {
    * 안에서 정확히 일치하는 substring이어야 한다(clip된 edit_diff가 아니라 raw 텍스트).
    */
   old_strings?: string[];
+  /**
+   * 0.12.3 P2a — applied.ts formatAppliedContext가 조립하는 [이 작업단위에서 이미 적용된 편집]
+   * 원문을 eval에서 재현하기 위한 필드. 있으면 judge에 그대로 실어 "적용이력이 주어졌을 때 모델이
+   * 옳게 판정하는가"를 잰다. evidence_context/old_strings와 동일 이유(없으면 이 배치의 판정 로직
+   * 변경에 eval이 무신호가 된다).
+   */
+  applied_context?: string;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -80,6 +87,7 @@ for (const c of cases) {
     currentFileContent: c.current_file,
     evidenceContext: c.evidence_context,
     editOldStrings: c.old_strings,
+    appliedContext: c.applied_context,
   });
   const ms = Date.now() - t0;
   const ok = v.verdict === c.expected;

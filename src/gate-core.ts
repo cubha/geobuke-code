@@ -433,6 +433,11 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
       // 저장 형태는 `forGoldenStorage`를 거친다(types.ts GoldenCase.currentFileContent 참조) —
       // 위 fileBytes/truncated 계측은 **절단 이전 원본**을 재는 별개 축이라 영향받지 않는다.
       ...(currentFileContent !== undefined ? { currentFileContent: forGoldenStorage(currentFileContent, editOldStrings) } : {}),
+      // 0.12.3 P2a — 캡처 시점 1차 judge에 실린 적용이력 원문(SubTask3 계획분, 라이브 스모크 후
+      // 재검토 중 누락 발견해 보정). digest는 record 시점(applied.ts recordApplied)에 이미
+      // redactSecrets+캡을 거쳤으므로 여기서 추가 변환 불필요(0.12.0 ship 교훈 — at-rest 마스킹
+      // 지점 단일화와 동일 판례, currentFileContent처럼 별도 forGoldenStorage 안 거친다).
+      ...(appliedContext !== undefined ? { appliedContext } : {}),
       expected: { verdict: verdict.verdict, missing: verdict.missing, reason: verdict.reason },
     };
   }
