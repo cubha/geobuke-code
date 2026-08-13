@@ -183,3 +183,32 @@ test("formatBangOutput: 줄 수 상한 초과 시 head+tail만 남기고 생략 
   assert.ok(lines.some((l) => l.includes("line0")), "head 보존");
   assert.ok(lines.some((l) => l.includes("line499")), "tail 보존");
 });
+
+// ── 0.12.3 ship 보안검토 후속(S2) ─────────────────────────────────────────────
+// `!cat .env`·`!env`류 출력이 스크롤백에 그대로 들어가고, 크래시 시 그 스크롤백이
+// `.gbc/crash-dump.txt`에 원문으로 기록된다(app.tsx:429). bang은 이 sink로 흘러드는
+// **신규 데이터 소스**라 여기서 마스킹한다 — applied.ts summarizeAppliedEdit과 같은
+// 규율(마스킹은 소스에서 1회, 절단보다 먼저).
+test("formatBangOutput: 출력의 시크릿을 마스킹한다(크래시 덤프 평문 노출 차단)", () => {
+  const out = formatBangOutput({
+    code: 0,
+    stdout: 'ANTHROPIC_API_KEY=sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFF\nGITHUB_TOKEN=ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII\n',
+    stderr: "",
+    timedOut: false,
+    truncated: false,
+  }).join("\n");
+  assert.ok(!out.includes("sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFF"), "Anthropic 키가 평문으로 남았다");
+  assert.ok(!out.includes("ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII"), "GitHub 토큰이 평문으로 남았다");
+  assert.match(out, /REDACTED/);
+});
+
+test("formatBangOutput: 마스킹은 줄수 절단보다 먼저 적용된다(절단이 마스킹을 건너뛰지 않는다)", () => {
+  const lines = Array.from({ length: 300 }, (_, i) =>
+    i === 150 ? "KEY=sk-ant-api03-MIDDLEMIDDLEMIDDLEMIDD" : `line${i}`,
+  );
+  const out = formatBangOutput(
+    { code: 0, stdout: lines.join("\n"), stderr: "", timedOut: false, truncated: false },
+    { maxLines: 400 },
+  ).join("\n");
+  assert.ok(!out.includes("sk-ant-api03-MIDDLEMIDDLEMIDDLEMIDD"));
+});

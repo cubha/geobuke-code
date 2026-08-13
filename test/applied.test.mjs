@@ -16,6 +16,7 @@ import {
   clearApplied,
   selectAppliedForJudge,
   formatAppliedContext,
+  isAppliedFailure,
   normalizeAppliedFile,
   MAX_APPLIED_ENTRIES,
   MAX_APPLIED_DIGEST,
@@ -285,4 +286,27 @@ test("formatAppliedContext: 첫(가장 최신) 엔트리 하나가 상한을 넘
   const { text, dropped } = formatAppliedContext(entries);
   assert.equal(dropped, 0);
   assert.ok(text.includes(huge));
+});
+
+// ── 0.12.3 ship 보안검토 후속(S6) ─────────────────────────────────────────────
+// PostToolUse는 도구 실행 **후** 발화하지만 성공만 골라 발화한다는 보장은 hook 계약에
+// 대한 가정일 뿐 코드가 검증하는 바가 아니었다. Edit의 old_string 매칭 실패로 도구가
+// 에러를 반환해도 우리는 tool_input의 new_string만 보고 "적용됨"으로 기록했다 —
+// 디스크에 없는 코드가 "완료된 사실"로 judge에 제출되면 실제 누락이 통과한다(미탐).
+//
+// 방향 선택: **실패 신호가 있을 때만 버린다.** 반대로 "성공 신호가 있을 때만 기록"하면
+// tool_response 형상이 조금만 달라져도 P2a가 통째로 무동작이 되어 RCA 결함으로 되돌아간다
+// (fail-open 관례와 동일 — 새 가드의 오작동이 기존 기능을 죽이면 안 된다).
+test("isAppliedFailure: 실패 신호가 있는 tool_response는 기록 대상이 아니다", () => {
+  assert.equal(isAppliedFailure({ success: false }), true);
+  assert.equal(isAppliedFailure({ error: "String to replace not found in file." }), true);
+  assert.equal(isAppliedFailure({ is_error: true }), true);
+});
+
+test("isAppliedFailure: 성공·미상은 기록한다(형상 변화가 P2a를 통째로 죽이지 않게)", () => {
+  assert.equal(isAppliedFailure(undefined), false, "tool_response 자체가 없으면 기존 동작 보존");
+  assert.equal(isAppliedFailure({}), false);
+  assert.equal(isAppliedFailure({ filePath: "/a/b.ts", success: true }), false);
+  assert.equal(isAppliedFailure("Edit 적용 완료"), false, "문자열 응답은 실패 단정 불가 — 기록");
+  assert.equal(isAppliedFailure({ error: "" }), false, "빈 error는 실패 신호가 아니다");
 });
