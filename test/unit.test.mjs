@@ -1206,6 +1206,10 @@ function devPlaceholderSettings() {
       SessionStart: [
         { matcher: "startup|resume", hooks: [{ type: "command", command: `node "${DEV_PLACEHOLDER}" hook session-start` }] },
       ],
+      // 0.12.3 P2a — pureSettings()와 동일 이유(PostToolUse도 "완전 최신"의 일부).
+      PostToolUse: [
+        { matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: `node "${DEV_PLACEHOLDER}" hook post-tool-use` }] },
+      ],
     },
   };
 }

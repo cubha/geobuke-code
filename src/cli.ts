@@ -53,7 +53,7 @@ import { selectedTransport, judgeM1Violation } from "./judge.js";
 import { runVerify } from "./verify.js";
 import { scaffoldVerify } from "./scaffold.js";
 import type { CaseVerdict } from "./types.js";
-import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER, assessRepoHealth, GBC_SKILL_NAMES } from "./install.js";
+import { buildPreCommand, normalizeHooks, ensureSessionStartHook, ensurePostToolUseHook, DEV_PLACEHOLDER, assessRepoHealth, GBC_SKILL_NAMES } from "./install.js";
 import { readProjectSettings } from "./notice.js";
 import { refreshCacheIfStale } from "./version.js";
 import { logEvent, computeMetrics, tagEventsWithRepo, readEventsMerged, eventsPath, parseSince, filterEventsSince } from "./metrics.js";
@@ -213,6 +213,14 @@ ${
     console.log(`  + SessionStart hook 추가`);
   } else {
     console.log(`  = SessionStart hook 이미 존재 (skip)`);
+  }
+
+  // PostToolUse (멱등, 0.12.3 P2a) — 작업단위 적용이력 기록. breaking 계약변경이라 0.12.2 이하
+  // 재init 코호트는 이 hook이 없어 appliedContext가 항상 비어있었다.
+  if (ensurePostToolUseHook(settings, hookPath)) {
+    console.log(`  + PostToolUse hook 추가`);
+  } else {
+    console.log(`  = PostToolUse hook 이미 존재 (skip)`);
   }
 
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
@@ -1180,7 +1188,11 @@ function cmdRepos(args: string[]): void {
       let health = "";
       if (gated) {
         const h = assessRepoHealth(readProjectSettings(r), true);
-        const flags = [h.gateDead ? "⚠️게이트hook부재" : "", h.missingSession ? "⚠️SessionStart누락" : ""].filter(Boolean);
+        const flags = [
+          h.gateDead ? "⚠️게이트hook부재" : "",
+          h.missingSession ? "⚠️SessionStart누락" : "",
+          h.missingPostToolUse ? "⚠️PostToolUse누락" : "",
+        ].filter(Boolean);
         if (flags.length) {
           health = "  " + flags.join(" ");
           anyStale = true;
@@ -1190,7 +1202,7 @@ function cmdRepos(args: string[]): void {
     }
     if (anyStale) {
       console.log(
-        "\n⚠️ 게이트 hook 부재/SessionStart 누락 repo는 해당 repo에서 'gbc init --yes' 재실행으로 복구하세요.",
+        "\n⚠️ 게이트 hook 부재/SessionStart·PostToolUse 누락 repo는 해당 repo에서 'gbc init --yes' 재실행으로 복구하세요.",
       );
       console.log(
         "   (크로스-repo는 hook *등록 여부*만 검사 — 명령 freshness[설치경로 의존]는 각 repo에서 'gbc status'로 확인)",

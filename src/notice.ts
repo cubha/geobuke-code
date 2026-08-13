@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDirPath, ensureGbcDir } from "./store.js";
 import { nowIso } from "./time.js";
-import { hasStalePreToolUse, hasSessionStartHook } from "./install.js";
+import { hasStalePreToolUse, hasSessionStartHook, hasPostToolUseHook } from "./install.js";
 import { readVersionCache, buildVersionNotice } from "./version.js";
 
 import type { Settings } from "./types.js";
@@ -24,7 +24,9 @@ export function readProjectSettings(cwd: string): Settings {
  * 안내한다. 버전 숫자가 아니라 실제 hook 상태로 판단 → 정말 필요한 프로젝트만 알린다.
  * - SessionStart 미등록: 0.2.1 이하 init 코호트(가장 흔한 staleness). PreToolUse 경로로만 도달 가능.
  * - PreToolUse 명령 구식: 옛 bash 키주입 prefix 등.
- * 둘 다 아니면 "".
+ * - PostToolUse 미등록(0.12.3 P2a): breaking 계약변경 — 0.12.2 이하 재init 코호트는 작업단위
+ *   적용이력이 전혀 안 쌓인다(원장이 항상 빈 채로 남는 것보다, 재init을 적극 권해야 하는 이유).
+ * 셋 다 아니면 "".
  *
  * ⚠️ 이 함수는 `settings`(호출부가 읽어온 .claude/settings.json)의 **정확성을 전제**한다 — 순수
  * 함수 자신은 어느 cwd에서 읽었는지 모른다. 0.12.2 이전엔 하위 stray .gbc가 resolveProjectRoot를
@@ -36,9 +38,11 @@ export function readProjectSettings(cwd: string): Settings {
 export function buildInitStalenessNotice(settings: Settings, cliPath: string): string {
   const stale = hasStalePreToolUse(settings, cliPath);
   const missingSession = !hasSessionStartHook(settings);
-  if (!stale && !missingSession) return "";
+  const missingPostToolUse = !hasPostToolUseHook(settings);
+  if (!stale && !missingSession && !missingPostToolUse) return "";
   const reasons: string[] = [];
   if (missingSession) reasons.push("SessionStart hook 미등록");
+  if (missingPostToolUse) reasons.push("PostToolUse hook 미등록");
   if (stale) reasons.push("PreToolUse hook 명령 구식");
   return (
     `🐢 거북이 게이트 — 이 프로젝트 hook이 최신이 아닙니다(${reasons.join(", ")}). ` +
