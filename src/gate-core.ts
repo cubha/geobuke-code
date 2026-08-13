@@ -22,8 +22,11 @@ import { collectCaseEvidence, computeDeletionScope, formatEvidenceContext } from
 import { redactSecrets } from "./extraction.js";
 // truncate.ts도 evidence.ts와 동형 이유로 정적 import(순수·zero-dep, judge.js 같은 SDK 격리 필요 없음).
 import { truncateCurrentFile, HEAD_BUDGET, WINDOW_RADIUS } from "./truncate.js";
+// applied.ts도 evidence.ts와 동형 이유로 정적 import(순수·zero-dep, 0.12.3 P2a). gate-core.ts→
+// applied.ts 단방향 — applied.ts는 이 파일을 import하지 않는다(순환 방지, applied.ts 헤더 참조).
+import { loadApplied, selectAppliedForJudge, formatAppliedContext, normalizeAppliedFile } from "./applied.js";
 import type { CaseEvidence, DeletionScope } from "./evidence.js";
-import type { EditToolInput, Verdict, GoldenCase, PendingReview } from "./types.js";
+import type { EditToolInput, Verdict, GoldenCase, PendingReview, AppliedEntry } from "./types.js";
 import type { GateEvent } from "./metrics.js";
 
 /** 코드 파일 확장자(scope 큐잉 대상 — 문서/설정 편집은 파급반경·사다리 판정 대상 아님). */
@@ -159,7 +162,14 @@ export type JudgeFn = (
   editText: string,
   defers: string[],
   resolved: string[],
-  opts?: { currentFileContent?: string; cwd?: string; evidenceContext?: string; editOldStrings?: string[] },
+  opts?: {
+    currentFileContent?: string;
+    cwd?: string;
+    evidenceContext?: string;
+    editOldStrings?: string[];
+    /** 0.12.3 P2a — applied.ts formatAppliedContext가 조립한 적용이력 텍스트(없으면 섹션 생략). */
+    appliedContext?: string;
+  },
 ) => Promise<Verdict>;
 
 /** evaluateGate 입력(트랜스포트가 자기 형식에서 정규화해 전달). */
@@ -203,6 +213,14 @@ export interface GateDeps {
     missing: string[],
     deletion?: DeletionScope | null,
   ) => Promise<CaseEvidence[]>;
+  /**
+   * 작업단위(specHash) 스코프의 적용이력 원장 조회(0.12.3 P2a — 이 배치의 유일한 판정 로직
+   * 변경). 게이트가 매 편집을 백지 재평가하던 근본원인(gbc엔 PostToolUse가 없어 "방금 그 편집이
+   * 실제 적용됐다"는 사실을 알 방법이 없었음)을 메운다. deps로 주입해 결정론 테스트 가능(judge·
+   * collectCaseEvidence와 동일 원칙). 호출 시 반드시 logHash(빈 명세는 "")를 넘긴다 — 실 specHash를
+   * 넘기면 applied.ts의 빈-명세 가드가 무력화된다(빈-spec 상수 hash 영구우회 재발 방지 판례).
+   */
+  loadApplied: (cwd: string, specHash: string) => AppliedEntry[];
 }
 
 /**
@@ -289,6 +307,7 @@ export function defaultGateDeps(refreshDuringJudge?: () => Promise<void>): GateD
     readPendingReview,
     readCurrentFile,
     collectCaseEvidence: (cwd, missing, deletion) => collectCaseEvidence(cwd, missing, { deletion }),
+    loadApplied,
   };
 }
 
@@ -368,9 +387,30 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
   const editOldStrings: string[] = editList
     .map((e) => e.old_string)
     .filter((s): s is string => typeof s === "string" && s.length > 0);
+  // 0.12.3 P2a — 작업단위 적용이력. 캐시분기(④) 이후·judge 호출 직전. logHash를 넘긴다(specHash가
+  // 아니다) — specEmpty일 때 실 specHash는 ""가 아니므로(computeSpecHash("")는 실제 해시값을 낸다),
+  // 실 specHash를 넘기면 applied.ts의 "specHash==='' 이면 조회 안 함" 가드가 무력화돼 빈-spec
+  // 상수 hash 영구우회(2026-06-22 결함)가 다른 이름으로 재현된다.
+  let appliedEntries: AppliedEntry[] = [];
+  let appliedFailed = false;
+  try {
+    appliedEntries = deps.loadApplied(cwd, logHash);
+  } catch {
+    appliedFailed = true; // 조용히 삼키지 않는다 — fail-open(judge는 그대로 진행, 게이트가 더 엄격해지지 않는다)
+  }
+  // Write(전체 덮어쓰기) self-file 필터 — GATE_SYSTEM ★★ 규칙(덮어쓰기로 삭제되는 회귀는 여전히
+  // missing)과 대칭. 덮어쓰기 대상과 같은 파일의 과거 엔트리를 보여주면 정답인 block을 pass로
+  // 논증하게 만든다(evidence.ts F-8·Write 억제와 동일 계열).
+  const overwriteFile =
+    filePath && isOverwriteEdit(toolName, input.toolInput ?? {}) ? normalizeAppliedFile(cwd, filePath) : undefined;
+  const selectedApplied = selectAppliedForJudge(appliedEntries, { overwriteFile });
+  const appliedAssembled = formatAppliedContext(selectedApplied);
+  const appliedContext = appliedAssembled.text || undefined;
+  const appliedIncluded = selectedApplied.length - appliedAssembled.dropped;
+
   const refreshP = deps.refreshDuringJudge ? deps.refreshDuringJudge() : null;
   // let: P2b 근거주입 2단계 재판정(아래 ⑥-2)이 성공하면 이 변수를 재판정 결과로 교체한다.
-  let verdict = await deps.judge(specText, editText, defers, resolved, { currentFileContent, cwd, editOldStrings });
+  let verdict = await deps.judge(specText, editText, defers, resolved, { currentFileContent, cwd, editOldStrings, appliedContext });
   if (refreshP) await refreshP; // judge 동안 이미 완료 — 이 편집의 notice가 갱신된 캐시를 읽도록
   // fileBytes 없음(신규 파일 등)이면 키 자체를 생략 — undefined로 채워 넣지 않는다(기존 tool?:string
   // 등 선택필드 관례와 동일, "0바이트"로 오독될 여지 차단).
@@ -455,6 +495,7 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
         cwd,
         evidenceContext,
         editOldStrings,
+        appliedContext,
       });
       // ② fail-open은 값검사(try/catch 아님) — judge()는 절대 throw하지 않고 모든 실패를
       // failOpenVerdict로 흡수한다. verdict2.failOpen이면 재판정 자체를 신뢰 못 하므로 폐기하고
@@ -491,6 +532,14 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
     ...(evidenceDropped > 0 ? { evidenceDropped } : {}),
     ...(evidenceFailed ? { evidenceFailed } : {}),
   };
+  // 0.12.3 P2a 계측 — appliedCount는 judge에 실제로 실린 엔트리 수(원장이 비었으면 키 생략, 다른
+  // 계측 필드와 동일 관례). appliedFailed는 원장 읽기 예외를 "매치 0"과 구분해 남긴다(F-14와 동일
+  // 원칙 — "적용이력이 진짜 없어서"와 "못 읽어서"를 사후 구분 못 하면 관측이 무의미해진다).
+  const appliedMeta = {
+    ...(appliedContext ? { appliedCount: appliedIncluded } : {}),
+    ...(appliedAssembled.dropped > 0 ? { appliedDropped: appliedAssembled.dropped } : {}),
+    ...(appliedFailed ? { appliedFailed } : {}),
+  };
 
   // ⑦ pass 분기 — fail-open(판정 실패)을 먼저 분기(빈-spec 정상 pass 오분류 방지). verdict가 위
   // 재판정으로 교체됐을 수 있다 — 근거주입이 missing을 전부 해소하면 여기서 pass로 처리된다.
@@ -505,7 +554,7 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
           userMessage: `🐢 거북이 게이트 — 판정 실패로 안전 통과(fail-open). 이 편집은 게이트 검사를 받지 못했습니다: ${verdict.reason}`,
         },
         effects: { ...effects, logFailOpen: verdict.reason },
-        event: { at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName, decision: "failopen", ...fileMeta },
+        event: { at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName, decision: "failopen", ...fileMeta, ...appliedMeta },
       };
     }
     // 정상 pass. 단 빈 명세 pass는 절대 캐시하지 않는다(상수 hash 영구 우회 방지).
@@ -518,7 +567,7 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
       effects,
       event: {
         at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName,
-        decision: "pass", deferCount: defers.length, ...fileMeta, ...evidenceMeta,
+        decision: "pass", deferCount: defers.length, ...fileMeta, ...evidenceMeta, ...appliedMeta,
       },
     };
   }
@@ -546,7 +595,7 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
         effects,
         event: {
           at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName,
-          decision: "block-repeat", missing: verdict.missing, deferCount: defers.length, ...fileMeta, ...evidenceMeta,
+          decision: "block-repeat", missing: verdict.missing, deferCount: defers.length, ...fileMeta, ...evidenceMeta, ...appliedMeta,
         },
       };
     }
@@ -558,7 +607,7 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
     effects,
     event: {
       at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName,
-      decision: "block", missing: verdict.missing, deferCount: defers.length, ...fileMeta, ...evidenceMeta,
+      decision: "block", missing: verdict.missing, deferCount: defers.length, ...fileMeta, ...evidenceMeta, ...appliedMeta,
     },
   };
 }

@@ -101,6 +101,13 @@ export interface GateEvent {
    * 결과가 프롬프트 예산에 안 들어간 경우다. 둘 다 0이어야 "근거를 다 보고 내린 판정"이 된다.
    */
   evidenceDropped?: number;
+  // --- 작업단위 적용이력(0.12.3 P2a) — 코드 본문·경로는 넣지 않는다(메타만) ---
+  /** judge에 실제로 실린 적용이력 엔트리 수. 원장이 비었으면(appliedContext 없음) undefined. */
+  appliedCount?: number;
+  /** 프롬프트 총량 상한(applied.ts MAX_APPLIED_CONTEXT_CHARS)으로 잘려나간 엔트리 수. 0이면 undefined. */
+  appliedDropped?: number;
+  /** 원장 읽기(loadApplied)가 예외로 끝났는가 — fail-open으로 흡수됐으나 조용히 사라지지 않게 계측. */
+  appliedFailed?: boolean;
 }
 
 /** missing[]을 항목 수/길이로 캡 */
