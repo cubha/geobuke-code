@@ -49,6 +49,9 @@ import {
   hasPreToolUseGate,
   assessRepoHealth,
   DEV_PLACEHOLDER,
+  buildPostToolUseCommand,
+  ensurePostToolUseHook,
+  hasPostToolUseHook,
 } from "../dist/install.js";
 import {
   buildInitStalenessNotice,
@@ -1145,6 +1148,11 @@ function pureSettings() {
       SessionStart: [
         { matcher: "startup|resume", hooks: [{ type: "command", command: `node "${CLI}" hook session-start` }] },
       ],
+      // 0.12.3 P2a — PostToolUse도 "완전 최신"의 일부. 없으면 pureSettings()는 더 이상
+      // buildInitStalenessNotice(...) === "" (완전 무결)를 대표할 수 없다.
+      PostToolUse: [
+        { matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: `node "${CLI}" hook post-tool-use` }] },
+      ],
     },
   };
 }
@@ -1239,17 +1247,54 @@ test("hasPreToolUseGate: 게이트 hook 존재 여부만(cliPath 무관, stale�
   assert.equal(hasPreToolUseGate({}), false);
 });
 
-test("assessRepoHealth: gateDead/missingSession 플래그(isGbcProject 게이트)", () => {
-  // 정상 gbc 프로젝트 — 둘 다 건강
-  assert.deepEqual(assessRepoHealth(pureSettings(), true), { gateDead: false, missingSession: false });
-  // SessionStart만 누락(0.2.1↓ 코호트)
-  const onlyMissingSession = { hooks: { PreToolUse: pureSettings().hooks.PreToolUse } };
-  assert.deepEqual(assessRepoHealth(onlyMissingSession, true), { gateDead: false, missingSession: true });
-  // 게이트 hook 자체 부재(게이트 조용히 죽음) + SessionStart도 없음
-  assert.deepEqual(assessRepoHealth({}, true), { gateDead: true, missingSession: true });
-  // .gbc 없음(게이트 대상 아님) → 둘 다 false, 설정과 무관
-  assert.deepEqual(assessRepoHealth({}, false), { gateDead: false, missingSession: false });
-  assert.deepEqual(assessRepoHealth(staleSettings(), false), { gateDead: false, missingSession: false });
+test("assessRepoHealth: gateDead/missingSession/missingPostToolUse 플래그(isGbcProject 게이트, 0.12.3 P2a 확장)", () => {
+  // 정상 gbc 프로젝트 — 셋 다 건강
+  assert.deepEqual(assessRepoHealth(pureSettings(), true), { gateDead: false, missingSession: false, missingPostToolUse: false });
+  // SessionStart만 누락(0.2.1↓ 코호트) — PostToolUse는 pureSettings()에서 상속돼 있음
+  const onlyMissingSession = { hooks: { PreToolUse: pureSettings().hooks.PreToolUse, PostToolUse: pureSettings().hooks.PostToolUse } };
+  assert.deepEqual(assessRepoHealth(onlyMissingSession, true), { gateDead: false, missingSession: true, missingPostToolUse: false });
+  // PostToolUse만 누락(0.12.2 이하 — 이 배치 이전 재init 코호트, breaking 계약변경)
+  const onlyMissingPostToolUse = { hooks: { PreToolUse: pureSettings().hooks.PreToolUse, SessionStart: pureSettings().hooks.SessionStart } };
+  assert.deepEqual(assessRepoHealth(onlyMissingPostToolUse, true), { gateDead: false, missingSession: false, missingPostToolUse: true });
+  // 게이트 hook 자체 부재(게이트 조용히 죽음) + 나머지도 전부 없음
+  assert.deepEqual(assessRepoHealth({}, true), { gateDead: true, missingSession: true, missingPostToolUse: true });
+  // .gbc 없음(게이트 대상 아님) → 전부 false, 설정과 무관
+  assert.deepEqual(assessRepoHealth({}, false), { gateDead: false, missingSession: false, missingPostToolUse: false });
+  assert.deepEqual(assessRepoHealth(staleSettings(), false), { gateDead: false, missingSession: false, missingPostToolUse: false });
+});
+
+// ---------- 0.12.3 P2a: PostToolUse hook 등록(작업단위 적용이력) ----------
+test("buildPostToolUseCommand: 셸 무관 pure 명령 (post-tool-use)", () => {
+  assert.equal(
+    buildPostToolUseCommand("/x/dist/cli.js"),
+    'node "/x/dist/cli.js" hook post-tool-use',
+  );
+});
+
+test("ensurePostToolUseHook: matcher Edit|Write|MultiEdit로 멱등 등록", () => {
+  const s = {};
+  assert.equal(ensurePostToolUseHook(s, "/x/dist/cli.js"), true); // 신규 추가
+  assert.equal(s.hooks.PostToolUse[0].matcher, "Edit|Write|MultiEdit");
+  assert.equal(
+    s.hooks.PostToolUse[0].hooks[0].command,
+    'node "/x/dist/cli.js" hook post-tool-use',
+  );
+  // 멱등 — 두 번째 호출은 추가 안 함
+  assert.equal(ensurePostToolUseHook(s, "/x/dist/cli.js"), false);
+  assert.equal(s.hooks.PostToolUse.length, 1);
+});
+
+test("hasPostToolUseHook: read-only 존재 감지(비파괴)", () => {
+  assert.equal(hasPostToolUseHook(pureSettings()), true);
+  assert.equal(hasPostToolUseHook(staleSettings()), false);
+  assert.equal(hasPostToolUseHook({}), false);
+});
+
+test("buildInitStalenessNotice: PostToolUse 미등록도 재init 안내 사유에 포함(0.12.3 breaking 계약변경)", () => {
+  const onlyMissingPostToolUse = { hooks: { PreToolUse: pureSettings().hooks.PreToolUse, SessionStart: pureSettings().hooks.SessionStart } };
+  const n = buildInitStalenessNotice(onlyMissingPostToolUse, CLI);
+  assert.match(n, /gbc init/);
+  assert.match(n, /PostToolUse/);
 });
 
 test("notice dedup: 세션당 1회 (markNotified 후 같은 세션은 wasNotified=true)", () => {
