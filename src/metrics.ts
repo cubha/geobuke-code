@@ -26,7 +26,10 @@ export type EventKind =
   | "gate-reset"
   | "done"
   | "verify"
-  | "bypass";
+  | "bypass"
+  /** 0.12.3 P2a — PostToolUse가 편집당 1건 기록(본문·경로 없음). "gate 이벤트는 있는데 applied가
+   * 0"이면 PostToolUse hook 미설치/사망 신호(설치 경로 죽음 관측 채널, install.ts 재정규화 한계 보완). */
+  | "applied";
 
 // doc-skip(0.5.5): 문서 확장자 하드가드가 judge 미호출 통과시킨 편집 — 조용한 우회 방지 계측.
 // specHash=""로 기록돼 M1(churn)·M2(block만)에선 자동 제외, M3(session 키)엔 기존 문서편집과 동일 참여.
