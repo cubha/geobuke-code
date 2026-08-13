@@ -11,9 +11,16 @@
 ### Added — 작업단위 적용이력(P2a, 이 릴리스의 유일한 판정 로직 변경)
 - **`.gbc/applied.json` 원장(`src/applied.ts` 신규)** — 작업단위(specHash)별로 실제 적용된 편집(새 내용만, `old_string`은 담지 않음)을 FIFO 20건까지 보관. 기록·조회 시점 둘 다 빈 명세("")는 절대 취급하지 않는다(빈-spec 상수 해시가 원장을 교차 작업단위로 오염시키던 2026-06-22 결함의 재발 방지 패턴 재사용). digest는 기록 시점에 `redactSecrets`+400자 캡을 거쳐 이후 판정 전송·골든 영속 저장이 전부 이 값을 재사용한다(마스킹 지점 단일화).
 - **`gbc hook post-tool-use`(신규, `src/hook.ts`)** — 사용자가 승인한 편집이 **실제로 적용된 뒤**에만 발화하는(hook 계약상 거부되면 발화 자체가 없음) 새 진입점. 실패해도 조용히 흡수하고 항상 exit 0(게이트 판정에 관여하지 않는다 — 새 메커니즘의 장애가 게이트를 더 엄격하게 만들지 않는다).
-- **judge 프롬프트 `[이 작업단위에서 이미 적용된 편집]` 섹션** — 같은 작업단위에서 이미 디스크에 반영된 편집을 사실고지형으로 제시해, 형제 케이스가 다른 위치(다른 파일 포함)에서 이미 구현됐으면 missing에서 제외하도록 한다. 섹션이 비면 통째로 생략(플레이스홀더가 판정을 오염시킨 0.9.3 전례 회피). `gate-core.ts`가 캐시분기 이후·1차 judge 호출 직전에 원장을 읽어 1차·P2b 2차 재판정 양쪽에 동일하게 전달하며, 원장 읽기 실패는 fail-open(빈 컨텍스트로 진행, `appliedFailed` 계측)한다. `Write`(전체 덮어쓰기)는 self-file 엔트리를 제외한다(`GATE_SYSTEM` ★★ 규칙 대칭).
+- **judge 프롬프트 `[이 작업단위에서 이미 적용된 편집]` 섹션** — 같은 작업단위에서 이미 디스크에 반영된 편집의 **원문(코드)** 을 제시하고, 바로 위 `[관련 코드 근거(grep)]` 규칙과 **동형의 판독 기준**을 함께 준다: 그 코드가 케이스의 동작을 실제로 구현하고 있으면(로직·검증·분기·반환·렌더 실재) missing에서 제외하고, 심볼·시그니처·TODO뿐이면 침묵 누락으로 유지한다. 로직이 실재하면 표현이 다르거나·다른 파일에 있거나·호출부가 목록에 함께 보이지 않아도 구현으로 인정한다(같은 작업단위의 순차 구현은 파일이 나뉘고 호출부가 뒤에 오는 것이 정상 — 그 부재를 미구현 증거로 쓰면 이미 끝난 일을 다시 차단하게 된다). 섹션이 비면 통째로 생략(플레이스홀더가 판정을 오염시킨 0.9.3 전례 회피). `gate-core.ts`가 캐시분기 이후·1차 judge 호출 직전에 원장을 읽어 1차·P2b 2차 재판정 양쪽에 동일하게 전달하며, 원장 읽기 실패는 fail-open(빈 컨텍스트로 진행, `appliedFailed` 계측)한다. `Write`(전체 덮어쓰기)는 self-file 엔트리를 제외한다(`GATE_SYSTEM` ★★ 규칙 대칭).
 - **`gbc metrics`가 계측하는 신규 필드**: `appliedCount`(judge에 실린 엔트리 수)·`appliedDropped`(프롬프트 총량 캡 초과분)·`appliedFailed`(원장 읽기 예외) + `EventKind: "applied"`(hook 발화 자체의 존재 신호 — "gate 이벤트는 있는데 applied가 0"이면 이 hook이 미설치/사망했다는 뜻).
 - eval 회귀에 원장 유무 대칭쌍(케이스20/21) 추가 — `npm run eval` hard **21/21**. 골든 캡처·`gbc gate snapshot replay`도 `appliedContext`를 재현한다.
+
+### Added — 회귀 케이스 **입력 형상 계약** 락
+발행 전 실검증에서 위 P2a가 프로덕션 경로에선 효과가 재현되지 않는 것이 드러났다(F-1). 원인은 **규칙↔데이터 형상 불일치** — 프롬프트 규칙은 요약형("…적용 완료")을 전제해 쓰였는데 `formatAppliedContext`는 원시 코드만 낸다. 그런데 eval 케이스20의 입력을 사람이 요약형으로 적어둔 탓에 **프로덕션이 낼 수 없는 입력 위에서 21/21 green이 나오고 있었다**(실측: 요약형 pass 3/3 vs 프로덕션형 block 3/3 = 대조군과 동일). 0.12.0 F-13(골든 replay가 `currentFileContent` 미전달 → flip0 거짓안심)과 같은 구멍이 두 번째라, 산문 규칙이 아니라 기계 게이트로 막는다.
+- **`test/cases.json`은 조립된 문자열을 더 이상 적지 않는다** — 프로덕션 PostToolUse hook이 받는 것과 같은 raw 편집 입력(`applied_edits`)만 선언하고, 조립은 프로덕션 함수(`buildAppliedEntry`→`formatAppliedContext`)가 수행한다(`src/eval/applied-input.ts` 신규). 형상 불일치가 구조적으로 불가능해진다.
+- **`test/eval-cases.test.mjs` 신규 5건** — 조립된 문자열 직접 기입 금지(우회로 차단)·적용이력 케이스 최소 1건 존재(무신호 방지)·프로덕션 `buildAppliedEntry`가 실제로 엔트리를 만드는 입력인지·eval이 싣는 문자열이 `formatAppliedContext` 출력과 **바이트 동일**·P2a 인과격리쌍 존재.
+- ⚠️ **케이스 형식 변경(하위호환 없음)** — `test/cases.json`의 `applied_context`(조립된 문자열) 필드는 **폐기**됐고 `Case` 인터페이스에서도 제거됐다. 대신 `applied_edits: [{ tool?, file, new_string? | content? }]`로 선언한다(`tool` 생략 시 `Edit`, `file`은 합성 루트 기준 상대경로). 폐기 필드를 남겨두면 락을 우회하는 경로가 그대로 살아 F-1이 재발하므로 의도적으로 지웠다 — 위 단위테스트가 잔존·재기입을 차단한다. `test/`는 npm 배포 대상이 아니라(`package.json files`) 설치 사용자 영향은 없고, 이 저장소에서 케이스를 추가·수정하는 경우에만 해당한다.
+- 부수 효과: 케이스20이 이제 400자 digest 캡과 `…(절단됨)` 표시까지 프로덕션과 동일하게 재현한다(예전 수기 문자열은 절단 경로를 한 번도 타지 않았다).
 
 ### Added — TUI `!bash`(Task C)
 - **입력창에서 `!<command>`를 직접 타이핑하면 셸 명령을 실행**한다(Claude Code CLI `!` 프리픽스와 동일 계열). **사람이 직접 타이핑하는 입력이라 모델 도구 경로가 아니고, `evaluateGate`(게이트 판정)를 전혀 경유하지 않는다** — 게이트 thesis와 무충돌(사람 직접입력은 애초 게이트 범위 밖).
@@ -23,7 +30,9 @@
 ### ⚠️ 재init 필요(breaking hook 계약 변경)
 `PostToolUse` hook이 신설돼 `.claude/settings.json` 등록 형상이 바뀐다. **0.12.2 이하에서 `gbc init`한 프로젝트는 `gbc init --yes` 재실행이 필요하다**(머지·멱등·자동 백업) — 재실행하지 않으면 작업단위 적용이력이 전혀 쌓이지 않아 위 P2a 기능이 무동작 상태로 남는다(게이트 자체는 계속 정상 동작). 미등록 시 `gbc status`/`gbc repos --health`가 `PostToolUse hook 미등록`을 안내한다.
 
-검증: `verify.sh --no-build` 1143/1143(SubTask별) · `npm run eval` hard 21/21(FP0/FN0)·scope 6/6 · scope-critic 8회 전 SubTask 통과(DECISION_CHANGED:no) · tmux 실터미널 6항목 실측(`!bash` 정상출력·변수확장 차단·대용량절단·spawnError·스트리밍중거절·HelpPanel 오버플로 없음) · `gbc init --dev --yes` 자기적용 + 임시 워크스페이스 실 LLM 3콜 종단(block→PostToolUse 기록→후속편집 pass, `appliedCount:1` 실측).
+검증: `verify.sh` 풀 1152/1152 · `npm run eval` hard 21/21(TP13 TN8 **FP0 FN0**)·scope 6/6 · scope-critic 11회 전 SubTask 통과 · tmux 실터미널 6항목 실측(`!bash` 정상출력·변수확장 차단·대용량절단·spawnError·스트리밍중거절·HelpPanel 오버플로 없음) · `!bash` 런타임 9항목(`!echo $HOME` → `"$HOME"` = argv spawn 실증, `|`·`>`·`;` 리터럴) · `gbc init --dev --yes` 자기적용 + 임시 워크스페이스 실 LLM 종단.
+
+**F-1 인과격리 실측**(temperature 0 · 3표본): 프로덕션 형상 적용이력 **pass 3/3**(수정 전 block 3/3에서 flip) · 대조군(원장 없음) **block 3/3 유지** · P2b 대칭쌍 16/17/18 전부 유지. 프로덕션 hook 종단에서도 원장이 있으면 기적용 형제 케이스가 missing에서 빠지고(`appliedCount=1`), 없으면 들어간다 — RCA가 지목한 재차단 실패모드 제거 확인.
 
 ## [0.12.2] - 2026-08-13
 
