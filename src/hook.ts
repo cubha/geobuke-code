@@ -2,7 +2,7 @@
 // 핫패스 보호: 이 파일은 SDK를 import하지 않는다. judge.ts가 API 호출 시에만 lazy import.
 // "이미 게이트됨 → exit 0"은 상태파일만 읽고 즉시 종료(judge 미호출).
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
-import { buildAppliedEntry, recordApplied } from "./applied.js";
+import { buildAppliedEntry, recordApplied, isAppliedFailure } from "./applied.js";
 import { markGated } from "./state.js";
 import { loadDefers, isClosedStatus, unresolvedDefers } from "./defer.js";
 import { isStopHintMuted } from "./config.js";
@@ -37,6 +37,11 @@ interface PreToolUseInput {
   tool_input?: EditToolInput;
   cwd?: string;
   session_id?: string;
+  /**
+   * PostToolUse 전용(0.12.3 ship 보안검토 S6) — 도구 실행 결과. PreToolUse 시점엔 없다.
+   * 실패를 명시하면 원장에 기록하지 않는다(applied.ts isAppliedFailure 참조).
+   */
+  tool_response?: unknown;
 }
 
 interface StopInput {
@@ -252,6 +257,12 @@ async function postToolUseBody(onCwd?: (cwd: string) => void): Promise<void> {
   onCwd?.(cwd);
   const toolName = input.tool_name ?? "";
   const toolInput = input.tool_input ?? {};
+  // 도구가 실패를 명시했으면 기록하지 않는다(0.12.3 ship 보안검토 S6) — 이 hook은 편집이 실제
+  // 적용됐다는 사실을 남기는 곳이라, 실패한 편집을 "완료"로 남기면 실제 누락이 통과한다(미탐).
+  // 판정 방향(실패 명시일 때만 버림)의 근거는 applied.ts isAppliedFailure 주석.
+  if (isAppliedFailure(input.tool_response)) {
+    process.exit(0);
+  }
   // 문서 편집은 원장에서 뺀다 — gate-core.ts의 isDocFile 하드가드와 동일 판단이지만, applied.ts는
   // gate-core.ts를 import하지 않으므로(순환 방지, applied.ts 헤더 참조) 이 조합은 호출부 책임이다.
   if (isDocFile(toolInput.file_path ?? "")) {

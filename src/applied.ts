@@ -78,6 +78,30 @@ export function summarizeAppliedEdit(toolName: string, input: EditToolInput): st
 }
 
 /**
+ * `tool_response`가 **실패를 명시**하는가(순수, 0.12.3 ship 보안검토 S6).
+ *
+ * PostToolUse가 "성공한 편집에만 발화한다"는 것은 hook 계약에 대한 *가정*일 뿐 코드가 검증하던
+ * 바가 아니었다 — Edit의 old_string 매칭 실패로 도구가 에러를 반환해도 우리는 tool_input의
+ * new_string만 보고 "적용됨"으로 기록했고, 디스크에 없는 코드가 "완료된 사실"로 judge에 제출되면
+ * 실제 누락이 통과한다(미탐).
+ *
+ * ⚠️ 판정 방향: **실패 신호가 있을 때만 버린다**(성공 신호가 있을 때만 기록, 이 아니다).
+ * 후자로 하면 tool_response 형상이 조금만 달라져도 P2a가 통째로 무동작이 되어 애초 고치려던 RCA
+ * 결함으로 되돌아간다 — 새 가드의 오작동이 기존 기능을 죽이면 안 된다는 fail-open 관례와 동형.
+ * 그래서 필드가 없거나 형상을 모르면 기록한다(보수적인 쪽은 "덜 기록"이 아니라 "덜 단정"이다).
+ */
+export function isAppliedFailure(toolResponse: unknown): boolean {
+  if (typeof toolResponse !== "object" || toolResponse === null) return false;
+  const r = toolResponse as Record<string, unknown>;
+  if (r.success === false) return true;
+  if (r.is_error === true) return true;
+  // 빈 문자열 error는 실패 신호가 아니다(형상만 있고 내용이 없는 응답 흡수).
+  if (typeof r.error === "string" && r.error.trim() !== "") return true;
+  if (r.error !== undefined && typeof r.error !== "string" && r.error !== null && r.error !== false) return true;
+  return false;
+}
+
+/**
  * PostToolUse 입력에서 원장 엔트리를 만든다(순수). 기록 대상이 아니면 null:
  * - 게이트 대상 도구(Edit/Write/MultiEdit)가 아님
  * - file_path 없음

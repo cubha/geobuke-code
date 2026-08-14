@@ -27,6 +27,12 @@
 - 실행은 argv 배열 `spawn(cmd, args, {shell:false})`(셸 문자열 통짜 실행 금지 — 이 저장소의 `realGrep`·`buildPreCommand`와 동일 안전기준). 따라서 파이프·리다이렉트·`$()` 명령치환·변수확장은 지원하지 않는다(따옴표는 공백 포함 인자를 묶는 용도일 뿐). `stdin`은 무시(대화형 명령이 매달리지 않게), 30초 타임아웃·64KB 출력 상한 초과 시 즉시 종료. 출력은 ANSI/제어문자를 스트립해 스크롤백에 표시하고 200줄 초과 시 head+tail만 남긴다. `GBC_NO_BANG=1`로 끌 수 있다.
 - `?` 도움말 패널에 `!cmd` 단축키 추가.
 
+### Security — 발행 전 감사 후속 2건
+- **실패한 편집은 원장에 기록하지 않는다** — `PostToolUse`가 `tool_response`를 읽어 도구가 실패를 명시하면(`success:false`·`is_error`·비어있지 않은 `error`) 기록을 건너뛴다. 이전엔 `tool_input`의 새 내용만 보고 기록해, Edit이 `old_string` 매칭 실패로 에러를 반환해도 **디스크에 없는 코드가 "완료된 사실"로 판정에 제출**될 수 있었다(실제 누락이 통과하는 미탐 경로). 판정 방향은 "실패가 명시됐을 때만 버림" — 반대로 했다면 `tool_response` 형상이 조금만 달라져도 P2a가 통째로 무동작이 되어 애초 고치려던 결함으로 되돌아간다(필드 부재 시 기존 동작 보존).
+- **`!bash` 출력에 시크릿 마스킹 적용** — `!cat .env`·`!env`류 출력이 스크롤백을 거쳐 크래시 시 `.gbc/crash-dump.txt`에 평문으로 남을 수 있었다. `formatBangOutput`이 ANSI 스트립 직후·줄수 캡 **이전에** `redactSecrets`를 적용한다(마스킹 패턴이 절단으로 쪼개지지 않게 — `summarizeAppliedEdit`과 동일 규율). LLM 프롬프트로는 전송되지 않아 노출면은 로컬 디스크 한정이었다.
+
+> 남은 감사 지적(0.12.4 이월): 원장은 한 번 기록되면 재검증되지 않아, 다른 파일의 기적용 코드가 이후 삭제돼도 "완료"로 남는다(`selectAppliedForJudge`는 같은 파일 `Write`만 거른다). 작업단위 전환 시 자동 무효화·`gbc done`·FIFO 20건이 창을 제한하지만 근본 해소는 아니다 — 원장 근거로 missing에서 제외할 때 grep 재검증을 병행하는 설계가 후보이며, 판정 로직 변경이라 별도 배치로 다룬다.
+
 ### ⚠️ 재init 필요(breaking hook 계약 변경)
 `PostToolUse` hook이 신설돼 `.claude/settings.json` 등록 형상이 바뀐다. **0.12.2 이하에서 `gbc init`한 프로젝트는 `gbc init --yes` 재실행이 필요하다**(머지·멱등·자동 백업) — 재실행하지 않으면 작업단위 적용이력이 전혀 쌓이지 않아 위 P2a 기능이 무동작 상태로 남는다(게이트 자체는 계속 정상 동작). 미등록 시 `gbc status`/`gbc repos --health`가 `PostToolUse hook 미등록`을 안내한다.
 

@@ -6,6 +6,7 @@
 // 동일 안전기준. 셸이 없으므로 파이프·리다이렉트·변수확장은 지원하지 않는다(따옴표는 공백 포함
 // 인자를 묶는 용도일 뿐).
 import { spawn as nodeSpawn } from "node:child_process";
+import { redactSecrets } from "../extraction.js";
 
 // ===== 파서(순수) =====
 
@@ -190,9 +191,16 @@ function stripAnsiAndControl(text: string): string {
 const DEFAULT_MAX_LINES = 200;
 
 /**
- * BangResult를 스크롤백에 push할 라인 배열로 조립한다(순수). ANSI/제어문자 스트립 + 줄수 캡
- * (head+tail) + 종료코드/timeout/truncated/spawnError 고지. 정상 종료(0)는 종료코드를 고지하지
- * 않는다(잡음 최소화 — 실패했을 때만 신호).
+ * BangResult를 스크롤백에 push할 라인 배열로 조립한다(순수). ANSI/제어문자 스트립 + **시크릿
+ * 마스킹** + 줄수 캡(head+tail) + 종료코드/timeout/truncated/spawnError 고지. 정상 종료(0)는
+ * 종료코드를 고지하지 않는다(잡음 최소화 — 실패했을 때만 신호).
+ *
+ * 마스킹 이유(0.12.3 ship 보안검토 S2): `!cat .env`·`!env`류 출력이 그대로 스크롤백에 들어가고,
+ * 크래시 시 그 스크롤백이 `.gbc/crash-dump.txt`에 원문으로 기록된다(app.tsx). bang은 그 sink로
+ * 흘러드는 **신규 데이터 소스**라 여기서 막는다. LLM 프롬프트로는 가지 않으므로 노출면은 로컬
+ * 디스크 한정이지만, 사용자가 실수로 시크릿을 조회한 뒤 크래시하면 평문이 파일에 남는다.
+ * 순서는 스트립 → 마스킹 → 줄수 캡 — applied.ts summarizeAppliedEdit과 동일 규율(절단이 마스킹
+ * 패턴을 쪼개거나 건너뛰지 못하게 마스킹을 항상 먼저 한다).
  */
 export function formatBangOutput(result: BangResult, opts: { maxLines?: number } = {}): string[] {
   const maxLines = opts.maxLines ?? DEFAULT_MAX_LINES;
@@ -201,7 +209,7 @@ export function formatBangOutput(result: BangResult, opts: { maxLines?: number }
     lines.push(`⚠ 실행 실패: ${result.spawnError}`);
     return lines;
   }
-  const combined = stripAnsiAndControl(result.stdout + result.stderr);
+  const combined = redactSecrets(stripAnsiAndControl(result.stdout + result.stderr));
   const outLines = combined.split("\n").filter((_, i, arr) => !(i === arr.length - 1 && arr[i] === ""));
   if (outLines.length <= maxLines) {
     lines.push(...outLines);
