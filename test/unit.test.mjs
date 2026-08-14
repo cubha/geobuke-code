@@ -49,6 +49,9 @@ import {
   hasPreToolUseGate,
   assessRepoHealth,
   DEV_PLACEHOLDER,
+  buildPostToolUseCommand,
+  ensurePostToolUseHook,
+  hasPostToolUseHook,
 } from "../dist/install.js";
 import {
   buildInitStalenessNotice,
@@ -259,6 +262,75 @@ test("buildUserMessage: editAnchors 생략 시 기존 head-only 동작(하위호
   const content = "A".repeat(12000) + "\n" + anchor + "\n" + "B".repeat(200);
   const m = buildUserMessage("plan", "edit", [], [], content);
   assert.doesNotMatch(m, /siblingAlreadyImplemented/, "앵커 없으면 head-only 그대로 — 회귀 없음");
+});
+
+// ── [이 작업단위에서 이미 적용된 편집] (0.12.3 P2a, 8번째 인자) — 작업단위 구현이력 부재 근본수정.
+// 게이트가 매 편집을 백지 재평가하던 근본원인은 gbc엔 PostToolUse가 없어 "방금 그 편집이 실제
+// 적용됐다"는 사실 자체를 알 방법이 없었던 것(RCA: 동일 케이스 4회 재차단, 그 사이 모델은 순차
+// 구현 중이었음). applied.ts(SubTask1)가 조립한 텍스트를 이 섹션에 그대로 싣는다.
+
+test("buildUserMessage: appliedContext 제공 시 [이 작업단위에서 이미 적용된 편집] 섹션에 원문 포함", () => {
+  const m = buildUserMessage("plan", "edit", [], [], undefined, undefined, [], "1. [a.ts] 이미 구현된 내용");
+  assert.match(m, /\[이 작업단위에서 이미 적용된 편집\]/);
+  assert.match(m, /1\. \[a\.ts\] 이미 구현된 내용/);
+});
+
+test("buildUserMessage: appliedContext 생략/빈 문자열이면 섹션 자체를 생략(플레이스홀더 오염 방지, 기존 관례와 동일)", () => {
+  const withoutArg = buildUserMessage("plan", "edit", [], []);
+  assert.doesNotMatch(withoutArg, /이미 적용된 편집/);
+  const withEmpty = buildUserMessage("plan", "edit", [], [], undefined, undefined, [], "");
+  assert.doesNotMatch(withEmpty, /이미 적용된 편집/);
+});
+
+test("buildUserMessage: [이 작업단위에서 이미 적용된 편집] 섹션은 [현재 편집] 앞에 위치", () => {
+  const m = buildUserMessage("plan", "edit-marker-xyz", [], [], undefined, undefined, [], "applied-marker-abc");
+  const appliedIdx = m.indexOf("applied-marker-abc");
+  const editIdx = m.indexOf("edit-marker-xyz");
+  assert.notEqual(appliedIdx, -1);
+  assert.ok(appliedIdx < editIdx);
+});
+
+test("GATE_SYSTEM: 적용이력 섹션 근거로 missing 판정에서 제외하되 부재 자체를 미구현 증거로 삼지 말라는 규칙 포함", () => {
+  assert.match(GATE_SYSTEM, /이 작업단위에서 이미 적용된 편집/);
+  assert.match(GATE_SYSTEM, /missing에 넣지 마라/);
+});
+
+test("GATE_SYSTEM: 적용이력 규칙이 섹션 내용을 '편집 원문(코드)'으로 명시한다 (F-1)", () => {
+  // F-1의 근본원인 = 규칙↔데이터 형상 불일치. 규칙은 요약형("…적용 완료")을 전제해 쓰였는데
+  // formatAppliedContext는 원시 코드형만 낸다 → 모델이 코드를 보고도 어느 케이스를 충족하는지
+  // 단정하지 못하고 다시 차단했다(실측: 프로덕션형 block 3/3 = 대조군과 동일).
+  const rule = GATE_SYSTEM.split("\n").find((l) => l.includes("[이 작업단위에서 이미 적용된 편집]"));
+  assert.ok(rule, "적용이력 규칙 줄이 존재해야 한다");
+  assert.match(rule, /코드/, "섹션 내용이 코드임을 밝혀야 한다(요약·설명문이 아니다)");
+  assert.match(rule, /원문/, "'편집 원문'이라는 사실 고지가 있어야 한다");
+});
+
+test("GATE_SYSTEM: 적용이력 규칙이 grep 근거 규칙과 같은 판독 기준(로직 실재=배제/심볼만=누락유지)을 준다 (F-1)", () => {
+  const rule = GATE_SYSTEM.split("\n").find((l) => l.includes("[이 작업단위에서 이미 적용된 편집]"));
+  assert.ok(rule);
+  // ★★★(grep 근거)이 원시 라인에 대해 주는 것과 동형의 판독 기준 — 이게 없으면 모델은 코드를
+  // 받고도 판단 기준이 없어 보수적으로 차단한다.
+  assert.match(rule, /실제로 구현/, "로직이 실제로 있으면 배제하라는 기준");
+  assert.match(rule, /로직/, "로직 실재 여부가 판단 축임을 명시");
+  assert.match(rule, /심볼|시그니처|TODO/, "심볼·시그니처만이면 누락 유지라는 반대편 기준");
+});
+
+test("GATE_SYSTEM: 적용이력 규칙이 '다른 파일·호출지점 부재'를 미구현 근거로 삼지 말라고 못 박는다 (F-1)", () => {
+  const rule = GATE_SYSTEM.split("\n").find((l) => l.includes("[이 작업단위에서 이미 적용된 편집]"));
+  assert.ok(rule);
+  // 실측된 오차단 사유 3종이 전부 이 축이었다: "관리자 페이지 적용 여부가 불명확" ·
+  // "설정 화면에서 호출되지 않음" · "복호화 후 마스킹하는 통합 로직 누락". 같은 작업단위의
+  // 순차 구현은 원래 파일이 나뉘고 호출부가 뒤에 온다 — 그걸 미구현 증거로 쓰면 안 된다.
+  assert.match(rule, /다른 파일|호출/, "다른 파일·호출지점 부재를 근거로 삼지 말라는 지침");
+});
+
+test("GATE_SYSTEM: 적용이력 규칙이 절단 2종(항목 생략·본문 절단)을 모두 다룬다 (F-1)", () => {
+  const rule = GATE_SYSTEM.split("\n").find((l) => l.includes("[이 작업단위에서 이미 적용된 편집]"));
+  assert.ok(rule);
+  // formatAppliedContext는 "…(N건 생략)"(항목 탈락)을, summarizeAppliedEdit은 "…(절단됨)"
+  // (본문 400자 캡)을 낸다. ★★★는 전자만 다루면 됐지만 적용이력은 둘 다 발생한다.
+  assert.match(rule, /생략/, "항목 생략 표시 처리");
+  assert.match(rule, /절단/, "본문 절단 표시 처리");
 });
 
 test("예산 불변식(0.12.1 P3): MAX_FIELD(Write 새내용, normalize.ts) >= MAX_CURRENT_FILE(judge.ts)", async () => {
@@ -1114,6 +1186,11 @@ function pureSettings() {
       SessionStart: [
         { matcher: "startup|resume", hooks: [{ type: "command", command: `node "${CLI}" hook session-start` }] },
       ],
+      // 0.12.3 P2a — PostToolUse도 "완전 최신"의 일부. 없으면 pureSettings()는 더 이상
+      // buildInitStalenessNotice(...) === "" (완전 무결)를 대표할 수 없다.
+      PostToolUse: [
+        { matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: `node "${CLI}" hook post-tool-use` }] },
+      ],
     },
   };
 }
@@ -1167,6 +1244,10 @@ function devPlaceholderSettings() {
       SessionStart: [
         { matcher: "startup|resume", hooks: [{ type: "command", command: `node "${DEV_PLACEHOLDER}" hook session-start` }] },
       ],
+      // 0.12.3 P2a — pureSettings()와 동일 이유(PostToolUse도 "완전 최신"의 일부).
+      PostToolUse: [
+        { matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: `node "${DEV_PLACEHOLDER}" hook post-tool-use` }] },
+      ],
     },
   };
 }
@@ -1208,17 +1289,54 @@ test("hasPreToolUseGate: 게이트 hook 존재 여부만(cliPath 무관, stale�
   assert.equal(hasPreToolUseGate({}), false);
 });
 
-test("assessRepoHealth: gateDead/missingSession 플래그(isGbcProject 게이트)", () => {
-  // 정상 gbc 프로젝트 — 둘 다 건강
-  assert.deepEqual(assessRepoHealth(pureSettings(), true), { gateDead: false, missingSession: false });
-  // SessionStart만 누락(0.2.1↓ 코호트)
-  const onlyMissingSession = { hooks: { PreToolUse: pureSettings().hooks.PreToolUse } };
-  assert.deepEqual(assessRepoHealth(onlyMissingSession, true), { gateDead: false, missingSession: true });
-  // 게이트 hook 자체 부재(게이트 조용히 죽음) + SessionStart도 없음
-  assert.deepEqual(assessRepoHealth({}, true), { gateDead: true, missingSession: true });
-  // .gbc 없음(게이트 대상 아님) → 둘 다 false, 설정과 무관
-  assert.deepEqual(assessRepoHealth({}, false), { gateDead: false, missingSession: false });
-  assert.deepEqual(assessRepoHealth(staleSettings(), false), { gateDead: false, missingSession: false });
+test("assessRepoHealth: gateDead/missingSession/missingPostToolUse 플래그(isGbcProject 게이트, 0.12.3 P2a 확장)", () => {
+  // 정상 gbc 프로젝트 — 셋 다 건강
+  assert.deepEqual(assessRepoHealth(pureSettings(), true), { gateDead: false, missingSession: false, missingPostToolUse: false });
+  // SessionStart만 누락(0.2.1↓ 코호트) — PostToolUse는 pureSettings()에서 상속돼 있음
+  const onlyMissingSession = { hooks: { PreToolUse: pureSettings().hooks.PreToolUse, PostToolUse: pureSettings().hooks.PostToolUse } };
+  assert.deepEqual(assessRepoHealth(onlyMissingSession, true), { gateDead: false, missingSession: true, missingPostToolUse: false });
+  // PostToolUse만 누락(0.12.2 이하 — 이 배치 이전 재init 코호트, breaking 계약변경)
+  const onlyMissingPostToolUse = { hooks: { PreToolUse: pureSettings().hooks.PreToolUse, SessionStart: pureSettings().hooks.SessionStart } };
+  assert.deepEqual(assessRepoHealth(onlyMissingPostToolUse, true), { gateDead: false, missingSession: false, missingPostToolUse: true });
+  // 게이트 hook 자체 부재(게이트 조용히 죽음) + 나머지도 전부 없음
+  assert.deepEqual(assessRepoHealth({}, true), { gateDead: true, missingSession: true, missingPostToolUse: true });
+  // .gbc 없음(게이트 대상 아님) → 전부 false, 설정과 무관
+  assert.deepEqual(assessRepoHealth({}, false), { gateDead: false, missingSession: false, missingPostToolUse: false });
+  assert.deepEqual(assessRepoHealth(staleSettings(), false), { gateDead: false, missingSession: false, missingPostToolUse: false });
+});
+
+// ---------- 0.12.3 P2a: PostToolUse hook 등록(작업단위 적용이력) ----------
+test("buildPostToolUseCommand: 셸 무관 pure 명령 (post-tool-use)", () => {
+  assert.equal(
+    buildPostToolUseCommand("/x/dist/cli.js"),
+    'node "/x/dist/cli.js" hook post-tool-use',
+  );
+});
+
+test("ensurePostToolUseHook: matcher Edit|Write|MultiEdit로 멱등 등록", () => {
+  const s = {};
+  assert.equal(ensurePostToolUseHook(s, "/x/dist/cli.js"), true); // 신규 추가
+  assert.equal(s.hooks.PostToolUse[0].matcher, "Edit|Write|MultiEdit");
+  assert.equal(
+    s.hooks.PostToolUse[0].hooks[0].command,
+    'node "/x/dist/cli.js" hook post-tool-use',
+  );
+  // 멱등 — 두 번째 호출은 추가 안 함
+  assert.equal(ensurePostToolUseHook(s, "/x/dist/cli.js"), false);
+  assert.equal(s.hooks.PostToolUse.length, 1);
+});
+
+test("hasPostToolUseHook: read-only 존재 감지(비파괴)", () => {
+  assert.equal(hasPostToolUseHook(pureSettings()), true);
+  assert.equal(hasPostToolUseHook(staleSettings()), false);
+  assert.equal(hasPostToolUseHook({}), false);
+});
+
+test("buildInitStalenessNotice: PostToolUse 미등록도 재init 안내 사유에 포함(0.12.3 breaking 계약변경)", () => {
+  const onlyMissingPostToolUse = { hooks: { PreToolUse: pureSettings().hooks.PreToolUse, SessionStart: pureSettings().hooks.SessionStart } };
+  const n = buildInitStalenessNotice(onlyMissingPostToolUse, CLI);
+  assert.match(n, /gbc init/);
+  assert.match(n, /PostToolUse/);
 });
 
 test("notice dedup: 세션당 1회 (markNotified 후 같은 세션은 wasNotified=true)", () => {

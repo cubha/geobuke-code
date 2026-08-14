@@ -197,6 +197,14 @@ export interface GoldenCase {
   evidenceContext?: string;
   /** 위 근거를 실었을 때의 재판정 결과(선택) — replay의 2단계 비교 기준. */
   expectedAfterEvidence?: GoldenExpected;
+  /**
+   * applied.ts formatAppliedContext가 조립한 [이 작업단위에서 이미 적용된 편집] 원문(선택,
+   * 0.12.3 P2a). 캡처 당시 1차·P2b 2차 재판정 양쪽에 실제로 실린 값과 동일 — replay(cli.ts
+   * cmdGateSnapshotReplay)가 이 값 없이 재현하면 이 배치의 유일한 판정 로직 변경에 무신호가
+   * 된다(evidenceContext 누락이 낳았던 F-13 재발 패턴). 원장이 비어있었으면 undefined(다른
+   * 선택 필드와 동일 관례 — "빈 문자열"로 채우지 않는다).
+   */
+  appliedContext?: string;
 }
 
 /**
@@ -293,6 +301,27 @@ export interface HookEntry {
 /** .claude/settings.json의 hooks 관점 형상. */
 export interface Settings {
   hooks?: Record<string, HookEntry[]>;
+}
+
+/**
+ * 작업단위 내 적용 완료 편집 1건(.gbc/applied.json 엔트리, 0.12.3 P2a).
+ * PostToolUse hook이 사용자 승인 후 실제 적용된 편집만 기록(hook 계약상 거부되면 발화 자체가 없다).
+ */
+export interface AppliedEntry {
+  /** 기록 시각(ISO) */
+  at: string;
+  /** Edit | Write | MultiEdit */
+  tool: string;
+  /** cwd 기준 상대경로(밖이면 basename만) */
+  file: string;
+  /** 적용된 새 내용 요약 — redactSecrets+캡을 기록 시점에 거친 값(at-rest 마스킹 단일화) */
+  digest: string;
+}
+
+/** 작업단위(specHash) 스코프의 적용이력 원장 (.gbc/applied.json) — specHash 불일치 시 자동 무효화. */
+export interface AppliedLedger {
+  specHash: string;
+  entries: AppliedEntry[];
 }
 
 /** 작업단위 게이트 상태 (.gbc/state.json) */

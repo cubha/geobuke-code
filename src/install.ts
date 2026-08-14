@@ -84,6 +84,11 @@ export function buildSessionStartCommand(cliPath: string): string {
   return `node "${cliPath}" hook session-start`;
 }
 
+/** PostToolUse hook 명령(0.12.3 P2a) — 셸 무관 순수 명령(buildPreCommand와 동일 규약). */
+export function buildPostToolUseCommand(cliPath: string): string {
+  return `node "${cliPath}" hook post-tool-use`;
+}
+
 /**
  * (read-only) PreToolUse hook 명령이 현재 표준(pure)과 다른 구버전인지. normalizeHooks의
  * 감지부만 떼어낸 비파괴 술어 — ②init-staleness 안내가 settings를 수정하지 않고 판단하게 한다.
@@ -100,6 +105,11 @@ export function hasSessionStartHook(settings: Settings): boolean {
   return findHookCmd(settings, "SessionStart", (c) => c.includes("hook session-start")) !== undefined;
 }
 
+/** (read-only) PostToolUse hook(post-tool-use 명령)이 등록돼 있는지(0.12.3 P2a). 0.12.2 이하 init엔 없음. */
+export function hasPostToolUseHook(settings: Settings): boolean {
+  return findHookCmd(settings, "PostToolUse", (c) => c.includes("hook post-tool-use")) !== undefined;
+}
+
 /**
  * (read-only) PreToolUse 게이트 hook('hook pre-tool-use' 명령)이 등록돼 있는지 — cliPath 무관.
  * hasStalePreToolUse가 *명령 freshness*(cliPath 의존)를 보는 반면, 이건 *존재 자체*만 본다.
@@ -110,22 +120,27 @@ export function hasPreToolUseGate(settings: Settings): boolean {
   return findHookCmd(settings, "PreToolUse", (c) => c.includes("hook pre-tool-use")) !== undefined;
 }
 
-/** repo 건강성 — gateDead=gbc 프로젝트인데 게이트 hook 부재, missingSession=SessionStart hook 부재. */
+/**
+ * repo 건강성 — gateDead=gbc 프로젝트인데 게이트 hook 부재, missingSession=SessionStart hook 부재,
+ * missingPostToolUse=PostToolUse hook 부재(0.12.3 P2a — 작업단위 적용이력 원장이 안 쌓이는 신호).
+ */
 export interface RepoHealth {
   gateDead: boolean;
   missingSession: boolean;
+  missingPostToolUse: boolean;
 }
 
 /**
  * 크로스-repo 게이트 건강성을 settings로 판정(cliPath 무관·결정론적). isGbcProject=false(.gbc 없음)면
- * 게이트 대상이 아니라 둘 다 false. 명령 freshness(stale)는 *의도적으로* 검사하지 않는다 — 각 repo
+ * 게이트 대상이 아니라 전부 false. 명령 freshness(stale)는 *의도적으로* 검사하지 않는다 — 각 repo
  * 설치경로가 달라 현재 런타임 cliPath로 타 repo를 stale 판정하면 false-positive가 된다(B1 트림 결정).
  */
 export function assessRepoHealth(settings: Settings, isGbcProject: boolean): RepoHealth {
-  if (!isGbcProject) return { gateDead: false, missingSession: false };
+  if (!isGbcProject) return { gateDead: false, missingSession: false, missingPostToolUse: false };
   return {
     gateDead: !hasPreToolUseGate(settings),
     missingSession: !hasSessionStartHook(settings),
+    missingPostToolUse: !hasPostToolUseHook(settings),
   };
 }
 
@@ -140,6 +155,21 @@ export function ensureSessionStartHook(settings: Settings, cliPath: string): boo
   (hooks.SessionStart ??= []).push({
     matcher: "startup|resume",
     hooks: [{ type: "command", command: buildSessionStartCommand(cliPath) }],
+  });
+  return true;
+}
+
+/**
+ * PostToolUse hook을 멱등 등록한다(0.12.3 P2a — 작업단위 적용이력 기록, ensureSessionStartHook과
+ * 동일 규약). PreToolUse와 같은 matcher(Edit|Write|MultiEdit)로 편집 성공 시에만 발화. 이미
+ * 'hook post-tool-use' 명령이 있으면 추가하지 않는다.
+ */
+export function ensurePostToolUseHook(settings: Settings, cliPath: string): boolean {
+  if (findHookCmd(settings, "PostToolUse", (c) => c.includes("hook post-tool-use"))) return false;
+  const hooks = (settings.hooks ??= {});
+  (hooks.PostToolUse ??= []).push({
+    matcher: "Edit|Write|MultiEdit",
+    hooks: [{ type: "command", command: buildPostToolUseCommand(cliPath) }],
   });
   return true;
 }

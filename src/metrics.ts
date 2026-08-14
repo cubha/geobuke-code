@@ -26,7 +26,10 @@ export type EventKind =
   | "gate-reset"
   | "done"
   | "verify"
-  | "bypass";
+  | "bypass"
+  /** 0.12.3 P2a — PostToolUse가 편집당 1건 기록(본문·경로 없음). "gate 이벤트는 있는데 applied가
+   * 0"이면 PostToolUse hook 미설치/사망 신호(설치 경로 죽음 관측 채널, install.ts 재정규화 한계 보완). */
+  | "applied";
 
 // doc-skip(0.5.5): 문서 확장자 하드가드가 judge 미호출 통과시킨 편집 — 조용한 우회 방지 계측.
 // specHash=""로 기록돼 M1(churn)·M2(block만)에선 자동 제외, M3(session 키)엔 기존 문서편집과 동일 참여.
@@ -101,6 +104,13 @@ export interface GateEvent {
    * 결과가 프롬프트 예산에 안 들어간 경우다. 둘 다 0이어야 "근거를 다 보고 내린 판정"이 된다.
    */
   evidenceDropped?: number;
+  // --- 작업단위 적용이력(0.12.3 P2a) — 코드 본문·경로는 넣지 않는다(메타만) ---
+  /** judge에 실제로 실린 적용이력 엔트리 수. 원장이 비었으면(appliedContext 없음) undefined. */
+  appliedCount?: number;
+  /** 프롬프트 총량 상한(applied.ts MAX_APPLIED_CONTEXT_CHARS)으로 잘려나간 엔트리 수. 0이면 undefined. */
+  appliedDropped?: number;
+  /** 원장 읽기(loadApplied)가 예외로 끝났는가 — fail-open으로 흡수됐으나 조용히 사라지지 않게 계측. */
+  appliedFailed?: boolean;
 }
 
 /** missing[]을 항목 수/길이로 캡 */

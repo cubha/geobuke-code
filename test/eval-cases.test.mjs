@@ -1,0 +1,98 @@
+// 회귀 케이스 **입력 형상 계약** 락 (F-1 후속, 2026-08-13).
+//
+// 같은 구멍에 두 번 빠졌다:
+//   · 0.12.0 F-13 — 골든 replay가 currentFileContent를 안 실어 cases.json이 최대 182B, flip0가 거짓안심
+//   · 0.12.3 F-1  — eval 케이스20의 applied_context가 **요약형**("…적용 완료")인데 프로덕션
+//                   formatAppliedContext는 **원시 코드형**만 낸다. 같은 spec/edit·temp0·3표본에서
+//                   요약형 pass 3/3 vs 프로덕션형 block 3/3 — 즉 21/21 green이 **프로덕션이 절대
+//                   낼 수 없는 입력** 위에 서 있었다.
+//
+// 둘 다 순수함수 단위테스트는 촘촘히 통과했다. "함수가 옳게 계산하는가"와 "프롬프트에 실제로 어떤
+// 문자열이 가는가"는 다른 축이고, 후자는 기존 테스트가 원리적으로 못 잡는다. 세 번째를 막는 것은
+// 케이스 추가가 아니라 **케이스 생성 경로의 변경**이다 — cases.json은 조립된 문자열을 손으로 적지
+// 않고 **프로덕션 hook이 받는 것과 같은 raw 편집 입력**만 선언하고, 조립은 프로덕션 함수
+// (buildAppliedEntry→formatAppliedContext)가 한다. 이 파일은 그 규율을 기계로 강제한다.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { buildAppliedEntry, formatAppliedContext } from "../dist/applied.js";
+
+// eval 하네스가 실제로 쓰는 조립 seam은 **동적** import로 연다 — 정적이면 모듈 부재가 이 파일
+// 전체를 죽여 나머지 계약 락의 판정을 가린다(RED 사유가 뭉개진다).
+const EVAL_APPLIED_ROOT = "/repo";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const cases = JSON.parse(readFileSync(join(here, "cases.json"), "utf8"));
+
+test("형상 계약: 조립된 applied_context 문자열을 케이스에 직접 적을 수 없다(F-1 우회로 차단)", () => {
+  const offenders = cases.filter((c) => typeof c.applied_context === "string");
+  assert.deepEqual(
+    offenders.map((c) => c.id),
+    [],
+    "applied_context는 손으로 적는 필드가 아니다 — applied_edits(raw 편집 입력)를 선언하면 " +
+      "프로덕션 formatAppliedContext가 조립한다. 문자열을 직접 적으면 프로덕션이 낼 수 없는 형상이 " +
+      "회귀 스위트에 들어와 green이 거짓안심이 된다(F-1).",
+  );
+});
+
+test("형상 계약: 적용이력 신호를 가진 케이스가 최소 1건 존재한다(P2a 무신호 방지)", () => {
+  const withApplied = cases.filter((c) => Array.isArray(c.applied_edits) && c.applied_edits.length > 0);
+  assert.ok(
+    withApplied.length >= 1,
+    "적용이력을 싣는 케이스가 하나도 없으면 eval은 P2a 판정 경로에 무신호다(F-13과 동일 결함).",
+  );
+});
+
+test("형상 계약: applied_edits는 프로덕션 buildAppliedEntry가 실제로 엔트리를 만들어내는 입력이어야 한다", async () => {
+  const { evalAbsPath } = await import("../dist/eval/applied-input.js");
+  for (const c of cases) {
+    for (const [i, e] of (c.applied_edits ?? []).entries()) {
+      const entry = buildAppliedEntry(
+        e.tool ?? "Edit",
+        { file_path: evalAbsPath(e.file), new_string: e.new_string, content: e.content },
+        EVAL_APPLIED_ROOT,
+        "2026-01-01T00:00:00.000Z",
+      );
+      assert.ok(
+        entry !== null,
+        `${c.id} applied_edits[${i}]: 프로덕션이 기록하지 않을 입력이다(게이트 대상 도구 아님 / ` +
+          `file_path 없음 / 새 내용이 빈 편집). 이런 입력은 원장에 절대 들어가지 않으므로 케이스로 성립하지 않는다.`,
+      );
+      assert.equal(entry.file, e.file, `${c.id} applied_edits[${i}]: 경로 정규화 결과가 선언과 어긋난다`);
+    }
+  }
+});
+
+test("형상 계약: eval이 judge에 싣는 문자열이 프로덕션 formatAppliedContext 출력과 바이트 동일하다", async () => {
+  const mod = await import("../dist/eval/applied-input.js");
+  assert.equal(mod.EVAL_APPLIED_ROOT, EVAL_APPLIED_ROOT, "eval 조립 루트가 계약과 다르다");
+  for (const c of cases) {
+    if (!Array.isArray(c.applied_edits) || c.applied_edits.length === 0) continue;
+    const built = mod.buildEvalAppliedContext(c.applied_edits);
+    const entries = c.applied_edits.map((e, i) =>
+      buildAppliedEntry(
+        e.tool ?? "Edit",
+        { file_path: mod.evalAbsPath(e.file), new_string: e.new_string, content: e.content },
+        EVAL_APPLIED_ROOT,
+        `2026-01-01T00:0${i}:00.000Z`,
+      ),
+    );
+    assert.equal(
+      built,
+      formatAppliedContext(entries).text,
+      `${c.id}: eval이 judge에 싣는 문자열은 프로덕션 조립 함수의 출력 그 자체여야 한다`,
+    );
+    // 프로덕션 계약 형상: "N. [파일] <코드>" · 마지막 엔트리에만 " (최신)"
+    assert.match(built, /^1\. \[[^\]]+\] /, `${c.id}: 프로덕션 라인 형상(N. [파일] …)이 아니다`);
+    assert.ok(built.includes(" (최신)"), `${c.id}: 최신 엔트리 표시가 없다`);
+  }
+});
+
+test("형상 계약: P2a 인과격리쌍(적용이력 O=pass / X=block)이 eval에 존재한다", () => {
+  const treat = cases.filter((c) => (c.applied_edits ?? []).length > 0 && c.expected === "pass");
+  const ctrl = cases.filter((c) => (c.applied_edits ?? []).length === 0 && c.expected === "block");
+  assert.ok(treat.length >= 1, "적용이력이 실린 pass 기대 케이스(처치군)가 없다");
+  assert.ok(ctrl.length >= 1, "적용이력 없는 block 기대 케이스(대조군)가 없다");
+});

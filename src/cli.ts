@@ -13,7 +13,7 @@ import {
   lstatSync,
 } from "node:fs";
 
-import { runPreToolUse, runStop, runSessionStart } from "./hook.js";
+import { runPreToolUse, runStop, runSessionStart, runPostToolUse } from "./hook.js";
 import { resolveProjectRoot } from "./store.js";
 import {
   loadPlanSpec,
@@ -38,6 +38,7 @@ import {
 import type { SessionScore, RealM1 } from "./scoring.js";
 import { parseExtraction, extractionPath } from "./extraction.js";
 import { loadState, resetGate } from "./state.js";
+import { clearApplied } from "./applied.js";
 import { addDefer, ackDefer, loadDefers, resolveDefer, startDefer, withdrawDefer, reopenDefer, isClosedStatus, unresolvedDefers } from "./defer.js";
 import { loadRepos, addRepo, removeRepo, getVerifyRunPin, setVerifyRunPin } from "./repos.js";
 import { findStrayGbcMarkers, quarantineStrayMarkers } from "./doctor.js";
@@ -52,7 +53,7 @@ import { selectedTransport, judgeM1Violation } from "./judge.js";
 import { runVerify } from "./verify.js";
 import { scaffoldVerify } from "./scaffold.js";
 import type { CaseVerdict } from "./types.js";
-import { buildPreCommand, normalizeHooks, ensureSessionStartHook, DEV_PLACEHOLDER, assessRepoHealth, GBC_SKILL_NAMES } from "./install.js";
+import { buildPreCommand, normalizeHooks, ensureSessionStartHook, ensurePostToolUseHook, DEV_PLACEHOLDER, assessRepoHealth, GBC_SKILL_NAMES } from "./install.js";
 import { readProjectSettings } from "./notice.js";
 import { refreshCacheIfStale } from "./version.js";
 import { logEvent, computeMetrics, tagEventsWithRepo, readEventsMerged, eventsPath, parseSince, filterEventsSince } from "./metrics.js";
@@ -212,6 +213,14 @@ ${
     console.log(`  + SessionStart hook 추가`);
   } else {
     console.log(`  = SessionStart hook 이미 존재 (skip)`);
+  }
+
+  // PostToolUse (멱등, 0.12.3 P2a) — 작업단위 적용이력 기록. breaking 계약변경이라 0.12.2 이하
+  // 재init 코호트는 이 hook이 없어 appliedContext가 항상 비어있었다.
+  if (ensurePostToolUseHook(settings, hookPath)) {
+    console.log(`  + PostToolUse hook 추가`);
+  } else {
+    console.log(`  = PostToolUse hook 이미 존재 (skip)`);
   }
 
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
@@ -403,6 +412,9 @@ function cmdSpec(args: string[]): void {
  * drift 근본수정: "완료" 이벤트 부재로 옛 케이스가 누적·부활하던 것을, 명시적 완료 신호로 닫는다.
  * gate reset 로직(resetGate)은 변경하지 않고 그대로 호출만 한다(재게이트 의미 보존).
  * defer는 건드리지 않는다 — 미해결 defer는 작업단위를 넘어 이월되는 별도 수명주기다.
+ * clearApplied(0.12.3 P2a)도 함께 지운다 — 적용이력 원장은 specHash 전환 시 자동 무효화되지만,
+ * "완료" 시점에 명시적으로도 비워 다음 작업단위가 이전 원장 잔재를 절대 안 보게 한다. `gate reset`
+ * (재판정 유도)은 원장을 지우지 않는다 — 목적이 다르다(이력 폐기가 아니라 판정만 되돌림).
  */
 function cmdDone(): void {
   const cwd = resolveProjectRoot(process.cwd());
@@ -410,6 +422,7 @@ function cmdDone(): void {
   const archived = archiveSpec(cwd);
   logCli(cwd, "done", beforeHash);
   resetGate(cwd);
+  clearApplied(cwd);
   if (archived) {
     console.log(`🐢 작업단위 종료 — 명세 아카이브: ${archived}`);
   } else {
@@ -643,6 +656,7 @@ async function cmdGateSnapshotReplay(cwd: string, args: string[]): Promise<void>
       const v = await judge(c.spec, c.edit, c.defers, c.resolved ?? [], {
         temperature: 0,
         currentFileContent: c.currentFileContent,
+        appliedContext: c.appliedContext,
       });
       votes[v.verdict]++;
       lastMissing = v.missing;
@@ -664,6 +678,7 @@ async function cmdGateSnapshotReplay(cwd: string, args: string[]): Promise<void>
         temperature: 0,
         currentFileContent: c.currentFileContent,
         evidenceContext: c.evidenceContext,
+        appliedContext: c.appliedContext,
       });
       p2bVotes[v.verdict]++;
       p2bMissing = v.missing;
@@ -1175,7 +1190,11 @@ function cmdRepos(args: string[]): void {
       let health = "";
       if (gated) {
         const h = assessRepoHealth(readProjectSettings(r), true);
-        const flags = [h.gateDead ? "⚠️게이트hook부재" : "", h.missingSession ? "⚠️SessionStart누락" : ""].filter(Boolean);
+        const flags = [
+          h.gateDead ? "⚠️게이트hook부재" : "",
+          h.missingSession ? "⚠️SessionStart누락" : "",
+          h.missingPostToolUse ? "⚠️PostToolUse누락" : "",
+        ].filter(Boolean);
         if (flags.length) {
           health = "  " + flags.join(" ");
           anyStale = true;
@@ -1185,7 +1204,7 @@ function cmdRepos(args: string[]): void {
     }
     if (anyStale) {
       console.log(
-        "\n⚠️ 게이트 hook 부재/SessionStart 누락 repo는 해당 repo에서 'gbc init --yes' 재실행으로 복구하세요.",
+        "\n⚠️ 게이트 hook 부재/SessionStart·PostToolUse 누락 repo는 해당 repo에서 'gbc init --yes' 재실행으로 복구하세요.",
       );
       console.log(
         "   (크로스-repo는 hook *등록 여부*만 검사 — 명령 freshness[설치경로 의존]는 각 repo에서 'gbc status'로 확인)",
@@ -1442,6 +1461,7 @@ function usage(): void {
   gbc hook pre-tool-use               (내부) PreToolUse hook
   gbc hook stop                       (내부) Stop hook
   gbc hook session-start              (내부) SessionStart hook (미해결 defer 알림)
+  gbc hook post-tool-use              (내부) PostToolUse hook (작업단위 적용이력 기록, 0.12.3)
 `);
 }
 
@@ -1453,7 +1473,8 @@ async function main(): Promise<void> {
       if (rest[0] === "stop") return runStop();
       if (rest[0] === "session-start")
         return runSessionStart({ cliPath: CLI_PATH, version: PKG_VERSION });
-      console.error("사용: gbc hook <pre-tool-use|stop|session-start>");
+      if (rest[0] === "post-tool-use") return runPostToolUse();
+      console.error("사용: gbc hook <pre-tool-use|stop|session-start|post-tool-use>");
       process.exit(1);
       break;
     case "init":

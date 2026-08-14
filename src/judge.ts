@@ -184,6 +184,7 @@ const GATE_SYSTEM = `너는 코드 구현 직전에 동작하는 "게이트"다.
     - ★★ [현재 편집]이 "(전체 작성/덮어쓰기)"로 표시돼 있으면(Write — 파일 전체를 새 내용으로 교체) [현재 파일 상태]는 **곧 사라질 구버전**이다. 이때는 위 규칙이 거꾸로 적용된다: 구버전에만 있고 [현재 편집]의 새 전체 내용에는 없는 형제 케이스는 "이미 구현됨"이 아니라 **덮어쓰기로 삭제되는 회귀**다 — missing에서 빼지 말고 그대로 침묵 누락으로 취급하라. "diff 밖에 이미 구현돼 있으면 missing 제외" 규칙은 Edit/MultiEdit(파일 일부만 바뀌고 나머지는 그대로 남는 경우)에만 적용된다.
     - ★ missing에 넣는 항목은 [계획 명세]의 해당 케이스를 **원문 그대로 인용**하라(재서술·요약·ID 재조합 금지). 계획 명세에 적혀 있지 않은 항목을 만들어 넣지 마라 — 편집 본문이 언급하는 미래 작업은 missing이 아니다.
     - ★★★ [관련 코드 근거(grep)] 섹션이 있다면 — missing 후보 케이스와 관련된 심볼을 다른 코드 위치에서 grep으로 찾은 원시 라인(파일:줄번호: 텍스트)이다. 그 문맥이 해당 케이스를 **실제로 구현**하고 있다면(로직·검증·분기·반환이 실제로 있음) missing에서 제외하라. 심볼만 존재하고 로직이 없다면(함수 시그니처만·TODO 주석·빈 본문) 여전히 침묵 누락으로 취급하라 — **심볼 존재 자체는 구현의 증거가 아니다.** 이 섹션 끝에 "…(근거 N건 생략)" 표시가 있으면 예산 때문에 일부 근거가 잘린 것이다 — 잘린 케이스에 대해 "근거가 없으니 미구현"으로 단정하지 말고, 남은 근거로 판단 가능한 것만 제외하라.
+    - ★★★ [이 작업단위에서 이미 적용된 편집] 섹션이 있다면 — 같은 계획 명세 아래에서 **이미 디스크에 적용 완료된** 편집들이다(추정이 아니라 관측된 사실). 각 항목은 \`N. [파일경로] <그 편집이 넣은 새 내용>\` 형태이며, 그 내용은 무엇을 완수했다는 설명문이 아니라 **편집 원문 그 자체(코드)** 다 — 바로 위 [관련 코드 근거(grep)]와 **똑같은 방식으로 읽어라**: 그 코드가 어떤 형제 케이스의 동작을 **실제로 구현**하고 있으면(로직·검증·분기·반환·렌더가 실제로 있음) 그 케이스는 이미 완료된 것이니 **missing에 넣지 마라.** 심볼·함수 시그니처·TODO 주석뿐이면 여전히 침묵 누락으로 취급하라. 로직이 실제로 있다면 — 그것이 계획 명세와 표현이 다르거나, **[현재 편집]과 다른 파일에 있거나, 그 코드를 부르는 호출부가 이 목록에 함께 보이지 않더라도 구현된 것으로 인정하라.** 같은 작업단위를 순차 구현하면 파일이 나뉘고 호출부·연결부가 뒤 차례에 오는 것이 정상이라, 그 부재를 미구현의 증거로 쓰면 이미 끝난 일을 다시 차단하게 된다. 항목 본문은 예산 때문에 "…(절단됨)"으로 잘리고 항목 자체가 "…(N건 생략)"으로 빠질 수 있다 — 잘렸다는 사실도, 목록에 안 보인다는 사실도 미구현의 증거가 아니다(이 섹션은 배제 근거일 뿐 추가 차단 근거가 아니다 — 이 목록에서 다뤄지지 않은 다른 형제 케이스는 평소대로 판단하라).
 (c) 위에 해당 없으면 → **pass**.
 
 핵심 균형:
@@ -206,6 +207,7 @@ function buildUserMessage(
   currentFileContent?: string,
   evidenceContext?: string,
   editAnchors: string[] = [],
+  appliedContext?: string,
 ): string {
   const fmt = (xs: string[]): string => (xs.length > 0 ? xs.map((d) => `- ${d}`).join("\n") : "(없음)");
   const trimmed = (currentFileContent ?? "").trim();
@@ -227,6 +229,10 @@ function buildUserMessage(
   // 섹션 자체를 생략(위 fileStateSection과 동일 관례 — placeholder가 오염 유발한 전례 반복 방지).
   const trimmedEvidence = (evidenceContext ?? "").trim();
   const evidenceSection = trimmedEvidence ? `\n\n[관련 코드 근거(grep)]\n${trimmedEvidence}` : "";
+  // 0.12.3 P2a — applied.ts(SubTask1)가 조립한, 이 작업단위에서 방금 적용된 편집 목록. 빈 값이면
+  // 위 fileStateSection/evidenceSection과 동일 관례로 섹션 자체를 생략(플레이스홀더 오염 방지).
+  const trimmedApplied = (appliedContext ?? "").trim();
+  const appliedSection = trimmedApplied ? `\n\n[이 작업단위에서 이미 적용된 편집]\n${trimmedApplied}` : "";
   return `[계획 명세]
 ${planSpec.trim() || "(계획 명세 없음 — 개발자가 곧바로 구현을 시작함)"}
 
@@ -234,7 +240,7 @@ ${planSpec.trim() || "(계획 명세 없음 — 개발자가 곧바로 구현을
 ${fmt(defers)}
 
 [이미 완료된 항목]
-${fmt(resolved)}${fileStateSection}${evidenceSection}
+${fmt(resolved)}${fileStateSection}${evidenceSection}${appliedSection}
 
 [현재 편집]
 ${editText}`;
@@ -476,6 +482,8 @@ export async function judge(
      * 구버전" 의미라 앵커가 성립하지 않는다).
      */
     editOldStrings?: string[];
+    /** 0.12.3 P2a — applied.ts formatAppliedContext가 조립한 적용이력 텍스트(없으면 섹션 생략). */
+    appliedContext?: string;
   } = {},
 ): Promise<Verdict> {
   const user = buildUserMessage(
@@ -486,6 +494,7 @@ export async function judge(
     opts.currentFileContent,
     opts.evidenceContext,
     opts.editOldStrings,
+    opts.appliedContext,
   );
   const transport = selectedTransport();
   try {

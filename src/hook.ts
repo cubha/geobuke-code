@@ -1,7 +1,8 @@
 // PreToolUse / Stop hook 핸들러.
 // 핫패스 보호: 이 파일은 SDK를 import하지 않는다. judge.ts가 API 호출 시에만 lazy import.
 // "이미 게이트됨 → exit 0"은 상태파일만 읽고 즉시 종료(judge 미호출).
-import { loadPlanSpec } from "./spec.js";
+import { loadPlanSpec, computeSpecHash } from "./spec.js";
+import { buildAppliedEntry, recordApplied, isAppliedFailure } from "./applied.js";
 import { markGated } from "./state.js";
 import { loadDefers, isClosedStatus, unresolvedDefers } from "./defer.js";
 import { isStopHintMuted } from "./config.js";
@@ -36,6 +37,11 @@ interface PreToolUseInput {
   tool_input?: EditToolInput;
   cwd?: string;
   session_id?: string;
+  /**
+   * PostToolUse 전용(0.12.3 ship 보안검토 S6) — 도구 실행 결과. PreToolUse 시점엔 없다.
+   * 실패를 명시하면 원장에 기록하지 않는다(applied.ts isAppliedFailure 참조).
+   */
+  tool_response?: unknown;
 }
 
 interface StopInput {
@@ -82,6 +88,7 @@ export function parseHookInput<T>(raw: string): T | null {
 async function runHookSafely(
   kind: string,
   body: (onCwd: (cwd: string) => void) => Promise<void>,
+  opts: { quiet?: boolean } = {},
 ): Promise<void> {
   // body가 input에서 확정한 cwd를 되돌려 받는다(onCwd) — catch의 failopen.log가 process.cwd()가
   // 아니라 실제 대상 프로젝트 .gbc/에 남게(input.cwd || process.cwd() 컨벤션 정합, scope-critic ②b).
@@ -94,9 +101,13 @@ async function runHookSafely(
     } catch {
       /* 계측 실패는 무시 — fail-open 자체를 막지 않는다 */
     }
-    emit({
-      systemMessage: `🐢 거북이 게이트 — 내부 오류로 검사 없이 안전 통과(fail-open): ${String(e).slice(0, 120)}`,
-    });
+    // quiet(0.12.3 P2a, PostToolUse 전용) — 편집마다 도는 hook이라 실패마다 배너가 뜨면 노이즈다.
+    // emit만 생략하고 failopen.log는 그대로 남긴다(조용한 실패 ≠ 미추적).
+    if (!opts.quiet) {
+      emit({
+        systemMessage: `🐢 거북이 게이트 — 내부 오류로 검사 없이 안전 통과(fail-open): ${String(e).slice(0, 120)}`,
+      });
+    }
     process.exit(0);
   }
 }
@@ -220,6 +231,56 @@ async function preToolUseBody(ctx?: HookContext, onCwd?: (cwd: string) => void):
     defaultGateDeps(refresh),
   );
   applyGateDecision(cwd, session, ctx, decision);
+}
+
+/**
+ * PostToolUse: 작업단위 구현이력 기록(0.12.3 P2a). 게이트가 매 편집을 백지 재평가하던 근본원인은
+ * gbc엔 이 hook이 없어 "방금 그 편집이 실제 적용됐다"는 사실 자체를 알 방법이 없었던 것이다(RCA:
+ * 동일 케이스 4회 재차단, 그 사이 모델은 순차 구현 중이었음). PostToolUse는 hook 계약상 도구 호출이
+ * **성공하고 사용자가 승인한 뒤에만** 발화한다(거부되면 발화 자체가 없다) — 그래서 여기 기록된
+ * 엔트리는 전부 "실제로 디스크에 적용된" 사실이다(추정이 아니다).
+ *
+ * quiet(정형 fail-open, PreToolUse와 대칭): 실패해도 편집마다 배너를 띄우지 않는다 — 이 hook은
+ * 판정을 내리지 않으므로(항상 exit 0·hookSpecificOutput 없음) 실패해도 게이트가 더 엄격해지지
+ * 않는다. `decision:"block"`·exit 2는 여기서 절대 쓰지 않는다(모델 진행을 막을 이유가 없다).
+ */
+export function runPostToolUse(): Promise<void> {
+  return runHookSafely("post-tool-use", (onCwd) => postToolUseBody(onCwd), { quiet: true });
+}
+
+async function postToolUseBody(onCwd?: (cwd: string) => void): Promise<void> {
+  const input = parseHookInput<PreToolUseInput>(await readStdin());
+  if (input === null) {
+    process.exit(0);
+  }
+  const cwd = resolveProjectRoot(input.cwd || process.cwd());
+  onCwd?.(cwd);
+  const toolName = input.tool_name ?? "";
+  const toolInput = input.tool_input ?? {};
+  // 도구가 실패를 명시했으면 기록하지 않는다(0.12.3 ship 보안검토 S6) — 이 hook은 편집이 실제
+  // 적용됐다는 사실을 남기는 곳이라, 실패한 편집을 "완료"로 남기면 실제 누락이 통과한다(미탐).
+  // 판정 방향(실패 명시일 때만 버림)의 근거는 applied.ts isAppliedFailure 주석.
+  if (isAppliedFailure(input.tool_response)) {
+    process.exit(0);
+  }
+  // 문서 편집은 원장에서 뺀다 — gate-core.ts의 isDocFile 하드가드와 동일 판단이지만, applied.ts는
+  // gate-core.ts를 import하지 않으므로(순환 방지, applied.ts 헤더 참조) 이 조합은 호출부 책임이다.
+  if (isDocFile(toolInput.file_path ?? "")) {
+    process.exit(0);
+  }
+  const { text: specText } = loadPlanSpec(cwd);
+  const specEmpty = specText.trim() === "";
+  // logHash(gate-core.ts evaluateGate와 동일 컨벤션) — computeSpecHash("")는 실제 해시값을 내므로
+  // 빈 명세를 반드시 ""로 강제해야 applied.ts 자체의 빈-spec 조회/기록 가드가 살아난다.
+  const logHash = specEmpty ? "" : computeSpecHash(specText);
+  const entry = buildAppliedEntry(toolName, toolInput, cwd, nowIso());
+  if (entry) {
+    recordApplied(cwd, logHash, entry);
+    // applied 이벤트(메타만 — 본문·경로 없음) — "gate 이벤트는 있는데 applied가 0"이면 이 hook이
+    // 미설치/사망했다는 관측 신호(gate-ack 등과 동일하게 EventKind로 남긴다).
+    logEvent(cwd, { at: nowIso(), session: input.session_id ?? "", specHash: logHash, kind: "applied", tool: toolName });
+  }
+  process.exit(0);
 }
 
 /**
