@@ -197,7 +197,11 @@ export function recordApplied(cwd: string, specHash: string, entry: AppliedEntry
   });
 }
 
-/** 원장을 지운다(멱등) — `gbc done`(작업단위 명시 종료)이 호출한다. `gate reset`은 지우지 않는다. */
+/**
+ * 원장을 지운다(멱등) — `gbc done`(작업단위 명시 종료) 또는 `gbc gate reset --hard`(0.12.4 ST5,
+ * 재현 실험용 하드 리셋)가 호출한다. 플레인 `gate reset`은 지우지 않는다(specHash 불일치 시
+ * `loadApplied`가 자동 무효화하므로 다음 작업단위엔 어차피 안 보임 — 굳이 지울 필요 없음).
+ */
 export function clearApplied(cwd: string): void {
   const path = appliedPath(cwd);
   if (existsSync(path)) unlinkSync(path);

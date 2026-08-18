@@ -568,7 +568,17 @@ async function cmdGate(args: string[]): Promise<void> {
   if (args[0] === "reset") {
     logCli(cwd, "gate-reset", curHash(cwd));
     resetGate(cwd);
-    console.log("🐢 작업단위 게이트 리셋 — 다음 편집에서 다시 발동합니다.");
+    // --hard(0.12.4 ST4, F-3) — pendingReview·원장까지 함께 지운다. 플레인 reset은 state.json만
+    // 건드리던 기존 동작 그대로(breaking 아님) — pendingReview가 남아있으면 재현 실험이 실제
+    // 반복이 아닌데도 block-repeat 강등으로 오염된다(gate-core.ts readPendingReview 참조).
+    // applied.json도 함께 지운다 — 0.12.4가 검증할 대상이 바로 원장 재검증이라 그게 최대 오염원.
+    if (args.includes("--hard")) {
+      clearPendingReview(cwd);
+      clearApplied(cwd);
+      console.log("🐢 작업단위 게이트 하드 리셋 — state·pendingReview·적용이력 원장 전부 초기화(다음 편집에서 다시 발동).");
+    } else {
+      console.log("🐢 작업단위 게이트 리셋 — 다음 편집에서 다시 발동합니다.");
+    }
   } else if (args[0] === "review") {
     cmdGateReview(cwd, args.slice(1));
   } else if (args[0] === "snapshot") {
@@ -1429,6 +1439,8 @@ function usage(): void {
   gbc verify --run ["<명령>"] [--save] 고정 러너 명령 실행 후 즉시 판독 — 신뢰 소스(인자·홈 pin)만,
                                       spec 유래 명령 실행 금지(RCE). --save=홈 pin(~/.gbc/verify-run.json) 저장
   gbc gate reset                      작업단위 게이트만 리셋(명세 보존·같은 단위 재게이트)
+  gbc gate reset --hard                state·pendingReview·적용이력 원장까지 전부 초기화
+                                      (재현 실험용 — block-repeat 오염·stale 원장 잔재 방지)
   gbc gate review                     block이 도출한 누락 케이스 체크리스트 보기
   gbc gate review --spec <ref> --defer <ref> --ack <ref>
                                       누락 케이스 일괄 분류(승인→spec / 미룸→defer / 이미완료→ack)
