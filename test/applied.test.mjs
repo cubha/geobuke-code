@@ -411,7 +411,7 @@ test("verifyAppliedEntry: 앵커가 전부 없으면 stale(적극적 반증)", (
 
 test("verifyAppliedEntry: 앵커 일부만 남아도 alive(부분 일치는 리팩토링일 수 있다 — 전부 없어야 stale)", () => {
   const entry = { at: "t", tool: "MultiEdit", file: "a.ts", digest: "line-A\nline-B" };
-  assert.equal(verifyAppliedEntry(entry, "line-A만 남음"), "alive");
+  assert.equal(verifyAppliedEntry(entry, "// 위\nline-A\n// line-B는 삭제됨"), "alive");
 });
 
 test("verifyAppliedEntry: fileText가 null이면 unverifiable(읽기 실패·미판별을 stale로 단정하지 않는다)", () => {

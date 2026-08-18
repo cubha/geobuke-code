@@ -273,7 +273,8 @@ async function postToolUseBody(onCwd?: (cwd: string) => void): Promise<void> {
   // logHash(gate-core.ts evaluateGate와 동일 컨벤션) — computeSpecHash("")는 실제 해시값을 내므로
   // 빈 명세를 반드시 ""로 강제해야 applied.ts 자체의 빈-spec 조회/기록 가드가 살아난다.
   const logHash = specEmpty ? "" : computeSpecHash(specText);
-  const entry = buildAppliedEntry(toolName, toolInput, cwd, nowIso());
+  // session(0.12.4 라이더) — 판정에는 아직 미사용, 다음 배치의 세션 스코프 필터링을 위한 데이터만 축적.
+  const entry = buildAppliedEntry(toolName, toolInput, cwd, nowIso(), input.session_id);
   if (entry) {
     recordApplied(cwd, logHash, entry);
     // applied 이벤트(메타만 — 본문·경로 없음) — "gate 이벤트는 있는데 applied가 0"이면 이 hook이
