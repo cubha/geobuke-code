@@ -80,21 +80,32 @@ export function summarizeAppliedEdit(toolName: string, input: EditToolInput): st
   return redacted.length > MAX_APPLIED_DIGEST ? redacted.slice(0, MAX_APPLIED_DIGEST) + "\n" + TRUNCATION_MARKER : redacted;
 }
 
+/** 문자·숫자·언더스코어를 하나도 포함하지 않는 줄인가(순수 구두점 — `}`·`);`·`{` 등). */
+function isPunctuationOnly(line: string): boolean {
+  return !/[\p{L}\p{N}_]/u.test(line);
+}
+
 /**
- * digest에서 파일과 바이트 비교가 의미 있는 줄만 추린다(순수, 0.12.4 ST2 — verifyAppliedEntry의
+ * digest에서 파일과 바이트 비교가 의미 있는 줄만 추린다(순수, 0.12.4 ST2+ST4 — verifyAppliedEntry의
  * 입력 정제). 앵커에서 빼는 것:
  *  - 절단 마커 줄과 그 직전 줄 — summarizeAppliedEdit은 문자 단위로 자르므로 마커 직전 줄은 중간에
  *    잘렸을 공산이 커 완전한 줄이라는 보장이 없다(둘 다 빼야 안전).
  *  - redactSecrets가 마스킹한 줄(REDACTED 마커 포함) — 마스킹된 문자열은 원본 파일과 바이트가
  *    달라 항상 불일치로 나온다(거짓 stale 방지).
  *  - 빈 줄 — 근거 능력 없음(evidence.ts computeDeletionScope와 동일 관례).
+ *  - **순수 구두점 줄**(0.12.4 ST4 실측 발견) — 단독 `}`·`);`·`{` 등은 글자·숫자가 하나도 없어
+ *    거의 모든 코드 파일에 존재한다. 이런 줄이 앵커로 남으면 "하나라도 남으면 alive"(ST2 설계)가
+ *    완전히 무관한 파일도 항상 alive로 오판하게 만들어 Critical 결함의 반증력 자체를 무력화한다
+ *    (eval 케이스22 원장 stale 대칭쌍 작성 중 실측 — 단독 `}`가 앵커로 남아 false negative 재현).
  */
 export function extractAppliedAnchors(digest: string): string[] {
   let lines = digest.split("\n");
   if (lines[lines.length - 1] === TRUNCATION_MARKER) {
     lines = lines.slice(0, -2);
   }
-  return lines.map((l) => l.trim()).filter((l) => l.length > 0 && !l.includes(REDACTED));
+  return lines
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.includes(REDACTED) && !isPunctuationOnly(l));
 }
 
 /**
