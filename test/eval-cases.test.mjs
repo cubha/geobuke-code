@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { buildAppliedEntry, formatAppliedContext } from "../dist/applied.js";
+import { buildAppliedEntry, formatAppliedContext, selectAppliedForJudge, verifyAppliedEntry } from "../dist/applied.js";
 
 // eval 하네스가 실제로 쓰는 조립 seam은 **동적** import로 연다 — 정적이면 모듈 부재가 이 파일
 // 전체를 죽여 나머지 계약 락의 판정을 가린다(RED 사유가 뭉개진다).
@@ -65,12 +65,12 @@ test("형상 계약: applied_edits는 프로덕션 buildAppliedEntry가 실제�
   }
 });
 
-test("형상 계약: eval이 judge에 싣는 문자열이 프로덕션 formatAppliedContext 출력과 바이트 동일하다", async () => {
+test("형상 계약: eval이 judge에 싣는 문자열이 프로덕션 formatAppliedContext 출력과 바이트 동일하다(원장 재검증 포함, 0.12.4 ST4)", async () => {
   const mod = await import("../dist/eval/applied-input.js");
   assert.equal(mod.EVAL_APPLIED_ROOT, EVAL_APPLIED_ROOT, "eval 조립 루트가 계약과 다르다");
   for (const c of cases) {
     if (!Array.isArray(c.applied_edits) || c.applied_edits.length === 0) continue;
-    const built = mod.buildEvalAppliedContext(c.applied_edits);
+    const built = mod.buildEvalAppliedContext(c.applied_edits, c.applied_file_states);
     const entries = c.applied_edits.map((e, i) =>
       buildAppliedEntry(
         e.tool ?? "Edit",
@@ -79,11 +79,18 @@ test("형상 계약: eval이 judge에 싣는 문자열이 프로덕션 formatApp
         `2026-01-01T00:0${i}:00.000Z`,
       ),
     );
+    // 0.12.4 ST3과 동일 재검증을 여기서 독립적으로 재현한다(mod.buildEvalAppliedContext 내부
+    // 구현을 베끼는 게 아니라, 프로덕션 selectAppliedForJudge/verifyAppliedEntry를 직접 호출해
+    // "그 함수들을 쓰면 이 문자열이 나온다"를 증명한다 — 내부 구현이 바뀌어도 계약은 유효하다).
+    const verify = (e) => verifyAppliedEntry(e, c.applied_file_states?.[e.file] ?? null);
+    const selected = selectAppliedForJudge(entries, { verify });
+    const expectedText = formatAppliedContext(selected).text || undefined;
     assert.equal(
       built,
-      formatAppliedContext(entries).text,
-      `${c.id}: eval이 judge에 싣는 문자열은 프로덕션 조립 함수의 출력 그 자체여야 한다`,
+      expectedText,
+      `${c.id}: eval이 judge에 싣는 문자열은 프로덕션 조립+재검증 함수의 출력 그 자체여야 한다`,
     );
+    if (built === undefined) continue; // 전량 stale로 걸러진 케이스(예: 22번)는 섹션 자체가 생략된다
     // 프로덕션 계약 형상: "N. [파일] <코드>" · 마지막 엔트리에만 " (최신)"
     assert.match(built, /^1\. \[[^\]]+\] /, `${c.id}: 프로덕션 라인 형상(N. [파일] …)이 아니다`);
     assert.ok(built.includes(" (최신)"), `${c.id}: 최신 엔트리 표시가 없다`);
@@ -95,4 +102,25 @@ test("형상 계약: P2a 인과격리쌍(적용이력 O=pass / X=block)이 eval�
   const ctrl = cases.filter((c) => (c.applied_edits ?? []).length === 0 && c.expected === "block");
   assert.ok(treat.length >= 1, "적용이력이 실린 pass 기대 케이스(처치군)가 없다");
   assert.ok(ctrl.length >= 1, "적용이력 없는 block 기대 케이스(대조군)가 없다");
+});
+
+// ── 0.12.4 ST4 — 원장 stale 대칭쌍(security-auditor Critical의 eval 커버리지) ──
+// P2a 처치군(20번)이 "원장이 살아있으면 pass"를 증명한다면, 이 대칭쌍은 "원장이 stale이면 (원장이
+// 아예 없는 것과 동일하게) 다시 block"을 증명한다. 판정 자체는 LLM 호출 없이도 구조로 증명되는
+// 명제다(필터 후 케이스22 입력이 케이스21과 구조적으로 동일해진다) — 그래서 이 테스트는 eval(LLM
+// 호출)이 아니라 여기서 결정론으로 먼저 잠근다. eval 쪽은 그 구조 동일성 위에서 모델이 실제로 옳게
+// block하는지(회귀)만 잰다.
+test("형상 계약: 원장 stale 대칭쌍이 eval에 존재하고, 필터 후 입력이 무원장 대조군과 구조적으로 동일하다", async () => {
+  const mod = await import("../dist/eval/applied-input.js");
+  const staleCases = cases.filter((c) => (c.applied_edits ?? []).length > 0 && c.applied_file_states && c.expected === "block");
+  assert.ok(staleCases.length >= 1, "원장이 있었지만 stale이라 block을 유지해야 하는 케이스가 없다(P2a 재검증 미커버)");
+  for (const c of staleCases) {
+    const built = mod.buildEvalAppliedContext(c.applied_edits, c.applied_file_states);
+    assert.equal(
+      built,
+      undefined,
+      `${c.id}: applied_file_states가 원장 코드와 전혀 겹치지 않으므로(stale 대칭쌍의 전제) ` +
+        `필터 후 appliedContext는 undefined여야 한다 — 아니면 이 케이스가 실제로 stale을 테스트하지 않는다.`,
+    );
+  }
 });

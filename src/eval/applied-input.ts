@@ -10,7 +10,7 @@
 // 형상"임이 **구조적으로 보장**된다 — 손으로 쓰면 요약형 같은 도달 불가능한 형상이 섞여 들어와
 // green이 거짓안심이 된다(F-1 실측: 요약형 pass 3/3 vs 프로덕션형 block 3/3).
 import { sep } from "node:path";
-import { buildAppliedEntry, formatAppliedContext } from "../applied.js";
+import { buildAppliedEntry, formatAppliedContext, selectAppliedForJudge, verifyAppliedEntry } from "../applied.js";
 import type { AppliedEntry } from "../types.js";
 
 /**
@@ -58,8 +58,18 @@ export function buildEvalAppliedEntries(edits: EvalAppliedEdit[]): AppliedEntry[
 /**
  * judge에 실을 `[이 작업단위에서 이미 적용된 편집]` 원문을 **프로덕션 조립 함수로** 만든다.
  * 편집이 없으면 undefined(섹션 자체 생략 — gate-core.ts와 동일 관례).
+ *
+ * `fileStates`(0.12.4 ST4) — 원장 생존 재검증(gate-core.ts evaluateGate와 동일 계약, `key`=
+ * `EvalAppliedEdit.file`과 같은 상대경로·`value`=그 파일의 "현재 디스크 상태")을 eval에서
+ * 재현한다. 선언 없는 파일은 `undefined`(=재검증 실패 취급, unverifiable) — "파일이 여전히
+ * 그대로"라고 함부로 가정하면 stale 대칭쌍이 아무 근거 없이 alive로 새 green을 낼 수 있다.
  */
-export function buildEvalAppliedContext(edits: EvalAppliedEdit[] | undefined): string | undefined {
+export function buildEvalAppliedContext(
+  edits: EvalAppliedEdit[] | undefined,
+  fileStates?: Record<string, string>,
+): string | undefined {
   if (!edits || edits.length === 0) return undefined;
-  return formatAppliedContext(buildEvalAppliedEntries(edits)).text || undefined;
+  const verify = (e: AppliedEntry) => verifyAppliedEntry(e, fileStates?.[e.file] ?? null);
+  const selected = selectAppliedForJudge(buildEvalAppliedEntries(edits), { verify });
+  return formatAppliedContext(selected).text || undefined;
 }

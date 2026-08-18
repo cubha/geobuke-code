@@ -397,6 +397,17 @@ test("extractAppliedAnchors: 앵커가 하나도 안 남으면 빈 배열", () =
   assert.deepEqual(extractAppliedAnchors("   \n  \n"), []);
 });
 
+// ── 0.12.4 ST4 발견 — 순수 구두점 줄(중괄호·괄호 단독)은 앵커에서 뺀다 ──
+// 원장 stale 대칭쌍(eval 케이스22) 작성 중 실측: digest 마지막 줄이 "}"뿐이면 그게 앵커가 되고,
+// "}"는 어느 코드 파일에나 있어 완전히 무관한 파일도 항상 alive로 오판된다 — Critical 결함을
+// 사실상 무력화하는 심각한 반증 실패(false negative)다.
+test("extractAppliedAnchors: 순수 구두점 줄(예: 단독 '}')은 앵커에서 뺀다(어디에나 있어 근거 능력이 없다)", () => {
+  const digest = "function impl() {\n  return 1;\n}";
+  const anchors = extractAppliedAnchors(digest);
+  assert.ok(!anchors.includes("}"), "단독 '}'가 앵커에 남으면 어떤 파일이든 alive로 오판된다");
+  assert.ok(anchors.includes("function impl() {"), "글자를 포함한 줄은 여전히 앵커여야 한다");
+});
+
 // ── verifyAppliedEntry — 3-상태 생존 재검증(순수, security-auditor Critical 본체) ──────────────
 
 test("verifyAppliedEntry: 앵커가 파일에 남아있으면 alive", () => {

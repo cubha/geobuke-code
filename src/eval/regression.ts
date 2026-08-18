@@ -48,6 +48,14 @@ interface Case {
    * 형상 불일치가 구조적으로 불가능하다. test/eval-cases.test.mjs가 이 규율을 락한다.
    */
   applied_edits?: EvalAppliedEdit[];
+  /**
+   * 0.12.4 ST4 — 원장 생존 재검증(security-auditor Critical)을 eval에서 재현하기 위한 필드.
+   * key=`applied_edits[].file`과 같은 상대경로, value=그 파일의 **현재 디스크 상태**(생존 판정용).
+   * 선언 안 하면 그 파일은 재검증 시 unverifiable(읽기 실패 취급) — alive로 함부로 가정하지 않는다.
+   * 이 필드 없이는 eval도 골든 replay가 한 번 겪은 무신호(F-13)를 이 배치의 유일한 판정 로직
+   * 변경(원장 재검증) 축에서 재현한다.
+   */
+  applied_file_states?: Record<string, string>;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -94,7 +102,7 @@ for (const c of cases) {
     evidenceContext: c.evidence_context,
     editOldStrings: c.old_strings,
     // 조립은 프로덕션 함수가 한다(F-1) — 케이스가 문자열을 손으로 적지 않는다.
-    appliedContext: buildEvalAppliedContext(c.applied_edits),
+    appliedContext: buildEvalAppliedContext(c.applied_edits, c.applied_file_states),
   });
   const ms = Date.now() - t0;
   const ok = v.verdict === c.expected;

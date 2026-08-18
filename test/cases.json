@@ -147,5 +147,21 @@
     "plan_spec": "API 키 관리:\n- [ ] 설정 화면에서 API 키 저장 시 암호화해서 보관한다\n- [ ] 관리자 키 목록 페이지에서 API 키를 마스킹(끝 4자리만 노출) 표시한다",
     "edit_diff": "--- src/settings.ts\n- export async function saveApiKey(key) {\n-   await db.put('apiKey', key);\n- }\n+ export async function saveApiKey(key) {\n+   const enc = await encryptMeta(key);\n+   await db.put('apiKey', enc);\n+ }",
     "expected": "block"
+  },
+  {
+    "id": "22-적용이력_원장stale_삭제후정탐복원",
+    "plan_spec": "API 키 관리:\n- [ ] 설정 화면에서 API 키 저장 시 암호화해서 보관한다\n- [ ] 관리자 키 목록 페이지에서 API 키를 마스킹(끝 4자리만 노출) 표시한다",
+    "edit_diff": "--- src/settings.ts\n- export async function saveApiKey(key) {\n-   await db.put('apiKey', key);\n- }\n+ export async function saveApiKey(key) {\n+   const enc = await encryptMeta(key);\n+   await db.put('apiKey', enc);\n+ }",
+    "applied_edits": [
+      {
+        "tool": "Write",
+        "file": "src/admin/keys-page.tsx",
+        "content": "import { listApiKeys } from \"../api/keys\";\n\nexport function maskApiKey(key) {\n  if (!key || key.length <= 4) return \"****\";\n  return \"*\".repeat(key.length - 4) + key.slice(-4);\n}\n\nexport function KeyListPage({ keys }) {\n  return (\n    <table>\n      <tbody>\n        {keys.map((k) => (\n          <tr key={k.id}>\n            <td>{k.label}</td>\n            <td className=\"api-key\">{maskApiKey(k.value)}</td>\n          </tr>\n        ))}\n      </tbody>\n    </table>\n  );\n}\n"
+      }
+    ],
+    "applied_file_states": {
+      "src/admin/keys-page.tsx": "// 리팩토링으로 전면 재작성됨 — 원장의 옛 구현은 더 이상 여기 없다\nexport default function AdminKeysScreen() {\n  return React.createElement(EmptyState, { label: 'coming soon' });\n}\n"
+    },
+    "expected": "block"
   }
 ]
