@@ -103,7 +103,17 @@
     "id": "16-근거주입_절단밖기구현_오탐해소",
     "plan_spec": "- 설정 화면에서 API 키를 저장할 때 암호화해서 보관한다\n- 기존 설치에 평문으로 저장돼 있던 API 키를 DB 마이그레이션(v18)으로 제거한다",
     "edit_diff": "--- src/core/settings.ts\n- export async function saveApiKey(key: string) {\n-   await db.meta.put({ id: 'apiKey', value: key });\n- }\n+ export async function saveApiKey(key: string) {\n+   const enc = await encryptMeta(key);\n+   await db.meta.put({ id: 'apiKey', value: enc });\n+ }",
-    "evidence_context": "케이스: 기존 설치에 평문으로 저장돼 있던 API 키를 DB 마이그레이션(v18)으로 제거한다\nsrc/core/db.ts:521: this.version(18).stores({ meta: 'id' }).upgrade(async (tx) => {\nsrc/core/db.ts:522:   const rows = await tx.table('meta').where('id').equals('apiKey').toArray();\nsrc/core/db.ts:523:   for (const r of rows) await tx.table('meta').delete(r.id);\nsrc/core/db.ts:524: });",
+    "evidence_cases": [
+      {
+        "case": "기존 설치에 평문으로 저장돼 있던 API 키를 DB 마이그레이션(v18)으로 제거한다",
+        "matches": [
+          { "file": "src/core/db.ts", "line": 521, "text": "this.version(18).stores({ meta: 'id' }).upgrade(async (tx) => {" },
+          { "file": "src/core/db.ts", "line": 522, "text": "  const rows = await tx.table('meta').where('id').equals('apiKey').toArray();" },
+          { "file": "src/core/db.ts", "line": 523, "text": "  for (const r of rows) await tx.table('meta').delete(r.id);" },
+          { "file": "src/core/db.ts", "line": 524, "text": "});" }
+        ]
+      }
+    ],
     "expected": "pass"
   },
   {
@@ -116,7 +126,16 @@
     "id": "18-근거주입_심볼만존재_로직부재_미탐방지",
     "plan_spec": "- 로그인 성공 시 세션 토큰을 저장한다\n- 로그인 실패가 3회 누적되면 계정을 잠근다",
     "edit_diff": "--- src/auth.ts\n- export async function login(id: string, pw: string) {\n-   const ok = await verify(id, pw);\n-   return ok;\n- }\n+ export async function login(id: string, pw: string) {\n+   const ok = await verify(id, pw);\n+   if (ok) await saveSessionToken(id);\n+   return ok;\n+ }",
-    "evidence_context": "케이스: 로그인 실패가 3회 누적되면 계정을 잠근다\nsrc/types.ts:4: /** TODO: lockAccountAfterFailures — 아직 구현되지 않음 */\nsrc/types.ts:9: export type LockPolicy = { maxFailures: number };\ndocs/plan.md:30: - 로그인 실패 3회 누적 시 계정 잠금(예정)",
+    "evidence_cases": [
+      {
+        "case": "로그인 실패가 3회 누적되면 계정을 잠근다",
+        "matches": [
+          { "file": "src/types.ts", "line": 4, "text": "/** TODO: lockAccountAfterFailures — 아직 구현되지 않음 */" },
+          { "file": "src/types.ts", "line": 9, "text": "export type LockPolicy = { maxFailures: number };" },
+          { "file": "docs/plan.md", "line": 30, "text": "- 로그인 실패 3회 누적 시 계정 잠금(예정)" }
+        ]
+      }
+    ],
     "expected": "block"
   },
   {

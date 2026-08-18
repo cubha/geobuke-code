@@ -110,6 +110,65 @@ test("형상 계약: P2a 인과격리쌍(적용이력 O=pass / X=block)이 eval�
 // 명제다(필터 후 케이스22 입력이 케이스21과 구조적으로 동일해진다) — 그래서 이 테스트는 eval(LLM
 // 호출)이 아니라 여기서 결정론으로 먼저 잠근다. eval 쪽은 그 구조 동일성 위에서 모델이 실제로 옳게
 // block하는지(회귀)만 잰다.
+// ── 0.12.4 ST6 — evidence_context(P2b grep 근거) 형상계약 전환 ──
+// current_file·old_strings는 조사 결과 이미 raw(프로덕션 readCurrentFile/tool_input 그대로)라
+// 전환 불필요했다. evidence_context만 F-1과 정확히 같은 패턴이었다 — cases.json이
+// `formatGrepContext→formatEvidenceContext`의 **조립 산출물**(`"케이스: <label>\n<file:line: text>"`)
+// 을 손으로 적고 있었다. applied_edits와 동형으로: raw grep 매치만 선언하고 조립은 프로덕션
+// 함수가 한다(src/eval/evidence-input.ts).
+
+test("형상 계약: 조립된 evidence_context 문자열을 케이스에 직접 적을 수 없다(F-1 패턴 재적용)", () => {
+  const offenders = cases.filter((c) => typeof c.evidence_context === "string");
+  assert.deepEqual(
+    offenders.map((c) => c.id),
+    [],
+    "evidence_context는 손으로 적는 필드가 아니다(폐기됨) — evidence_cases(raw grep 매치)를 " +
+      "선언하면 프로덕션 formatGrepContext→formatEvidenceContext가 조립한다. applied_context와 " +
+      "동일한 이유로 폐기: 손으로 쓰면 프로덕션이 낼 수 없는 형상이 회귀 스위트에 들어온다.",
+  );
+});
+
+test("형상 계약: eval이 judge에 싣는 evidenceContext가 프로덕션 formatGrepContext→formatEvidenceContext 출력과 바이트 동일하다", async () => {
+  const { formatGrepContext } = await import("../dist/scope.js");
+  const { formatEvidenceContext } = await import("../dist/evidence.js");
+  const mod = await import("../dist/eval/evidence-input.js");
+  for (const c of cases) {
+    if (!Array.isArray(c.evidence_cases) || c.evidence_cases.length === 0) continue;
+    const built = mod.buildEvalEvidenceContext(c.evidence_cases);
+    const evidence = c.evidence_cases
+      .map((ec) => {
+        const context = formatGrepContext(ec.matches ?? []);
+        return { case: ec.case, context, matched: context !== "", budgetSkipped: false };
+      })
+      .filter((e) => e.matched);
+    const expected = evidence.length === 0 ? undefined : formatEvidenceContext(evidence).text || undefined;
+    assert.equal(
+      built,
+      expected,
+      `${c.id}: eval이 judge에 싣는 evidenceContext는 프로덕션 조립 함수의 출력 그 자체여야 한다`,
+    );
+  }
+});
+
+test("형상 계약: 근거주입(P2b) 신호를 가진 케이스가 최소 1건 존재한다(무신호 방지)", () => {
+  const withEvidence = cases.filter((c) => Array.isArray(c.evidence_cases) && c.evidence_cases.length > 0);
+  assert.ok(withEvidence.length >= 1, "근거주입을 싣는 케이스가 하나도 없으면 eval은 P2b 판정 경로에 무신호다.");
+});
+
+test("형상 계약: old_strings는 current_file의 리터럴 substring이어야 한다(P3 앵커 윈도우 계약)", () => {
+  // old_strings[i]가 current_file 밖 문자열이면 P3(0.12.1) 앵커 윈도우 병합이 위치를 못 찾아
+  // head-only로 조용히 퇴화한다 — 케이스가 P3을 테스트한다고 믿지만 실제론 아무것도 안 잠근다.
+  for (const c of cases) {
+    if (!Array.isArray(c.old_strings) || typeof c.current_file !== "string") continue;
+    for (const [i, s] of c.old_strings.entries()) {
+      assert.ok(
+        c.current_file.includes(s),
+        `${c.id} old_strings[${i}]: current_file 안에 리터럴로 존재하지 않는다 — P3 앵커 매칭이 무신호가 된다`,
+      );
+    }
+  }
+});
+
 test("형상 계약: 원장 stale 대칭쌍이 eval에 존재하고, 필터 후 입력이 무원장 대조군과 구조적으로 동일하다", async () => {
   const mod = await import("../dist/eval/applied-input.js");
   const staleCases = cases.filter((c) => (c.applied_edits ?? []).length > 0 && c.applied_file_states && c.expected === "block");
