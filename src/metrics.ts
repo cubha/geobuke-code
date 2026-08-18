@@ -111,6 +111,14 @@ export interface GateEvent {
   appliedDropped?: number;
   /** 원장 읽기(loadApplied)가 예외로 끝났는가 — fail-open으로 흡수됐으나 조용히 사라지지 않게 계측. */
   appliedFailed?: boolean;
+  /**
+   * 원장 생존 재검증(0.12.4 ST3, security-auditor Critical)으로 stale 판정돼 judge 입력에서
+   * 빠진 엔트리 수. 0이면 undefined. 도그푸딩 내내 이 필드가 한 번도 안 잡히면 이 수정이 고쳐진
+   * 것과 별개로 "실제로 stale 원장을 만난 적이 없다"는 뜻이라 발동 여부가 증명되지 않는다.
+   */
+  appliedStale?: number;
+  /** 재검증이 alive/stale을 판별하지 못해(읽기 실패·outside·앵커 0개) 그대로 유지한 엔트리 수. */
+  appliedUnverified?: number;
 }
 
 /** missing[]을 항목 수/길이로 캡 */
