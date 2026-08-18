@@ -138,7 +138,7 @@ test("형상 계약: eval이 judge에 싣는 evidenceContext가 프로덕션 for
     const evidence = c.evidence_cases
       .map((ec) => {
         const context = formatGrepContext(ec.matches ?? []);
-        return { case: ec.case, context, matched: context !== "", budgetSkipped: false };
+        return { case: ec.case, context, matched: context.length > 0, budgetSkipped: false };
       })
       .filter((e) => e.matched);
     const expected = evidence.length === 0 ? undefined : formatEvidenceContext(evidence).text || undefined;
