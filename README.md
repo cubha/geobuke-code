@@ -140,11 +140,13 @@ phase-protocol/계획 → /plan(SubTask) → 【게이트: 구현 직전 케이�
 > 프로젝트 hook이 구식이거나(SessionStart 누락·옛 명령) 새 버전이 나오면 gbc가 감지해 **`gbc update`**(전역 최신 + 현재 프로젝트 재init 한방) 또는 수동 `npm i -g geobuke-code@latest → gbc init --yes`를 안내한다. 단 안내는 **이미 hook이 등록된 프로젝트**(=한 번이라도 `gbc init`을 한 코호트)에만 도달한다 — 전혀 init하지 않은 프로젝트엔 실행할 hook이 없어 구조적으로 알릴 수 없다(gbc는 전역 hook을 깔지 않는다).
 > **업데이트 안내(①)는 네트워크를 게이트 핫패스에 들이지 않는다**: `~/.gbc/version-check.json` 캐시만 비교하고, 갱신 fetch는 안전한 비-핫패스에서만 짧은 타임아웃(1.5s)으로. ⓐSessionStart는 캐시가 stale이면 **표시 전에 갱신**해 신버전이 그 세션에 바로 뜬다(1세션 지연 없음). ⓑ**PreToolUse는 judge를 도는 편집(cache-miss)에서 캐시가 stale이면 refresh를 judge와 *병렬*로 건다**(0.3.0) — judge가 ≥1.5s라 지연 0이고, 사용자가 `gbc status`를 직접 치지 않아도 캐시가 최신이 된다. **cached-skip 핫패스에는 네트워크를 절대 넣지 않는다.** 조회 실패는 조용히 무시(fail-silent)되어 게이트 결정에 영향이 없다. 캐시 TTL 12h.
 
-### 작업단위 구현이력 (PostToolUse, 0.12.3)
+### 작업단위 구현이력 (PostToolUse, 0.12.3 + 원장 재검증 0.12.4)
 
 같은 작업단위(계획 명세) 안에서 형제 케이스를 **순차로** 구현하면(예: 케이스 A를 먼저 끝내고 다음 편집에서 케이스 B를 다룸), 이전엔 매 편집이 명세를 백지 상태로 재평가해 "케이스 A가 아직도 안 보인다"며 반복 차단되는 경우가 있었다 — 실사용 리포트: 같은 침묵-누락 케이스가 15분 동안 **4회 재차단**됐는데, 그 사이 사용자는 그 케이스를 실제로 구현하고 있었다. 원인은 gbc에 `PostToolUse` hook이 없어 "방금 그 편집이 실제로 승인·적용됐다"는 사실 자체를 알 방법이 없었던 것이다.
 
 `PostToolUse` hook이 승인된 편집(Edit/Write/MultiEdit)마다 `.gbc/applied.json`에 새 내용만(요약·시크릿 마스킹 후) 기록한다. 이후 판정은 `[이 작업단위에서 이미 적용된 편집]` 섹션으로 이 원장을 참고해, 형제 케이스가 다른 위치(다른 파일 포함)에서 이미 구현됐으면 다시 누락으로 잡지 않는다 — 단 **심볼 존재만으로는 안 뒤집힌다**(P2b `[관련 코드 근거(grep)]`와 동일 원칙, 근거 텍스트를 실제 판단 자료로 쓰지 심볼 유무만 보지 않는다). 원장은 작업단위(명세 해시)가 바뀌면 자동 무효화되고, `gbc done`(작업단위 명시 종료)에서도 함께 비워진다. Write(전체 덮어쓰기)는 자기 파일의 과거 엔트리를 참고하지 않는다(덮어쓰기로 사라지는 회귀는 여전히 누락으로 취급 — GATE_SYSTEM ★★ 규칙).
+
+**원장 생존 재검증(0.12.4)** — 원장은 기록 시점 스냅샷이라, 그 코드가 이후(같은 파일이든 다른 파일이든) 삭제돼도 예전엔 "완료"로 계속 남았다. 이제 판정에 실리기 전 각 엔트리를 현재 디스크 상태와 대조해 **생존(alive)·소실(stale)·판정불가(unverifiable)** 3상태로 재검증하고, stale 엔트리는 제외한다(불확정은 버리지 않는다 — 읽기 실패·매칭 불가는 그대로 유지). stale 엔트리가 걷어지면 침묵 누락이 자동으로 다시 드러나 근거주입(grep) 재판정도 다시 열린다. `gbc gate reset --hard`로 원장까지 포함해 재현 실험을 완전히 초기화할 수 있다.
 
 ⚠️ **`PostToolUse` hook 신설은 breaking 계약 변경이다** — 0.12.2 이하에서 이미 `gbc init`한 프로젝트는 **`gbc init --yes` 재실행이 필요**하다(머지·멱등·자동 백업, 게이트 판정 자체는 재init 없이도 계속 정상 동작하지만 이 기능만 무동작 상태로 남는다). 미등록 상태는 `gbc status`·`gbc repos --health`가 `PostToolUse hook 미등록`으로 안내한다.
 
@@ -291,6 +293,7 @@ gbc verify                                                   # 사다리 리포�
 | `gbc run "<프롬프트>" [--yes] [--model <m>] [--max-turns <N>]` | **(실험적 A-모드)** agent-sdk를 in-process로 구동해 게이트를 SDK 콜백으로 발화 + `canUseTool` 사람-pause(`--yes`=자동허용). agent-sdk 별도 설치 필요 ([A-모드 미리보기](#a-모드-미리보기-gbc-run--실험적)) |
 | `gbc tui [--model <m>]` | 풀스크린 TUI(단일-repo, 0.9.0 A3a) — 승인 프롬프트·게이트 줄·계측/repo 토글 패널. ink/react/agent-sdk 별도 설치 필요 ([풀스크린 TUI](#풀스크린-tui-gbc-tui--090-a3a)) |
 | `gbc gate reset` | 작업단위 게이트 리셋 |
+| `gbc gate reset --hard` | state·pendingReview·적용이력 원장까지 전부 초기화(재현 실험용, 0.12.4) |
 | `gbc gate review` | 차단이 도출한 누락 케이스 체크리스트 보기 |
 | `gbc gate review --spec <ref> --defer <ref>` | 누락 케이스 일괄 분류(승인→spec / 미룸→defer) |
 | `gbc gate snapshot <on\|off\|status\|list\|clear>` | 골든셋 캡처 토글·조회(판정 드리프트 회귀락) |
