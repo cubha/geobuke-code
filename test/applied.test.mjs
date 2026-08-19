@@ -114,6 +114,11 @@ test("buildAppliedEntry: cwd 안 파일은 outside 마커가 없다(undefined로
   assert.equal(entry.outside, undefined);
 });
 
+test("buildAppliedEntry: '..'로 cwd 밖을 가리키는 경로도 outside:true(어휘상 cwd로 시작해도 resolve 기준으로 판단, ship 사전 보안감사 Critical)", () => {
+  const entry = buildAppliedEntry("Write", { file_path: "/root/x/../../../etc/passwd", content: "z" }, "/root", "2026-08-13T00:00:00Z");
+  assert.equal(entry.outside, true);
+});
+
 test("buildAppliedEntry: session을 넘기면 엔트리에 기록된다(판정 미사용 — 라이더)", () => {
   const entry = buildAppliedEntry("Edit", { file_path: "/root/a.ts", old_string: "x", new_string: "y" }, "/root", "2026-08-13T00:00:00Z", "sess-123");
   assert.equal(entry.session, "sess-123");
