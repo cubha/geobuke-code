@@ -8,9 +8,9 @@
 // 파일의 loadApplied를 가져다 쓰므로(SubTask3), 반대 방향 import는 순환을 만든다. isDocFile 같은
 // gate-core.ts 전용 판별은 이 파일의 책임이 아니다 — 필요하면 호출부(hook.ts)가 조합한다.
 import { existsSync, unlinkSync } from "node:fs";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { gbcDirPath, ensureGbcDir, withStoreLock, readJsonObject, writeJson, basenameOf } from "./store.js";
-import { redactSecrets } from "./extraction.js";
+import { redactSecrets, REDACTED } from "./extraction.js";
 import { isGatedTool, isOverwriteEdit } from "./normalize.js";
 import type { EditToolInput, AppliedEntry, AppliedLedger } from "./types.js";
 
@@ -57,12 +57,28 @@ export function normalizeAppliedFile(cwd: string, filePath: string): string {
 }
 
 /**
+ * outside 판별 전용(ship 사전 보안감사 Critical, 2026-08-19) — normalizeAppliedFile의 어휘 비교와
+ * 달리 `resolve()`로 "."/".." 를 실제로 접어 판정한다. cwd/x/../../../etc/passwd처럼 어휘상으론
+ * cwd로 시작해도 resolve 기준으론 밖인 경로를 outside:false로 오판정하면, gate-core.ts readForVerify가
+ * join(cwd, entry.file)로 그 경로를 재조합해 디스크에서 읽어버린다(entry.outside만이 그 read를
+ * 막는 유일한 가드 — verifyAppliedEntry:231). 이 함수는 그 가드가 실제로 성립하는지만 책임진다.
+ */
+function isOutsideCwd(cwd: string, filePath: string): boolean {
+  const resolvedCwd = resolve(cwd);
+  const resolvedFile = resolve(cwd, filePath);
+  return resolvedFile !== resolvedCwd && !resolvedFile.startsWith(resolvedCwd + sep);
+}
+
+/**
  * 이번 편집이 적용한 **새 내용만** 요약한다(순수) — old_string은 담지 않는다: 원장의 질문은
  * "지금 무엇이 구현돼 있나"이지 "무엇이 지워졌나"가 아니다(normalizeEdit의 diff 형태와 다른 이유).
  * redactSecrets를 여기(기록 시점) 1곳에서만 거친다 — at-rest(.gbc/applied.json 영속)·전송(judge
  * 프롬프트) 양쪽이 같은 마스킹된 값을 재사용해 노출면 분석 지점을 단일화한다(0.12.0 ship 교훈:
  * "전송 vs 디스크 영속은 노출면이 다르다" — 저장 이후 재마스킹하지 않아도 되게 소스를 미리 정제).
  */
+/** summarizeAppliedEdit이 절단 시 붙이는 마커 줄 — extractAppliedAnchors가 같은 리터럴로 인식한다. */
+const TRUNCATION_MARKER = "…(절단됨)";
+
 export function summarizeAppliedEdit(toolName: string, input: EditToolInput): string {
   let text: string;
   if (isOverwriteEdit(toolName, input)) {
@@ -74,7 +90,35 @@ export function summarizeAppliedEdit(toolName: string, input: EditToolInput): st
   }
   if (!text) return "";
   const redacted = redactSecrets(text);
-  return redacted.length > MAX_APPLIED_DIGEST ? redacted.slice(0, MAX_APPLIED_DIGEST) + "\n…(절단됨)" : redacted;
+  return redacted.length > MAX_APPLIED_DIGEST ? redacted.slice(0, MAX_APPLIED_DIGEST) + "\n" + TRUNCATION_MARKER : redacted;
+}
+
+/** 문자·숫자·언더스코어를 하나도 포함하지 않는 줄인가(순수 구두점 — `}`·`);`·`{` 등). */
+function isPunctuationOnly(line: string): boolean {
+  return !/[\p{L}\p{N}_]/u.test(line);
+}
+
+/**
+ * digest에서 파일과 바이트 비교가 의미 있는 줄만 추린다(순수, 0.12.4 ST2+ST4 — verifyAppliedEntry의
+ * 입력 정제). 앵커에서 빼는 것:
+ *  - 절단 마커 줄과 그 직전 줄 — summarizeAppliedEdit은 문자 단위로 자르므로 마커 직전 줄은 중간에
+ *    잘렸을 공산이 커 완전한 줄이라는 보장이 없다(둘 다 빼야 안전).
+ *  - redactSecrets가 마스킹한 줄(REDACTED 마커 포함) — 마스킹된 문자열은 원본 파일과 바이트가
+ *    달라 항상 불일치로 나온다(거짓 stale 방지).
+ *  - 빈 줄 — 근거 능력 없음(evidence.ts computeDeletionScope와 동일 관례).
+ *  - **순수 구두점 줄**(0.12.4 ST4 실측 발견) — 단독 `}`·`);`·`{` 등은 글자·숫자가 하나도 없어
+ *    거의 모든 코드 파일에 존재한다. 이런 줄이 앵커로 남으면 "하나라도 남으면 alive"(ST2 설계)가
+ *    완전히 무관한 파일도 항상 alive로 오판하게 만들어 Critical 결함의 반증력 자체를 무력화한다
+ *    (eval 케이스22 원장 stale 대칭쌍 작성 중 실측 — 단독 `}`가 앵커로 남아 false negative 재현).
+ */
+export function extractAppliedAnchors(digest: string): string[] {
+  let lines = digest.split("\n");
+  if (lines[lines.length - 1] === TRUNCATION_MARKER) {
+    lines = lines.slice(0, -2);
+  }
+  return lines
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.includes(REDACTED) && !isPunctuationOnly(l));
 }
 
 /**
@@ -116,13 +160,22 @@ export function buildAppliedEntry(
   input: EditToolInput,
   cwd: string,
   at: string,
+  session?: string,
 ): AppliedEntry | null {
   if (!isGatedTool(toolName)) return null;
   const filePath = input.file_path;
   if (!filePath) return null;
   const digest = summarizeAppliedEdit(toolName, input);
   if (!digest) return null;
-  return { at, tool: toolName, file: normalizeAppliedFile(cwd, filePath), digest };
+  const outside = isOutsideCwd(cwd, filePath);
+  return {
+    at,
+    tool: toolName,
+    file: normalizeAppliedFile(cwd, filePath),
+    digest,
+    ...(outside ? { outside: true as const } : {}),
+    ...(session ? { session } : {}),
+  };
 }
 
 /**
@@ -157,24 +210,62 @@ export function recordApplied(cwd: string, specHash: string, entry: AppliedEntry
   });
 }
 
-/** 원장을 지운다(멱등) — `gbc done`(작업단위 명시 종료)이 호출한다. `gate reset`은 지우지 않는다. */
+/**
+ * 원장을 지운다(멱등) — `gbc done`(작업단위 명시 종료) 또는 `gbc gate reset --hard`(0.12.4 ST5,
+ * 재현 실험용 하드 리셋)가 호출한다. 플레인 `gate reset`은 지우지 않는다(specHash 불일치 시
+ * `loadApplied`가 자동 무효화하므로 다음 작업단위엔 어차피 안 보임 — 굳이 지울 필요 없음).
+ */
 export function clearApplied(cwd: string): void {
   const path = appliedPath(cwd);
   if (existsSync(path)) unlinkSync(path);
 }
 
 /**
- * judge에 실을 엔트리를 고른다(순수) — Write(전체 덮어쓰기) self-file 필터. 덮어쓰기 대상과 같은
- * 파일의 과거 엔트리를 보여주면 GATE_SYSTEM ★★ 규칙(덮어쓰기로 삭제되는 회귀는 여전히 missing)과
- * 정면 충돌해 정답인 block을 pass로 논증하게 만든다 — P2b의 isOverwriteEdit 억제·F-8 삭제스코프와
- * 같은 계열의 가드다. overwriteFile 없으면(Edit/MultiEdit 경로) 전부 유지.
+ * 원장 엔트리가 아직 "살아있는지" 재검증한다(순수, 0.12.4 ST2 — security-auditor Critical 본체).
+ * 원장은 기록 시점 스냅샷이라, 그 코드가 이후 편집(같은 세션이든 다른 세션이든, 같은 파일이든
+ * 다른 파일이든)으로 지워져도 원장은 "완료"로 남아 judge가 그 케이스를 계속 missing에서 제외하게
+ * 만들 수 있었다 — 다른 파일 축은 selectAppliedForJudge의 overwriteFile 필터(같은 파일 Write만
+ * 거름)가 못 잡던 사각지대.
+ *
+ * 3-상태인 이유 — 이 저장소엔 방향이 다른 두 판례가 공존한다: `isAppliedFailure`("실패 신호가
+ * 있을 때만 버린다")와 근거수집 예외 처리(gate-core.ts, "근거 없음=원래 block 유지"). 둘은
+ * 신호의 확정성으로 갈린다: 파일을 읽었고 앵커가 전부 없다 = 적극적 반증(drop), 못 읽었다/판별
+ * 불가 = 불확정(keep). 두 상태를 뭉치면 둘 중 하나를 위반한다.
+ *
+ * - `entry.outside`면 fileText를 보지 않고 unverifiable — `file`이 basename만 담아 동명이인 파일과
+ *   구분이 안 되므로 디스크를 읽어 비교하는 것 자체가 오판 소지(위 outside 필드 설명).
+ * - `fileText`가 null이면(읽기 실패·심링크·상한초과 등) unverifiable — 판정을 유예할 뿐 버리지
+ *   않는다(P2a를 통째로 무동작화하지 않는다는 관례).
+ * - 앵커가 0개면(전부 절단/마스킹/공백) 비교할 게 없으므로 unverifiable.
+ * - 앵커 중 하나라도 파일에 남아 있으면 alive — 부분 일치도 생존으로 본다. 전부 사라졌을 때만
+ *   stale로 확정한다(리팩토링·변수명 변경 같은 무해한 변형과 "코드 자체가 삭제됨"을 구분).
+ */
+export function verifyAppliedEntry(entry: AppliedEntry, fileText: string | null): "alive" | "stale" | "unverifiable" {
+  if (entry.outside) return "unverifiable";
+  if (fileText === null) return "unverifiable";
+  const anchors = extractAppliedAnchors(entry.digest);
+  if (anchors.length === 0) return "unverifiable";
+  const fileLines = new Set(fileText.split("\n").map((l) => l.trim()).filter((l) => l.length > 0));
+  return anchors.some((a) => fileLines.has(a)) ? "alive" : "stale";
+}
+
+/**
+ * judge에 실을 엔트리를 고른다(순수) — 두 독립 필터를 직교 적용한다:
+ *  ① Write(전체 덮어쓰기) self-file 필터. 덮어쓰기 대상과 같은 파일의 과거 엔트리를 보여주면
+ *     GATE_SYSTEM ★★ 규칙(덮어쓰기로 삭제되는 회귀는 여전히 missing)과 정면 충돌해 정답인 block을
+ *     pass로 논증하게 만든다 — P2b의 isOverwriteEdit 억제·F-8 삭제스코프와 같은 계열의 가드다.
+ *  ② 생존 재검증(`verify`, 0.12.4 ST2) — stale 판정 엔트리만 뺀다. `verify`는 파일 I/O가 필요해
+ *     호출부(gate-core.ts, deps.readCurrentFile 재사용)가 주입한다 — 이 함수 자체는 여전히 순수.
+ * overwriteFile·verify 둘 다 없으면(Edit/MultiEdit 경로, 재검증 미적용) 전부 유지.
  */
 export function selectAppliedForJudge(
   entries: AppliedEntry[],
-  opts: { overwriteFile?: string },
+  opts: { overwriteFile?: string; verify?: (entry: AppliedEntry) => "alive" | "stale" | "unverifiable" },
 ): AppliedEntry[] {
-  if (!opts.overwriteFile) return entries;
-  return entries.filter((e) => e.file !== opts.overwriteFile);
+  let out = entries;
+  if (opts.overwriteFile) out = out.filter((e) => e.file !== opts.overwriteFile);
+  if (opts.verify) out = out.filter((e) => opts.verify!(e) !== "stale");
+  return out;
 }
 
 /**

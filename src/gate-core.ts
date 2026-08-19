@@ -6,6 +6,7 @@
 // lazy import된다. defaultGateDeps가 judge를 dynamic import로 감싸는 이유는 **단위테스트 격리**다
 // (핫패스 zero-dep이 아니다 — 근거 정정은 defaultGateDeps doc 참조, 0.12.0 F-16).
 import { readFileSync, lstatSync } from "node:fs";
+import { join } from "node:path";
 import { normalizeEdit, isGatedTool, isOverwriteEdit } from "./normalize.js";
 import { loadPlanSpec, computeSpecHash } from "./spec.js";
 import { isGated } from "./state.js";
@@ -24,7 +25,7 @@ import { redactSecrets } from "./extraction.js";
 import { truncateCurrentFile, HEAD_BUDGET, WINDOW_RADIUS } from "./truncate.js";
 // applied.ts도 evidence.ts와 동형 이유로 정적 import(순수·zero-dep, 0.12.3 P2a). gate-core.ts→
 // applied.ts 단방향 — applied.ts는 이 파일을 import하지 않는다(순환 방지, applied.ts 헤더 참조).
-import { loadApplied, selectAppliedForJudge, formatAppliedContext, normalizeAppliedFile } from "./applied.js";
+import { loadApplied, selectAppliedForJudge, formatAppliedContext, normalizeAppliedFile, verifyAppliedEntry } from "./applied.js";
 import type { CaseEvidence, DeletionScope } from "./evidence.js";
 import type { EditToolInput, Verdict, GoldenCase, PendingReview, AppliedEntry } from "./types.js";
 import type { GateEvent } from "./metrics.js";
@@ -403,7 +404,30 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
   // 논증하게 만든다(evidence.ts F-8·Write 억제와 동일 계열).
   const overwriteFile =
     filePath && isOverwriteEdit(toolName, input.toolInput ?? {}) ? normalizeAppliedFile(cwd, filePath) : undefined;
-  const selectedApplied = selectAppliedForJudge(appliedEntries, { overwriteFile });
+  // 0.12.4 ST3 — 원장 생존 재검증(security-auditor Critical 본체). 편집 대상 파일은 이미 읽은
+  // currentFileContent를 재사용(재판독 금지) — PreToolUse는 편집 *전*에 실행되므로 이 값이 그
+  // 엔트리가 기록된 이후 지금까지의 실제 디스크 상태다. 그 외 파일은 deps.readCurrentFile을
+  // 재사용해 읽는다(신규 dep 없음 = 테스트 fake 무변경). 파일 단위로 캐시해 같은 파일을 가리키는
+  // 여러 엔트리(MAX_APPLIED_ENTRIES=20 상한 내)가 중복 I/O를 만들지 않게 한다.
+  const editedFileKey = filePath ? normalizeAppliedFile(cwd, filePath) : undefined;
+  const appliedFileCache = new Map<string, string | null>();
+  if (editedFileKey !== undefined) appliedFileCache.set(editedFileKey, currentFileContent ?? null);
+  const readForVerify = (entry: AppliedEntry): string | null => {
+    if (entry.outside) return null; // verifyAppliedEntry가 outside면 무조건 unverifiable — 잘못된 경로 읽기 방지
+    const cached = appliedFileCache.get(entry.file);
+    if (cached !== undefined) return cached;
+    const text = deps.readCurrentFile(join(cwd, entry.file));
+    appliedFileCache.set(entry.file, text);
+    return text;
+  };
+  const appliedVerifications = new Map<AppliedEntry, "alive" | "stale" | "unverifiable">();
+  for (const e of appliedEntries) appliedVerifications.set(e, verifyAppliedEntry(e, readForVerify(e)));
+  const appliedStale = [...appliedVerifications.values()].filter((v) => v === "stale").length;
+  const appliedUnverified = [...appliedVerifications.values()].filter((v) => v === "unverifiable").length;
+  const selectedApplied = selectAppliedForJudge(appliedEntries, {
+    overwriteFile,
+    verify: (e) => appliedVerifications.get(e) ?? "unverifiable",
+  });
   const appliedAssembled = formatAppliedContext(selectedApplied);
   const appliedContext = appliedAssembled.text || undefined;
   const appliedIncluded = selectedApplied.length - appliedAssembled.dropped;
@@ -540,10 +564,15 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
   // 0.12.3 P2a 계측 — appliedCount는 judge에 실제로 실린 엔트리 수(원장이 비었으면 키 생략, 다른
   // 계측 필드와 동일 관례). appliedFailed는 원장 읽기 예외를 "매치 0"과 구분해 남긴다(F-14와 동일
   // 원칙 — "적용이력이 진짜 없어서"와 "못 읽어서"를 사후 구분 못 하면 관측이 무의미해진다).
+  // 0.12.4 ST3 — appliedStale(재검증으로 탈락한 엔트리 수)·appliedUnverified(판정 불가라 유지한
+  // 수). "gate 이벤트는 있는데 applied가 0"과 동일한 관측 원칙: appliedStale이 도그푸딩 내내 0이면
+  // 이 Critical 수정이 고쳐졌을 뿐 발동했다는 증거는 아니다(appliedCount 등과 동일 "키 생략" 관례).
   const appliedMeta = {
     ...(appliedContext ? { appliedCount: appliedIncluded } : {}),
     ...(appliedAssembled.dropped > 0 ? { appliedDropped: appliedAssembled.dropped } : {}),
     ...(appliedFailed ? { appliedFailed } : {}),
+    ...(appliedStale > 0 ? { appliedStale } : {}),
+    ...(appliedUnverified > 0 ? { appliedUnverified } : {}),
   };
 
   // ⑦ pass 분기 — fail-open(판정 실패)을 먼저 분기(빈-spec 정상 pass 오분류 방지). verdict가 위

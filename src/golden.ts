@@ -68,24 +68,38 @@ export function diffVerdict(expected: GoldenExpected, actual: VerdictLike): Gold
 }
 
 /**
+ * "이번 회차 캡처에 없으면 이전 캡처 값을 보존"할 선택 필드 목록(0.12.4 ST1) — 개별 조건 복붙이
+ * 이 결함의 원인이었다(evidenceContext만 보존하고 형제 필드 appliedContext는 빠뜨림, 아래
+ * upsertGolden docstring 참조). 새 보존 대상 필드가 생기면 여기에만 추가하면 된다.
+ */
+const STICKY_FIELDS = ["evidenceContext", "expectedAfterEvidence", "appliedContext"] as const;
+
+/**
  * id 디둑 upsert — 같은 id면 교체(최신 expected), 없으면 추가.
  *
- * ⚠️ 단 **P2b 필드(`evidenceContext`/`expectedAfterEvidence`)는 새 캡처에 없으면 기존 것을
- * 보존한다**(0.12.0, advisor 실측 지적). `goldenCaseId`는 `sha256(tool, edit, spec)`이라 근거가
- * 키에 없다 — 같은 편집을 다시 캡처했는데 그 회차엔 grep 매치가 0이면(= P2b 미발화) 새 케이스엔
- * 두 필드가 없고, 통째 교체하면 드리프트 락이 **조용히 사라진다**. 그러면 replay는 2단계를
- * 그만두고 "flip 0"을 출력한다 — F-13이 막으려던 거짓안심이 읽기가 아니라 쓰기 경로에서 재현되며,
- * 문서화된 워크플로(`gbc gate reset` 후 같은 편집 재수행)로 실제 도달 가능하다.
+ * ⚠️ 단 위 STICKY_FIELDS는 새 캡처에 없으면 기존 것을 보존한다(`evidenceContext`/
+ * `expectedAfterEvidence`=0.12.0 advisor 실측 지적, `appliedContext`=0.12.4 동형 재발 수정).
+ * `goldenCaseId`는 `sha256(tool, edit, spec)`이라 근거가 키에 없다 — 같은 편집을 다시 캡처했는데
+ * 그 회차엔 grep 매치가 0이거나(P2b 미발화) 원장이 비어있으면(P2a 무기록, 예: `gate reset` 후
+ * 재수행·작업단위 전환), 새 케이스엔 해당 필드가 없고 통째 교체하면 드리프트 락이 **조용히
+ * 사라진다**. 그러면 replay는 그 필드가 지키던 재현을 그만두고 무신호로 되돌아간다(F-13이 막으려던
+ * 거짓안심이 읽기가 아니라 쓰기 경로에서 재현되는 패턴 — evidenceContext에서 한 번 고쳤는데
+ * appliedContext에서 형제 필드로 재발했다).
  *
- * 보존이 옳은 이유: 그 쌍은 "이 근거를 실으면 judge가 X를 낸다"는 **자기완결적** 기준이라, 이번
- * 회차에 매치가 났는지와 무관하게 유효하다. 새 캡처가 두 필드를 가져오면 그때는 최신으로 교체한다.
+ * 보존이 옳은 이유: 각 필드는 "이 근거/이력을 실으면 judge가 X를 낸다"는 **자기완결적** 기준이라,
+ * 이번 회차에 그 필드가 다시 채워졌는지와 무관하게 유효하다. 새 캡처가 필드를 가져오면 그때는
+ * 최신으로 교체한다(아래 루프의 `merged[field] === undefined` 조건).
  */
 export function upsertGolden(cases: GoldenCase[], c: GoldenCase): GoldenCase[] {
   const prev = cases.find((x) => x.id === c.id);
-  const merged: GoldenCase =
-    prev && c.evidenceContext === undefined && prev.evidenceContext !== undefined
-      ? { ...c, evidenceContext: prev.evidenceContext, expectedAfterEvidence: prev.expectedAfterEvidence }
-      : c;
+  let merged: GoldenCase = c;
+  if (prev) {
+    for (const field of STICKY_FIELDS) {
+      if (merged[field] === undefined && prev[field] !== undefined) {
+        merged = { ...merged, [field]: prev[field] } as GoldenCase;
+      }
+    }
+  }
   return [...cases.filter((x) => x.id !== c.id), merged];
 }
 

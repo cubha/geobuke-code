@@ -50,6 +50,7 @@ defer 항목은 **open(미착수) → in_progress(진행중) → resolved(해결
 | **작업단위 명시 종료**(명세 아카이브→비움 + 게이트 리셋) | `gbc done` |
 | **사후 결과검증**(케이스↔증거 대조, verified>reviewed>unverifiable) | `gbc verify` |
 | 작업단위 게이트만 리셋(명세 보존·같은 단위 재게이트) | `gbc gate reset` |
+| 하드 리셋(state·펜딩검토·적용이력 원장까지 전부 — 재현 실험용) | `gbc gate reset --hard` |
 | block이 도출한 누락 케이스 체크리스트 보기 | `gbc gate review` |
 | 누락 케이스 일괄 분류(승인→spec / 미룸→defer / 이미완료→ack) | `gbc gate review --spec <번호\|텍스트\|all> --defer <번호\|텍스트\|all> --ack <번호\|텍스트\|all>` |
 | 판정 골든셋 캡처 토글·조회 | `gbc gate snapshot <on\|off\|status\|list\|clear>` |

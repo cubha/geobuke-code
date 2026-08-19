@@ -42,7 +42,9 @@ export interface ExtractionRecord {
   text?: string;
 }
 
-const REDACTED = "[REDACTED]";
+// export — applied.ts verifyAppliedEntry가 마스킹된 줄을 앵커에서 빼는 데 같은 값을 재사용한다
+// (문자열을 두 곳에 따로 적으면 이 값이 바뀔 때 한쪽만 갱신되는 드리프트가 생긴다).
+export const REDACTED = "[REDACTED]";
 
 /**
  * 민감정보 redaction(순수) — 자유텍스트에서 *알려진 고신뢰 패턴만* 좁게 마스킹한다.

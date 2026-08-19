@@ -8,6 +8,8 @@ import { dirname, join } from "node:path";
 import { judge, judgeScope, selectedTransport } from "../judge.js";
 import { buildEvalAppliedContext } from "./applied-input.js";
 import type { EvalAppliedEdit } from "./applied-input.js";
+import { buildEvalEvidenceContext } from "./evidence-input.js";
+import type { EvalEvidenceCase } from "./evidence-input.js";
 import type { ScopeQueueEntry } from "../types.js";
 
 interface Case {
@@ -25,11 +27,14 @@ interface Case {
    */
   expectedFailing?: boolean;
   /**
-   * 0.12.0 F-13 — P2b 근거주입 2단계 판정을 eval에서 재현하기 위한 `[관련 코드 근거(grep)]` 원문.
-   * 있으면 judge에 그대로 실어 "근거가 주어졌을 때 모델이 옳게 판정하는가"를 잰다. 이 필드 없이는
-   * eval도 골든 replay와 똑같이 1차 판정만 재현해, 이 배치의 유일한 판정 로직 변경에 무신호였다.
+   * 0.12.0 F-13 — P2b 근거주입 2단계 판정을 eval에서 재현하기 위한 필드.
+   *
+   * ⚠️ **조립된 문자열이 아니라 raw grep 매치를 선언한다**(0.12.4 ST6, F-1 패턴 재적용). 처음엔
+   * 조립 결과를 손으로 적는 `evidence_context: string`이었는데, applied_context와 정확히 같은
+   * 구멍이었다 — evidence-input.ts가 프로덕션 함수(formatGrepContext→formatEvidenceContext)로
+   * 조립하므로 형상 불일치가 구조적으로 불가능하다. test/eval-cases.test.mjs가 이 규율을 락한다.
    */
-  evidence_context?: string;
+  evidence_cases?: EvalEvidenceCase[];
   /**
    * 0.12.1 P3 — 편집의 raw old_string(들). 있으면 judge의 editOldStrings로 그대로 실어 head+윈도우
    * 절단을 eval에서 재현한다. 이 필드 없이는 eval도 head-only 절단만 재현해 이 배치의 판정 로직
@@ -48,6 +53,14 @@ interface Case {
    * 형상 불일치가 구조적으로 불가능하다. test/eval-cases.test.mjs가 이 규율을 락한다.
    */
   applied_edits?: EvalAppliedEdit[];
+  /**
+   * 0.12.4 ST4 — 원장 생존 재검증(security-auditor Critical)을 eval에서 재현하기 위한 필드.
+   * key=`applied_edits[].file`과 같은 상대경로, value=그 파일의 **현재 디스크 상태**(생존 판정용).
+   * 선언 안 하면 그 파일은 재검증 시 unverifiable(읽기 실패 취급) — alive로 함부로 가정하지 않는다.
+   * 이 필드 없이는 eval도 골든 replay가 한 번 겪은 무신호(F-13)를 이 배치의 유일한 판정 로직
+   * 변경(원장 재검증) 축에서 재현한다.
+   */
+  applied_file_states?: Record<string, string>;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -91,10 +104,10 @@ for (const c of cases) {
   // 회귀는 defer 없는 기본 상태에서의 판정 품질을 본다.
   const v = await judge(c.plan_spec, c.edit_diff, [], [], {
     currentFileContent: c.current_file,
-    evidenceContext: c.evidence_context,
+    evidenceContext: buildEvalEvidenceContext(c.evidence_cases),
     editOldStrings: c.old_strings,
     // 조립은 프로덕션 함수가 한다(F-1) — 케이스가 문자열을 손으로 적지 않는다.
-    appliedContext: buildEvalAppliedContext(c.applied_edits),
+    appliedContext: buildEvalAppliedContext(c.applied_edits, c.applied_file_states),
   });
   const ms = Date.now() - t0;
   const ok = v.verdict === c.expected;

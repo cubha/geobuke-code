@@ -3978,6 +3978,37 @@ test("upsertGolden: 재캡처에 P2b 필드가 있으면 최신으로 교체한�
   assert.deepEqual(only.expectedAfterEvidence, { verdict: "block", missing: ["X"], reason: "new" });
 });
 
+// ── upsertGolden이 appliedContext(0.12.3 P2a 필드)를 지운다(0.12.4, 위 P2b 결함과 동형 재발) ──
+// 위 evidenceContext/expectedAfterEvidence 보존 가드는 P2b 필드만 다룬다. appliedContext(P2a)는
+// 이 가드 밖이라, 같은 id로 재캡처될 때 그 회차 원장이 비어있으면(예: gate reset 후 재수행,
+// 작업단위 전환) 스프레드가 이전 캡처의 appliedContext를 조용히 지운다 — F-13이 막으려던 거짓안심이
+// 형제 필드 축에서 재현된 것.
+
+test("upsertGolden: 재캡처에 appliedContext가 없으면 기존 것을 보존한다(P2a 드리프트 락 유실 방지)", () => {
+  const withApplied = {
+    id: "abc", at: "2026-08-09T00:00:00Z", tool: "Edit", edit: "e", spec: "s", defers: [],
+    appliedContext: "1. [src/a.ts] 이미 적용된 구현",
+    expected: { verdict: "pass", missing: [], reason: "적용이력으로 확인" },
+  };
+  const recaptured = {
+    id: "abc", at: "2026-08-09T01:00:00Z", tool: "Edit", edit: "e", spec: "s", defers: [],
+    expected: { verdict: "pass", missing: [], reason: "적용이력으로 확인" },
+  };
+  const [only] = upsertGolden([withApplied], recaptured);
+  assert.equal(only.at, "2026-08-09T01:00:00Z", "1차 판정·시각은 최신으로 교체");
+  assert.equal(only.appliedContext, "1. [src/a.ts] 이미 적용된 구현", "appliedContext가 유실되면 안 된다");
+});
+
+test("upsertGolden: 재캡처에 appliedContext가 있으면 최신으로 교체한다(보존이 갱신을 막지 않는다)", () => {
+  const old = {
+    id: "abc", tool: "Edit", edit: "e", spec: "s", defers: [], at: "2026-08-09T00:00:00Z",
+    appliedContext: "옛 원장", expected: { verdict: "pass", missing: [], reason: "" },
+  };
+  const fresh = { ...old, at: "2026-08-09T01:00:00Z", appliedContext: "새 원장" };
+  const [only] = upsertGolden([old], fresh);
+  assert.equal(only.appliedContext, "새 원장");
+});
+
 test("상수 관계 락: 근거수집 시간 예산은 grep 1회 최악값보다 커야 한다", () => {
   // 아니면 START_DEADLINE_MS <= 0이 되어 첫 grep 1회만 돌고 P2b가 사실상 무력화되는데,
   // 어떤 테스트도 실패하지 않는다(다른 상수쌍에 이미 같은 종류의 락을 걸어둔 이유와 동일).

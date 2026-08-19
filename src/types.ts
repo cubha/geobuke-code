@@ -316,6 +316,18 @@ export interface AppliedEntry {
   file: string;
   /** 적용된 새 내용 요약 — redactSecrets+캡을 기록 시점에 거친 값(at-rest 마스킹 단일화) */
   digest: string;
+  /**
+   * cwd 밖 파일이면 true(선택, 0.12.4 ST2). `file`이 basename만 담아(위 필드 설명) 동명이인
+   * 파일과 매칭 키로 구분이 안 되므로, 원장 생존 재검증(`verifyAppliedEntry`)은 이 마커가 있으면
+   * 디스크를 읽지 않고 항상 unverifiable로 취급한다(오판 방지). 마커 없는 구버전 엔트리는 통상
+   * 경로로 검증된다(하위호환).
+   */
+  outside?: true;
+  /**
+   * 기록 시점 세션 id(선택, 0.12.4 라이더 — PostToolUse `session_id`). 판정 로직엔 아직 미사용,
+   * 다음 배치의 세션 스코프 필터링(멀티탭 교차오염 후보 결함)을 위한 데이터만 축적한다.
+   */
+  session?: string;
 }
 
 /** 작업단위(specHash) 스코프의 적용이력 원장 (.gbc/applied.json) — specHash 불일치 시 자동 무효화. */

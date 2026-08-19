@@ -1261,3 +1261,105 @@ test("applied: appliedCount는 judge에 실제로 실린 엔트리 수(원장 �
   const d = await evaluateGate(makeInput(), makeDeps());
   assert.equal(d.event.appliedCount, undefined);
 });
+
+// ── 0.12.4 ST3 — 원장 생존 재검증 배선(security-auditor Critical 본체) ──
+// 원장 조회(loadApplied) 직후·selectAppliedForJudge 직전에 각 엔트리를 재검증한다. 다른 파일
+// 엔트리는 deps.readCurrentFile(join(cwd, entry.file))로 읽고, 편집 대상 파일과 같은 엔트리는
+// 이미 읽은 currentFileContent를 재사용한다(재판독 금지).
+
+test("applied: 다른 파일의 기적용 코드가 이후 삭제됐으면(stale) judge 입력에서 빠진다", async () => {
+  const judgeCalls = [];
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async (...args) => { judgeCalls.push(args); return { verdict: "block", missing: ["케이스 A 로그인 검증"], reason: "누락" }; },
+      loadApplied: () => [{ at: "t1", tool: "Edit", file: "other.ts", digest: "function impl() { return 1; }" }],
+      readCurrentFile: (p) => (p.endsWith("other.ts") ? "// impl은 리팩토링으로 사라짐\nfunction other() {}" : null),
+    }),
+  );
+  assert.equal(judgeCalls[0][4]?.appliedContext, undefined, "stale 엔트리만 있었으므로 섹션 자체가 생략된다");
+  assert.equal(d.event.appliedStale, 1);
+  assert.equal(d.event.appliedCount, undefined, "judge에 실린 게 없으므로 appliedCount도 생략");
+});
+
+test("applied: 원장 코드가 여전히 파일에 있으면(alive) 그대로 유지된다", async () => {
+  const judgeCalls = [];
+  await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async (...args) => { judgeCalls.push(args); return { verdict: "pass", missing: [], reason: "ok" }; },
+      loadApplied: () => [{ at: "t1", tool: "Edit", file: "other.ts", digest: "function impl() { return 1; }" }],
+      readCurrentFile: (p) => (p.endsWith("other.ts") ? "// 위\nfunction impl() { return 1; }\n// 아래" : null),
+    }),
+  );
+  assert.match(judgeCalls[0][4]?.appliedContext ?? "", /function impl/);
+});
+
+test("applied: 읽기 실패(unverifiable)는 stale로 단정하지 않고 유지한다", async () => {
+  const judgeCalls = [];
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async (...args) => { judgeCalls.push(args); return { verdict: "pass", missing: [], reason: "ok" }; },
+      loadApplied: () => [{ at: "t1", tool: "Edit", file: "other.ts", digest: "function impl() {}" }],
+      readCurrentFile: () => null, // 읽기 실패 흉내
+    }),
+  );
+  assert.match(judgeCalls[0][4]?.appliedContext ?? "", /function impl/, "unverifiable은 버리지 않는다");
+  assert.equal(d.event.appliedUnverified, 1);
+  assert.equal(d.event.appliedStale, undefined);
+});
+
+test("applied: 편집 대상과 같은 파일 엔트리는 currentFileContent를 재사용한다(재판독 안 함)", async () => {
+  const readCalls = [];
+  const readCurrentFile = (p) => { readCalls.push(p); return "function impl() {}"; };
+  await evaluateGate(
+    makeInput({ toolInput: { file_path: "src/foo.ts", old_string: "a", new_string: "b" } }),
+    makeDeps({
+      loadApplied: () => [{ at: "t1", tool: "Edit", file: "foo.ts", digest: "function impl() {}" }],
+      readCurrentFile,
+    }),
+  );
+  assert.equal(readCalls.length, 1, "편집 대상 파일 읽기(judge용) 1회뿐 — 재검증이 같은 파일을 다시 읽으면 안 된다");
+});
+
+test("applied: 같은 파일을 가리키는 여러 엔트리는 파일을 1번만 읽는다(dedupe)", async () => {
+  const readCalls = [];
+  const readCurrentFile = (p) => { readCalls.push(p); return "function a() {}\nfunction b() {}"; };
+  await evaluateGate(
+    makeInput(),
+    makeDeps({
+      loadApplied: () => [
+        { at: "t1", tool: "Edit", file: "other.ts", digest: "function a() {}" },
+        { at: "t2", tool: "Edit", file: "other.ts", digest: "function b() {}" },
+      ],
+      readCurrentFile,
+    }),
+  );
+  const otherReads = readCalls.filter((p) => p.endsWith("other.ts"));
+  assert.equal(otherReads.length, 1, "같은 파일은 캐시로 1번만 읽어야 한다");
+});
+
+test("applied: outside 엔트리는 재검증 시 파일을 읽지 않고(잘못된 경로 방지) unverifiable로 유지한다", async () => {
+  const readCalls = [];
+  const judgeCalls = [];
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async (...args) => { judgeCalls.push(args); return { verdict: "pass", missing: [], reason: "ok" }; },
+      loadApplied: () => [{ at: "t1", tool: "Edit", file: "passwd", digest: "function impl() {}", outside: true }],
+      readCurrentFile: (p) => { readCalls.push(p); return "function impl() {}"; },
+    }),
+  );
+  // readCalls엔 편집 대상 파일(src/foo.ts, judge용 기존 읽기) 1건은 포함된다 — outside 엔트리
+  // 재검증만 국한해서 검사한다: join(cwd, "passwd")로 엉뚱한 파일을 읽으면 안 된다.
+  assert.ok(!readCalls.some((p) => p.endsWith("passwd")), "outside 엔트리는 join(cwd, basename)으로 읽으면 안 된다");
+  assert.match(judgeCalls[0][4]?.appliedContext ?? "", /function impl/, "unverifiable은 유지된다");
+  assert.equal(d.event.appliedUnverified, 1);
+});
+
+test("applied: appliedStale/appliedUnverified는 0이면 이벤트에 키 자체가 없다(다른 계측 필드와 동일 관례)", async () => {
+  const d = await evaluateGate(makeInput(), makeDeps({ loadApplied: () => [{ at: "t1", tool: "Edit", file: "other.ts", digest: "x" }] }));
+  assert.equal(d.event.appliedStale, undefined);
+  assert.equal(d.event.appliedUnverified, 1, "기본 readCurrentFile fake는 null 반환 → unverifiable");
+});

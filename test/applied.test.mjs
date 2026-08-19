@@ -18,6 +18,8 @@ import {
   formatAppliedContext,
   isAppliedFailure,
   normalizeAppliedFile,
+  extractAppliedAnchors,
+  verifyAppliedEntry,
   MAX_APPLIED_ENTRIES,
   MAX_APPLIED_DIGEST,
   MAX_APPLIED_CONTEXT_CHARS,
@@ -98,6 +100,33 @@ test("buildAppliedEntry: 새 내용이 빈 편집(순수 삭제)은 null — 기
 test("buildAppliedEntry: cwd 밖 파일은 basename만 담는다", () => {
   const entry = buildAppliedEntry("Write", { file_path: "/other/deep/b.ts", content: "z" }, "/root", "2026-08-13T00:00:00Z");
   assert.equal(entry.file, "b.ts");
+});
+
+// ===== outside 마커 + session 라이더(0.12.4 ST2) =====
+
+test("buildAppliedEntry: cwd 밖 파일은 outside:true 마커를 단다(basename만 담겨 매칭키로 못 쓴다는 표시)", () => {
+  const entry = buildAppliedEntry("Write", { file_path: "/other/deep/b.ts", content: "z" }, "/root", "2026-08-13T00:00:00Z");
+  assert.equal(entry.outside, true);
+});
+
+test("buildAppliedEntry: cwd 안 파일은 outside 마커가 없다(undefined로 채우지 않는 기존 관례)", () => {
+  const entry = buildAppliedEntry("Edit", { file_path: "/root/a.ts", old_string: "x", new_string: "y" }, "/root", "2026-08-13T00:00:00Z");
+  assert.equal(entry.outside, undefined);
+});
+
+test("buildAppliedEntry: '..'로 cwd 밖을 가리키는 경로도 outside:true(어휘상 cwd로 시작해도 resolve 기준으로 판단, ship 사전 보안감사 Critical)", () => {
+  const entry = buildAppliedEntry("Write", { file_path: "/root/x/../../../etc/passwd", content: "z" }, "/root", "2026-08-13T00:00:00Z");
+  assert.equal(entry.outside, true);
+});
+
+test("buildAppliedEntry: session을 넘기면 엔트리에 기록된다(판정 미사용 — 라이더)", () => {
+  const entry = buildAppliedEntry("Edit", { file_path: "/root/a.ts", old_string: "x", new_string: "y" }, "/root", "2026-08-13T00:00:00Z", "sess-123");
+  assert.equal(entry.session, "sess-123");
+});
+
+test("buildAppliedEntry: session을 안 넘기면 필드 자체가 없다", () => {
+  const entry = buildAppliedEntry("Edit", { file_path: "/root/a.ts", old_string: "x", new_string: "y" }, "/root", "2026-08-13T00:00:00Z");
+  assert.equal("session" in entry, false);
 });
 
 // ===== normalizeAppliedFile — buildAppliedEntry·selectAppliedForJudge 공유 정규화 =====
@@ -244,6 +273,36 @@ test("selectAppliedForJudge: overwriteFile 없으면 전부 유지(Edit/MultiEdi
   assert.equal(out.length, 2);
 });
 
+// ===== selectAppliedForJudge — 원장 생존 재검증 필터(0.12.4 ST2, security-auditor Critical) =====
+
+test("selectAppliedForJudge: verify가 stale로 답한 엔트리는 뺀다", () => {
+  const entries = [
+    { at: "t1", tool: "Edit", file: "a.ts", digest: "A" },
+    { at: "t2", tool: "Edit", file: "b.ts", digest: "B" },
+  ];
+  const out = selectAppliedForJudge(entries, { verify: (e) => (e.file === "a.ts" ? "stale" : "alive") });
+  assert.deepEqual(out.map((e) => e.file), ["b.ts"]);
+});
+
+test("selectAppliedForJudge: alive·unverifiable은 유지한다(불확정을 버리지 않는다)", () => {
+  const entries = [
+    { at: "t1", tool: "Edit", file: "a.ts", digest: "A" },
+    { at: "t2", tool: "Edit", file: "b.ts", digest: "B" },
+  ];
+  const out = selectAppliedForJudge(entries, { verify: (e) => (e.file === "a.ts" ? "alive" : "unverifiable") });
+  assert.equal(out.length, 2);
+});
+
+test("selectAppliedForJudge: overwriteFile과 verify를 함께 적용한다(직교 필터)", () => {
+  const entries = [
+    { at: "t1", tool: "Edit", file: "a.ts", digest: "A" },
+    { at: "t2", tool: "Edit", file: "b.ts", digest: "B" },
+    { at: "t3", tool: "Edit", file: "c.ts", digest: "C" },
+  ];
+  const out = selectAppliedForJudge(entries, { overwriteFile: "a.ts", verify: (e) => (e.file === "b.ts" ? "stale" : "alive") });
+  assert.deepEqual(out.map((e) => e.file), ["c.ts"]);
+});
+
 // ===== formatAppliedContext — 프롬프트 조립(순수, 예산 캡) =====
 
 test("formatAppliedContext: 빈 배열은 빈 텍스트", () => {
@@ -309,4 +368,79 @@ test("isAppliedFailure: 성공·미상은 기록한다(형상 변화가 P2a를 �
   assert.equal(isAppliedFailure({ filePath: "/a/b.ts", success: true }), false);
   assert.equal(isAppliedFailure("Edit 적용 완료"), false, "문자열 응답은 실패 단정 불가 — 기록");
   assert.equal(isAppliedFailure({ error: "" }), false, "빈 error는 실패 신호가 아니다");
+});
+
+// ── extractAppliedAnchors — 원장 생존 재검증(0.12.4 ST2)의 입력 정제 ────────────────────────
+// digest에서 "파일과 바이트 비교해 의미 있는" 줄만 남긴다. 절단·마스킹·공백 줄은 항상 불일치로
+// 나와 거짓 stale을 만들므로 앵커에서 뺀다.
+
+test("extractAppliedAnchors: 절단되지 않은 digest는 전체 줄을 앵커로 쓴다(빈 줄 제외)", () => {
+  const digest = summarizeAppliedEdit("Write", { file_path: "/p/a.ts", content: "line1\n\nline2" });
+  assert.deepEqual(extractAppliedAnchors(digest), ["line1", "line2"]);
+});
+
+test("extractAppliedAnchors: 절단된 digest는 마커 줄과 그 직전(중간절단) 줄을 뺀다", () => {
+  // 실제 절단 경로(summarizeAppliedEdit)로 만든다 — 손으로 마커 문자열을 흉내내지 않는다(F-1 교훈).
+  const longLine = "x".repeat(MAX_APPLIED_DIGEST + 200);
+  const digest = summarizeAppliedEdit("Write", { file_path: "/p/a.ts", content: `keep-me\n${longLine}` });
+  assert.ok(digest.endsWith("\n…(절단됨)"), "전제: 실제로 절단됐다");
+  const anchors = extractAppliedAnchors(digest);
+  assert.deepEqual(anchors, ["keep-me"]);
+});
+
+test("extractAppliedAnchors: redactSecrets 마스킹 줄은 뺀다(원본과 바이트가 달라 항상 불일치)", () => {
+  const digest = summarizeAppliedEdit("Edit", {
+    file_path: "/p/a.ts",
+    old_string: "x",
+    new_string: 'keep-me\nconst key = "sk-ant-abcdefgh12345678";',
+  });
+  assert.ok(digest.includes("[REDACTED]"), "전제: 실제로 마스킹됐다");
+  assert.deepEqual(extractAppliedAnchors(digest), ["keep-me"]);
+});
+
+test("extractAppliedAnchors: 앵커가 하나도 안 남으면 빈 배열", () => {
+  assert.deepEqual(extractAppliedAnchors("   \n  \n"), []);
+});
+
+// ── 0.12.4 ST4 발견 — 순수 구두점 줄(중괄호·괄호 단독)은 앵커에서 뺀다 ──
+// 원장 stale 대칭쌍(eval 케이스22) 작성 중 실측: digest 마지막 줄이 "}"뿐이면 그게 앵커가 되고,
+// "}"는 어느 코드 파일에나 있어 완전히 무관한 파일도 항상 alive로 오판된다 — Critical 결함을
+// 사실상 무력화하는 심각한 반증 실패(false negative)다.
+test("extractAppliedAnchors: 순수 구두점 줄(예: 단독 '}')은 앵커에서 뺀다(어디에나 있어 근거 능력이 없다)", () => {
+  const digest = "function impl() {\n  return 1;\n}";
+  const anchors = extractAppliedAnchors(digest);
+  assert.ok(!anchors.includes("}"), "단독 '}'가 앵커에 남으면 어떤 파일이든 alive로 오판된다");
+  assert.ok(anchors.includes("function impl() {"), "글자를 포함한 줄은 여전히 앵커여야 한다");
+});
+
+// ── verifyAppliedEntry — 3-상태 생존 재검증(순수, security-auditor Critical 본체) ──────────────
+
+test("verifyAppliedEntry: 앵커가 파일에 남아있으면 alive", () => {
+  const entry = { at: "t", tool: "Edit", file: "a.ts", digest: "function impl() {}" };
+  assert.equal(verifyAppliedEntry(entry, "// 위\nfunction impl() {}\n// 아래"), "alive");
+});
+
+test("verifyAppliedEntry: 앵커가 전부 없으면 stale(적극적 반증)", () => {
+  const entry = { at: "t", tool: "Edit", file: "a.ts", digest: "function impl() {}" };
+  assert.equal(verifyAppliedEntry(entry, "// impl은 삭제됨\nfunction other() {}"), "stale");
+});
+
+test("verifyAppliedEntry: 앵커 일부만 남아도 alive(부분 일치는 리팩토링일 수 있다 — 전부 없어야 stale)", () => {
+  const entry = { at: "t", tool: "MultiEdit", file: "a.ts", digest: "line-A\nline-B" };
+  assert.equal(verifyAppliedEntry(entry, "// 위\nline-A\n// line-B는 삭제됨"), "alive");
+});
+
+test("verifyAppliedEntry: fileText가 null이면 unverifiable(읽기 실패·미판별을 stale로 단정하지 않는다)", () => {
+  const entry = { at: "t", tool: "Edit", file: "a.ts", digest: "function impl() {}" };
+  assert.equal(verifyAppliedEntry(entry, null), "unverifiable");
+});
+
+test("verifyAppliedEntry: outside 마커가 있으면 fileText를 안 보고 항상 unverifiable(동명이인 오판 방지)", () => {
+  const entry = { at: "t", tool: "Edit", file: "a.ts", digest: "function impl() {}", outside: true };
+  assert.equal(verifyAppliedEntry(entry, "function impl() {}"), "unverifiable");
+});
+
+test("verifyAppliedEntry: 앵커가 0개면(전부 절단·마스킹·공백) unverifiable — 비교할 게 없다", () => {
+  const entry = { at: "t", tool: "Edit", file: "a.ts", digest: "   " };
+  assert.equal(verifyAppliedEntry(entry, "아무 내용"), "unverifiable");
 });

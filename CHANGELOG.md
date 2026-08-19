@@ -2,6 +2,38 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.12.4] - 2026-08-18
+
+**원장 생존 재검증(security-auditor Critical, 0.12.3 이월) + `gate reset --hard` + eval 형상계약 확대**
+
+0.12.3이 남긴 감사 지적을 종결한다: 작업단위 적용이력 원장(`.gbc/applied.json`)은 기록 시점 스냅샷이라, **다른 파일**에 기록된 기적용 코드가 이후 삭제돼도 judge에 계속 "완료"로 제출될 수 있었다(`selectAppliedForJudge`는 같은 파일 Write만 걸러냈다). 이번 배치의 유일한 판정 입력 변경이다.
+
+### Fixed — 원장 생존 재검증(security-auditor Critical 본체)
+- **`extractAppliedAnchors`/`verifyAppliedEntry`(`src/applied.ts` 신규 순수함수)** — 원장 엔트리를 judge에 싣기 전 현재 디스크 상태와 대조해 **3-상태**(alive/stale/unverifiable)로 재검증한다. 앵커(digest에서 절단 마커·마스킹 줄·빈 줄·**순수 구두점 줄**(`}`·`);` 등, 실측으로 뒤늦게 추가 — 단독 `}`가 앵커로 남으면 무관한 파일도 항상 alive로 오판돼 Critical의 반증력 자체가 무력화됐다) 중 하나라도 파일에 남아있으면 alive, 전부 없으면 stale, 못 읽었거나 판별 불가면 unverifiable. 이 저장소의 두 기존 판례(`isAppliedFailure`="실패 신호가 있을 때만 버린다" / 근거수집 예외="근거 없음=원래 block 유지")를 신호의 확정성 축으로 화해시킨 설계 — 확정적 반증(파일 읽었고 앵커 전부 없음)만 drop, 불확정은 keep.
+- **`selectAppliedForJudge`가 `verify` 콜백으로 직교 필터링**(기존 Write self-file 필터와 별개 축) — stale 엔트리만 제외, alive·unverifiable은 유지.
+- **`gate-core.ts` 배선** — 편집 대상 파일은 이미 읽은 `currentFileContent`를 재사용(재판독 금지), 그 외 파일은 `deps.readCurrentFile` 재사용 + 파일 단위 dedupe(신규 dep 없음). outside 엔트리(cwd 밖, basename만 담김)는 조기 차단해 엉뚱한 경로를 읽지 않는다. stale 엔트리가 걷어지면 1차 judge가 다시 missing에 올려 P2b grep 재판정 진입조건(`verdict==="block"`)이 **자동으로 열린다** — grep 재검증 병행 없이 진입조건만 확장하는 대안보다 구조적으로 우월(핫패스 지연도 안 늘어남).
+- **골든 upsert 보존가드 일반화(F-2)** — `upsertGolden`이 P2b 필드(`evidenceContext`/`expectedAfterEvidence`)만 재캡처 시 보존하고 형제 필드 `appliedContext`(P2a)는 빠뜨려, 원장이 비어있는 회차에 재캡처되면 조용히 유실되던 결함(0.12.0 F-13과 동형 재발). `STICKY_FIELDS` 목록+루프로 일반화해 이후 형제 필드가 생겨도 자동 편입되게 했다.
+- 계측 신규: `appliedStale`(재검증으로 탈락한 엔트리 수)·`appliedUnverified`(판정불가 유지 수), 0이면 키 생략(기존 `appliedCount` 등과 동일 관례).
+
+### Added — `gbc gate reset --hard` (F-3)
+- 플레인 `gate reset`은 `.gbc/state.json`만 리셋해 `.gbc/pending-review.json`이 남고, 재현 실험에서 이전 회차 missing 셋이 block-repeat 오분류를 만들었다. `--hard`는 `pending-review.json`·`applied.json`(원장 자체가 이 배치의 검증 대상이라 최대 오염원)까지 함께 초기화한다. 플레인 `reset`은 기존 동작 완전 보존(breaking 아님).
+
+### Added — eval 회귀 형상계약 확대
+- **원장 stale 대칭쌍(케이스22)** — 케이스20(원장 살아있음→pass)에 대응해, 원장은 있지만 파일이 전면 재작성된 상황을 재현한다. 재검증 필터를 거치면 케이스21(원장 없음→block)과 입력이 구조적으로 동일해짐을 LLM 호출 없이 결정론으로 먼저 증명한 뒤, 실제 judge 호출로도 정확히 `block`을 재현한다. hard **21→22**건(TP14 TN8 FP0 FN0).
+- **`evidence_context` 형상계약 전환** — `current_file`·`old_strings`는 조사 결과 이미 raw(프로덕션 직결)였으나, `evidence_context`만 `formatGrepContext→formatEvidenceContext` **조립 산출물**을 케이스16·18이 손으로 적고 있었다(0.12.3 `applied_context`와 동형 결함). `src/eval/evidence-input.ts` 신설(raw grep 매치 선언 → 프로덕션 함수가 조립), 필드 폐기(`evidence_context`→`evidence_cases`, breaking — `test/`는 배포 대상 아님). 저비용 보강: `old_strings⊂current_file` 계약락(P3 앵커 무신호 방지).
+- eval이 judge에 싣는 문자열이 프로덕션 조립 함수 출력과 바이트 동일함을 두 축(applied·evidence) 모두 독립 재호출로 증명하는 계약 테스트 추가.
+
+### Fixed — 경로traversal (ship 사전 security-auditor QUICK 감사 발견, Critical)
+- `buildAppliedEntry`의 `outside` 판별이 `filePath.startsWith(cwd + sep)` 어휘 비교만 해, `<cwd>/x/../../../etc/passwd`처럼 어휘상 cwd로 시작하지만 `resolve()` 기준으론 밖인 경로를 `outside:false`로 오판정했다. 위 원장 재검증(`readForVerify`)이 `entry.outside`만 보고 `join(cwd, entry.file)` 재조합 여부를 정하므로, 이 오판정 하나가 프로젝트 루트 밖 임의 파일을 재검증 앵커매칭에 읽어들이는 boolean 오라클이 됐다(0.12.4 신설 코드가 이 필드를 디스크 I/O 경로에 처음 재사용하면서 노출). `isOutsideCwd`(resolve 기반) 신설로 교체 — 표시용 라벨(`normalizeAppliedFile`)은 기존 어휘비교 그대로 두고, 보안경계는 `outside` 플래그로만 확정.
+
+### ⚠️ 재init 불요
+hook 계약 무변경(`PostToolUse`는 0.12.3에서 이미 신설) — 이번 배치는 판정 로직·CLI 플래그·eval 하네스만 건드린다.
+
+### 수락 기준 — "고쳤다"가 아니라 "발동했다"까지
+`appliedStale` 이벤트가 도그푸딩에서 최소 1건 관측돼야 Critical 수정이 실사용에서 반증됐다고 볼 수 있다(0.12.0 F-13·0.12.3 F-1과 동일 증명 수준 — 카운터가 0이면 "고쳐졌으되 발동은 미확인").
+
+검증: `verify.sh --full` 1189/1189 · `npm run eval` hard **22/22**(TP14 TN8 FP0 FN0) · scope 6/6 · scope-critic 6회 전 SubTask 통과(catch 2건 — ①순수 구두점 줄 앵커 오판 실결함 ②`clearApplied` 주석이 새 `--hard` 호출경로와 모순돼 갱신) · `gbc gate reset`/`--hard` 실 CLI 스모크(3파일 상태 실측 대조) · ship 사전 security-auditor QUICK: Critical 1건(경로traversal, 위 항목) 발견 즉시 수정, Info 1건(`--hard` 확인절차 없음, 기존 `gbc done` 관례와 동일해 반려).
+
 ## [0.12.3] - 2026-08-13
 
 **작업단위 구현이력 부재 근본수정(P2a) + TUI `!bash`**
