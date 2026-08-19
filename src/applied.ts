@@ -8,7 +8,7 @@
 // 파일의 loadApplied를 가져다 쓰므로(SubTask3), 반대 방향 import는 순환을 만든다. isDocFile 같은
 // gate-core.ts 전용 판별은 이 파일의 책임이 아니다 — 필요하면 호출부(hook.ts)가 조합한다.
 import { existsSync, unlinkSync } from "node:fs";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { gbcDirPath, ensureGbcDir, withStoreLock, readJsonObject, writeJson, basenameOf } from "./store.js";
 import { redactSecrets, REDACTED } from "./extraction.js";
 import { isGatedTool, isOverwriteEdit } from "./normalize.js";
@@ -54,6 +54,19 @@ function readLedger(cwd: string): AppliedLedger {
 export function normalizeAppliedFile(cwd: string, filePath: string): string {
   if (filePath === cwd || filePath.startsWith(cwd + sep)) return filePath.slice(cwd.length + 1);
   return basenameOf(filePath);
+}
+
+/**
+ * outside 판별 전용(ship 사전 보안감사 Critical, 2026-08-19) — normalizeAppliedFile의 어휘 비교와
+ * 달리 `resolve()`로 "."/".." 를 실제로 접어 판정한다. cwd/x/../../../etc/passwd처럼 어휘상으론
+ * cwd로 시작해도 resolve 기준으론 밖인 경로를 outside:false로 오판정하면, gate-core.ts readForVerify가
+ * join(cwd, entry.file)로 그 경로를 재조합해 디스크에서 읽어버린다(entry.outside만이 그 read를
+ * 막는 유일한 가드 — verifyAppliedEntry:231). 이 함수는 그 가드가 실제로 성립하는지만 책임진다.
+ */
+function isOutsideCwd(cwd: string, filePath: string): boolean {
+  const resolvedCwd = resolve(cwd);
+  const resolvedFile = resolve(cwd, filePath);
+  return resolvedFile !== resolvedCwd && !resolvedFile.startsWith(resolvedCwd + sep);
 }
 
 /**
@@ -154,7 +167,7 @@ export function buildAppliedEntry(
   if (!filePath) return null;
   const digest = summarizeAppliedEdit(toolName, input);
   if (!digest) return null;
-  const outside = !(filePath === cwd || filePath.startsWith(cwd + sep));
+  const outside = isOutsideCwd(cwd, filePath);
   return {
     at,
     tool: toolName,
