@@ -23,13 +23,16 @@
 - **`evidence_context` 형상계약 전환** — `current_file`·`old_strings`는 조사 결과 이미 raw(프로덕션 직결)였으나, `evidence_context`만 `formatGrepContext→formatEvidenceContext` **조립 산출물**을 케이스16·18이 손으로 적고 있었다(0.12.3 `applied_context`와 동형 결함). `src/eval/evidence-input.ts` 신설(raw grep 매치 선언 → 프로덕션 함수가 조립), 필드 폐기(`evidence_context`→`evidence_cases`, breaking — `test/`는 배포 대상 아님). 저비용 보강: `old_strings⊂current_file` 계약락(P3 앵커 무신호 방지).
 - eval이 judge에 싣는 문자열이 프로덕션 조립 함수 출력과 바이트 동일함을 두 축(applied·evidence) 모두 독립 재호출로 증명하는 계약 테스트 추가.
 
+### Fixed — 경로traversal (ship 사전 security-auditor QUICK 감사 발견, Critical)
+- `buildAppliedEntry`의 `outside` 판별이 `filePath.startsWith(cwd + sep)` 어휘 비교만 해, `<cwd>/x/../../../etc/passwd`처럼 어휘상 cwd로 시작하지만 `resolve()` 기준으론 밖인 경로를 `outside:false`로 오판정했다. 위 원장 재검증(`readForVerify`)이 `entry.outside`만 보고 `join(cwd, entry.file)` 재조합 여부를 정하므로, 이 오판정 하나가 프로젝트 루트 밖 임의 파일을 재검증 앵커매칭에 읽어들이는 boolean 오라클이 됐다(0.12.4 신설 코드가 이 필드를 디스크 I/O 경로에 처음 재사용하면서 노출). `isOutsideCwd`(resolve 기반) 신설로 교체 — 표시용 라벨(`normalizeAppliedFile`)은 기존 어휘비교 그대로 두고, 보안경계는 `outside` 플래그로만 확정.
+
 ### ⚠️ 재init 불요
 hook 계약 무변경(`PostToolUse`는 0.12.3에서 이미 신설) — 이번 배치는 판정 로직·CLI 플래그·eval 하네스만 건드린다.
 
 ### 수락 기준 — "고쳤다"가 아니라 "발동했다"까지
 `appliedStale` 이벤트가 도그푸딩에서 최소 1건 관측돼야 Critical 수정이 실사용에서 반증됐다고 볼 수 있다(0.12.0 F-13·0.12.3 F-1과 동일 증명 수준 — 카운터가 0이면 "고쳐졌으되 발동은 미확인").
 
-검증: `verify.sh --full` 1188/1188 · `npm run eval` hard **22/22**(TP14 TN8 FP0 FN0) · scope 6/6 · scope-critic 6회 전 SubTask 통과(catch 2건 — ①순수 구두점 줄 앵커 오판 실결함 ②`clearApplied` 주석이 새 `--hard` 호출경로와 모순돼 갱신) · `gbc gate reset`/`--hard` 실 CLI 스모크(3파일 상태 실측 대조).
+검증: `verify.sh --full` 1189/1189 · `npm run eval` hard **22/22**(TP14 TN8 FP0 FN0) · scope 6/6 · scope-critic 6회 전 SubTask 통과(catch 2건 — ①순수 구두점 줄 앵커 오판 실결함 ②`clearApplied` 주석이 새 `--hard` 호출경로와 모순돼 갱신) · `gbc gate reset`/`--hard` 실 CLI 스모크(3파일 상태 실측 대조) · ship 사전 security-auditor QUICK: Critical 1건(경로traversal, 위 항목) 발견 즉시 수정, Info 1건(`--hard` 확인절차 없음, 기존 `gbc done` 관례와 동일해 반려).
 
 ## [0.12.3] - 2026-08-13
 
