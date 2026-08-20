@@ -13,7 +13,7 @@ import { lstatSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { loadRepos } from "../../repos.js";
 import { loadDefers, isClosedStatus } from "../../defer.js";
-import { formatReposPanelPath, computeSidebarWindow } from "../format.js";
+import { formatReposPanelPath, computeSidebarWindow, computePanelCapacity } from "../format.js";
 import { toneColor, BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
 
 const REPOS_PANEL_MAX_VISIBLE = 9;
@@ -47,11 +47,18 @@ export function ReposPanel({
   cwd,
   contentColumns = 80,
   cursor = 0,
+  availableRows = 20,
 }: {
   cwd: string;
   contentColumns?: number;
   /** 0.10.4 ST6 — 키보드 커서(전역 인덱스, app.tsx가 소유). 패널이 단독 렌더될 때(테스트 등)는 0. */
   cursor?: number;
+  /**
+   * 0.13.0 Task A-5 — 이 패널에 실제로 할당된 가용 세로 행수(테두리+제목 포함, app.tsx가 소유).
+   * 미지정(단독 렌더 테스트 등) 시 20 — computePanelCapacity(20, itemCount, 9)가 사실상 항상
+   * 9(REPOS_PANEL_MAX_VISIBLE)로 수렴해 기존 동작을 그대로 보존한다.
+   */
+  availableRows?: number;
 }) {
   const [entries, setEntries] = useState(() => loadReposPanelEntries());
   useEffect(() => {
@@ -59,7 +66,8 @@ export function ReposPanel({
     return () => clearInterval(id);
   }, []);
 
-  const win = computeSidebarWindow(entries.length, cursor, REPOS_PANEL_MAX_VISIBLE);
+  const maxVisible = computePanelCapacity(availableRows, entries.length, REPOS_PANEL_MAX_VISIBLE);
+  const win = computeSidebarWindow(entries.length, cursor, maxVisible);
   const visible = entries.slice(win.start, win.end);
 
   return (
