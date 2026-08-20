@@ -3,8 +3,9 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
+import { computePanelCapacity, computeSidebarWindow } from "../format.js";
 
-const SHORTCUT_ROWS: readonly [string, string][] = [
+export const SHORTCUT_ROWS: readonly [string, string][] = [
   ["Alt+1..9", "repo 전환/opt-in"],
   ["Alt+W", "현재 repo opt-out"],
   ["Alt+M", "메트릭 패널"],
@@ -22,18 +23,23 @@ const SHORTCUT_ROWS: readonly [string, string][] = [
   ["?", "이 도움말(입력창 비어있을 때)"],
 ];
 
-export function HelpPanel() {
+export function HelpPanel({ availableRows }: { availableRows?: number } = {}) {
+  const maxVisible = computePanelCapacity(availableRows ?? 20, SHORTCUT_ROWS.length);
+  const win = computeSidebarWindow(SHORTCUT_ROWS.length, 0, maxVisible);
+  const visible = SHORTCUT_ROWS.slice(win.start, win.end);
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={BORDER_COLOR} paddingX={1}>
       <Text color={PANEL_TITLE_COLOR} bold>
         ❓ 단축키 도움말
       </Text>
-      {SHORTCUT_ROWS.map(([key, desc]) => (
+      {win.aboveCount > 0 && <Text color="gray">▲ 위 {win.aboveCount}개</Text>}
+      {visible.map(([key, desc]) => (
         <Text key={key} wrap="truncate">
           <Text color="green">{key.padEnd(11)}</Text>
           <Text color="gray">{desc}</Text>
         </Text>
       ))}
+      {win.belowCount > 0 && <Text color="gray">▼ 아래 {win.belowCount}개</Text>}
     </Box>
   );
 }
