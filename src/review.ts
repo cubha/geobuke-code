@@ -5,7 +5,7 @@
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { gbcDirPath, ensureGbcDir, readJson, writeJson } from "./store.js";
-import { selectByRef } from "./text.js";
+import { selectByRef, normalizeCase } from "./text.js";
 import type { PendingReview } from "./types.js";
 
 function pendingPath(cwd: string): string {
@@ -61,4 +61,30 @@ export function resolveRefs(
   const toDefer = selectCases(missing, deferRefs).filter((c) => !toSpec.includes(c));
   const toAck = selectCases(missing, ackRefs).filter((c) => !toSpec.includes(c) && !toDefer.includes(c));
   return { toSpec, toDefer, toAck };
+}
+
+/** mergeAnnounced가 유지하는 누적 이력 상한 — 같은 작업단위에서 무한 증식하지 않도록 최근 N건만 보존. */
+export const MAX_ANNOUNCED_SEEN = 50;
+
+/**
+ * 0.13.0 P4-2 — 같은 작업단위(specHash) 안에서 누적된 missing 문구 이력을 계산한다(순수함수,
+ * 부수효과 없음). 다음 SubTask(gate-core.ts)의 block-repeat 근사매칭 판정 대조군이 될 배열을
+ * 만들 뿐, pendingReview.seen에 실제로 써넣는 것은 이 함수의 책임 밖이다.
+ *
+ * - prior가 없거나 specHash가 바뀌었으면(새 작업단위) missing만 정규화해 초기화.
+ * - specHash가 같으면 (prior.seen ?? prior.missing, 구버전 레코드 호환)에 새 missing을 이어붙여
+ *   정규화 기준으로 중복을 제거한다(먼저 나온 순서 보존).
+ * - 결과가 MAX_ANNOUNCED_SEEN을 넘으면 오래된 것부터 잘라 최근 것만 남긴다.
+ */
+export function mergeAnnounced(prior: PendingReview | null, specHash: string, missing: string[]): string[] {
+  const normalized = missing.map(normalizeCase);
+  if (prior === null || prior.specHash !== specHash) {
+    return normalized;
+  }
+  const base = prior.seen ?? prior.missing;
+  const merged: string[] = [];
+  for (const item of [...base, ...normalized]) {
+    if (!merged.includes(item)) merged.push(item);
+  }
+  return merged.length > MAX_ANNOUNCED_SEEN ? merged.slice(merged.length - MAX_ANNOUNCED_SEEN) : merged;
 }

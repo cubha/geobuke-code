@@ -38,6 +38,8 @@ import {
   writePendingReview,
   readPendingReview,
   clearPendingReview,
+  mergeAnnounced,
+  MAX_ANNOUNCED_SEEN,
 } from "../dist/review.js";
 import {
   buildPreCommand,
@@ -4023,4 +4025,92 @@ test("parseSince: 극단 상대값은 Invalid Date가 아니라 null(모듈이 �
   // RangeError로 CLI가 죽었다(security-auditor 실측 재현).
   assert.equal(parseSince("99999999999d"), null);
   assert.equal(parseSince("999999999999999h"), null);
+});
+
+// ── P4-2: PendingReview 누적이력(mergeAnnounced) ──────────────────────────
+// block-repeat 근사매칭 판정(다음 SubTask, gate-core.ts)의 대조군을 만드는 순수 누적 함수.
+// 이 블록은 mergeAnnounced 자체(누적/초기화/중복제거/상한절단)와, reset --hard가 seen 필드를
+// 포함한 레코드를 통째로 삭제한다는 사실을 명시적으로 락한다. gate-core.ts는 건드리지 않는다.
+
+test("mergeAnnounced: prior=null → missing을 정규화해 그대로 반환(초기화)", () => {
+  const result = mergeAnnounced(null, "hash-a", ["  케이스1  ", "케이스2\n줄바꿈"]);
+  assert.deepEqual(result, ["케이스1", "케이스2 줄바꿈"]);
+});
+
+test("mergeAnnounced: prior.specHash가 다르면 새 작업단위로 간주해 초기화(prior 내용 안 섞임)", () => {
+  const prior = {
+    missing: ["옛케이스"],
+    seen: ["옛케이스", "더옛케이스"],
+    reason: "r",
+    source: "s",
+    at: "2026-08-20T00:00:00Z",
+    specHash: "hash-old",
+  };
+  const result = mergeAnnounced(prior, "hash-new", ["새케이스"]);
+  assert.deepEqual(result, ["새케이스"]);
+});
+
+test("mergeAnnounced: 같은 specHash + prior.seen 있음 → 누적+정규화 기준 중복 제거(먼저 나온 순서 보존)", () => {
+  const prior = {
+    missing: ["a", "b"],
+    seen: ["a", "b"],
+    reason: "r",
+    source: "s",
+    at: "2026-08-20T00:00:00Z",
+    specHash: "hash-a",
+  };
+  const result = mergeAnnounced(prior, "hash-a", ["b", "c"]);
+  assert.deepEqual(result, ["a", "b", "c"]);
+});
+
+test("mergeAnnounced: 같은 specHash + prior.seen 없음(구버전 레코드) → prior.missing을 시드로 누적", () => {
+  const prior = {
+    missing: ["옛missing1", "옛missing2"],
+    reason: "r",
+    source: "s",
+    at: "2026-08-20T00:00:00Z",
+    specHash: "hash-a",
+    // seen 필드 없음 — 0.13.0 이전 레코드 시뮬레이션
+  };
+  const result = mergeAnnounced(prior, "hash-a", ["옛missing2", "새missing"]);
+  assert.deepEqual(result, ["옛missing1", "옛missing2", "새missing"]);
+});
+
+test("mergeAnnounced: 51개 이상 누적 시 최근 50개만 남고 오래된 것부터 잘린다", () => {
+  const seen = Array.from({ length: 50 }, (_, i) => `case${i}`);
+  const prior = {
+    missing: seen,
+    seen,
+    reason: "r",
+    source: "s",
+    at: "2026-08-20T00:00:00Z",
+    specHash: "hash-a",
+  };
+  const result = mergeAnnounced(prior, "hash-a", ["case-new1", "case-new2"]);
+  assert.equal(MAX_ANNOUNCED_SEEN, 50);
+  assert.equal(result.length, 50);
+  // 가장 오래된 것(case0, case1)이 빠지고 최신 2건이 끝에 남는다
+  assert.ok(!result.includes("case0"), "가장 오래된 항목은 잘려야 한다");
+  assert.ok(!result.includes("case1"), "두번째로 오래된 항목도 잘려야 한다");
+  assert.deepEqual(result.slice(-2), ["case-new1", "case-new2"]);
+});
+
+test("gate reset --hard 회귀락: seen 필드 포함 레코드도 clearPendingReview로 전부 삭제된다", () => {
+  const cwd = tmp();
+  try {
+    const rec = {
+      missing: ["a", "b"],
+      seen: ["a", "b", "c"],
+      reason: "누적 이력 포함 레코드",
+      source: ".gbc/spec.md",
+      at: "2026-08-20T00:00:00Z",
+      specHash: "hash-a",
+    };
+    writePendingReview(cwd, rec);
+    assert.deepEqual(readPendingReview(cwd), rec, "seen 필드 포함해 라운드트립되어야 함");
+    clearPendingReview(cwd);
+    assert.equal(readPendingReview(cwd), null, "reset --hard(clearPendingReview)는 seen까지 통째로 지운다");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
