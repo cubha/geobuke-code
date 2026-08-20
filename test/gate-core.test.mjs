@@ -504,6 +504,151 @@ test("block-repeat: pendingReview 효과는 여전히 갱신된다(최신 사유
   assert.equal(d.effects.pendingReview.specHash, DEFAULT_SPEC_HASH);
 });
 
+// ── 0.13.0 P4 — 근사매칭(Tier2) 배선 ──────────────────────────────────────
+// sameMissingSet(완전일치, Tier1)만으로는 LLM이 매 judge 호출마다 missing[]을 병합/분리/축약으로
+// 재직렬화하는 실측 결함(fa-support events.jsonl 라인1222-1228)을 못 잡는다. isAnnouncedRepeat
+// (바이그램 커버리지, text.ts)로 근사매칭을 추가하고, 누적 이력(mergeAnnounced, review.ts)을
+// 대조군으로 쓴다. exactRepeat/isRepeat 판별 자체는 위 기존 5건이 회귀락으로 보존한다 — 이 블록은
+// "완전일치는 실패하지만 근사매칭은 성립하는" 새 경로만 검증한다.
+
+test("block-repeat(근사매칭): missing[]이 병합되어 완전일치는 실패해도 바이그램 커버리지가 높으면 강등, repeatMatch='covered'", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      // prior가 두 항목을 별개로 안내했는데, 이번엔 같은 내용을 한 문장으로 병합해 재진술 —
+      // sameMissingSet(길이 다름)은 실패하지만 바이그램 커버리지는 높아야 한다.
+      judge: async () => ({
+        verdict: "block",
+        missing: ["ScheduleReminderService의 scanContractReminders/scanScheduleReminders가 linkUrl을 meta로 전달, 기존 spec 2건은 objectContaining 추가로 갱신"],
+        reason: "형제 누락",
+      }),
+      readPendingReview: () => ({
+        missing: [
+          "ScheduleReminderService의 scanContractReminders/scanScheduleReminders가 linkUrl을 meta로 전달",
+          "기존 spec 2건은 objectContaining 추가로 갱신",
+        ],
+        reason: "형제 누락",
+        source: ".gbc/spec.md",
+        at: "2026-08-20T00:00:00.000Z",
+        specHash: DEFAULT_SPEC_HASH,
+      }),
+    }),
+  );
+  assert.equal(d.kind, "block-repeat");
+  assert.equal(d.event.repeatMatch, "covered");
+});
+
+test("block-repeat(근사매칭): 완전일치이면 repeatMatch='exact' — Tier1이 여전히 우선 판정된다", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "block", missing: ["케이스 B 중복 이메일"], reason: "형제 누락" }),
+      readPendingReview: () => ({
+        missing: ["케이스 B 중복 이메일"],
+        reason: "형제 누락",
+        source: ".gbc/spec.md",
+        at: "2026-07-13T00:00:00.000Z",
+        specHash: DEFAULT_SPEC_HASH,
+      }),
+    }),
+  );
+  assert.equal(d.kind, "block-repeat");
+  assert.equal(d.event.repeatMatch, "exact");
+});
+
+test("block-repeat(근사매칭): GBC_REPEAT_MATCH=exact면 근사매칭이 우회되고 완전일치만 판정된다(escape hatch)", async () => {
+  const d = await evaluateGate(
+    makeInput({ env: { GBC_REPEAT_MATCH: "exact" } }),
+    makeDeps({
+      judge: async () => ({
+        verdict: "block",
+        missing: ["ScheduleReminderService의 scanContractReminders/scanScheduleReminders가 linkUrl을 meta로 전달, 기존 spec 2건은 objectContaining 추가로 갱신"],
+        reason: "형제 누락",
+      }),
+      readPendingReview: () => ({
+        missing: [
+          "ScheduleReminderService의 scanContractReminders/scanScheduleReminders가 linkUrl을 meta로 전달",
+          "기존 spec 2건은 objectContaining 추가로 갱신",
+        ],
+        reason: "형제 누락",
+        source: ".gbc/spec.md",
+        at: "2026-08-20T00:00:00.000Z",
+        specHash: DEFAULT_SPEC_HASH,
+      }),
+    }),
+  );
+  assert.equal(d.kind, "block", "GBC_REPEAT_MATCH=exact 하에서는 근사매칭이 꺼져 정상 block");
+});
+
+test("block-repeat(근사매칭): 신규 절이 섞인 재진술(커버리지 낮음)은 강등되지 않는다 — 음성 대조군", async () => {
+  const d = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({
+        verdict: "block",
+        missing: [
+          "알림 링크 생성 유틸(buildCustomerDetailLink/buildScheduleDayLink) 신규 + ScheduleReminderService의 scanContractReminders/scanScheduleReminders가 linkUrl을 meta로 전달, 기존 spec 2건은 objectContaining 추가로 갱신",
+        ],
+        reason: "형제 누락",
+      }),
+      readPendingReview: () => ({
+        missing: [
+          "ScheduleReminderService의 scanContractReminders/scanScheduleReminders가 linkUrl을 meta로 전달",
+          "기존 spec 2건은 objectContaining 추가로 갱신",
+        ],
+        reason: "형제 누락",
+        source: ".gbc/spec.md",
+        at: "2026-08-20T00:00:00.000Z",
+        specHash: DEFAULT_SPEC_HASH,
+      }),
+    }),
+  );
+  assert.equal(d.kind, "block", "신규 유틸 언급이 추가된 재진술은 강등되면 안 된다(과잉억제 방지 음성 대조군)");
+});
+
+test("pendingReview.seen: 같은 작업단위에서 누적되고, 새 작업단위(specHash 변경)면 초기화된다", async () => {
+  const d1 = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "block", missing: ["케이스 A 로그인 검증"], reason: "r" }),
+      readPendingReview: () => null,
+    }),
+  );
+  assert.deepEqual(d1.effects.pendingReview.seen, ["케이스 A 로그인 검증"]);
+
+  const d2 = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "block", missing: ["케이스 B 중복 이메일"], reason: "r" }),
+      readPendingReview: () => ({
+        missing: ["케이스 A 로그인 검증"],
+        seen: ["케이스 A 로그인 검증"],
+        reason: "r",
+        source: ".gbc/spec.md",
+        at: "2026-08-20T00:00:00.000Z",
+        specHash: DEFAULT_SPEC_HASH,
+      }),
+    }),
+  );
+  assert.deepEqual(d2.effects.pendingReview.seen, ["케이스 A 로그인 검증", "케이스 B 중복 이메일"]);
+
+  const d3 = await evaluateGate(
+    makeInput(),
+    makeDeps({
+      judge: async () => ({ verdict: "block", missing: ["케이스 C 신규"], reason: "r" }),
+      readPendingReview: () => ({
+        missing: ["케이스 A 로그인 검증", "케이스 B 중복 이메일"],
+        seen: ["케이스 A 로그인 검증", "케이스 B 중복 이메일"],
+        reason: "r",
+        source: ".gbc/spec.md",
+        at: "2026-08-20T00:00:00.000Z",
+        specHash: "다른작업단위해시",
+      }),
+    }),
+  );
+  assert.deepEqual(d3.effects.pendingReview.seen, ["케이스 C 신규"], "specHash 변경 시 seen 초기화");
+});
+
 test("golden capture: isGoldenCapture=true·non-failopen이면 goldenCapture 디스크립터(tool·edit·spec·expected)", async () => {
   const d = await evaluateGate(
     makeInput(),
