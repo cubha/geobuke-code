@@ -2,6 +2,32 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.13.0] - 2026-08-20
+
+**block-repeat 근사매칭(P4) + TUI 패널 세로예산(Task A)** — 0.12.0 "후속 PR 배치"에서 두 번 순연된 항목을 이번 배치에서 전부 소화.
+
+### Fixed — block-repeat 완전일치 취약점(P4)
+- `sameMissingSet`(정규화 후 완전일치)만으로 재발화를 판별하던 것을, 근사매칭(`isAnnouncedRepeat`, 바이그램 커버리지) 추가로 확장했다. LLM이 매 judge 호출마다 같은 잔여 작업을 병합·분리·축약으로 재서술하면 완전일치가 실패해 재차단이 재발하는 실측 결함(fa-support `.gbc/events.jsonl` 라인 1222-1228, specHash `a0cddd870403eeb8` — 같은 작업단위에서 7회 연속 block, 강등 0건)이 실사용 로그로 확인됐다.
+- 2계층 판별: **Tier1**(기존 완전일치, 변경 없음) + **Tier2**(신규 근사매칭). `PendingReview.seen`에 같은 작업단위의 안내된 누락 문구를 누적(`mergeAnnounced`, 최근 50건 상한)해 Tier2의 대조군으로 쓴다 — 완전일치인데도 강등이 안 되던 부수 원인(펜딩 레코드가 매번 덮어쓰기라 직전 1건만 기억)도 함께 해소된다.
+- `REPEAT_COVERAGE_MIN = 0.8`(바이그램 커버리지 임계값) — 위 실측 코퍼스로 캘리브레이션(양성 3건 coverageRatio=1.0, 음성 1건 신규절 추가 coverageRatio≈0.611). 신규 절이 섞인 재진술·유니그램만 겹치는 재조합 위반은 강등되지 않는다(과잉억제=사람 승인 우회 방지, 회귀 테스트로 락).
+- **`sameMissingSet` 함수 자체는 무수정** — `evidenceFlip`(P2b 효과 계측) 산정에도 재사용되는 공유 술어라, 완전일치 계약을 건드리면 그 지표가 왜곡된다. 두 소비처가 이제 의도적으로 다른 술어(flip=엄격 완전일치, repeat=근사매칭)를 쓴다는 점을 주석으로 명시.
+- 신규 계측 필드 `GateEvent.repeatMatch?: "exact" | "covered"` — 어느 술어로 강등됐는지 기록(값 없으면 키 생략, 기존 관례). **오탐율 상승 예상**: 억제가 늘면 `scoring.ts`의 `repeated-unresolved` 관측(오탐 후보로 계수)도 늘어난다 — baseline(UPR 61%/IPR 16%)과 단순 비교하지 말고 `repeatMatch`로 exact/covered를 분리 집계해야 like-for-like가 성립한다.
+- Escape hatch: `GBC_REPEAT_MATCH=exact`로 이전 동작(완전일치만)으로 되돌릴 수 있다.
+- 상세 근거·설계 결정은 `docs/analysis/ANALYSIS-block-repeat-rootfix-2026-08-20.md`.
+
+### Fixed — TUI 패널 세로 클리핑(Task A)
+- 토글 패널(⌃M 메트릭·⌃R repos·⌃S skills·?/Alt 도움말)이 렌더되는 ChatBox 콘텐츠 영역은 고정 높이+`overflow:hidden`이라, 패널 콘텐츠가 가용 행수를 넘으면 패널 자신은 그 사실을 모른 채 아무 표시 없이 잘렸다.
+- `computePanelCapacity`(`src/tui/format.ts`, 신규 순수함수) — 가용 행수에서 크롬(테두리2+제목1)을 뺀 뒤, 넘치면 위/아래 인디케이터용 2행을 예약해 몇 개까지 보여줄 수 있는지 계산한다. 기존 `computeSidebarWindow`(Sidebar/ReposPanel이 이미 쓰던 것)와 합성해 SkillsPanel·HelpPanel에도 `▲ 위 N개`/`▼ 아래 N개` 윈도잉을 추가했다.
+- `ReposPanel`의 `REPOS_PANEL_MAX_VISIBLE = 9`는 세로 행수와 무관한 하드코딩이었다(예: 80×24 터미널에서 실제 가용 행수보다 넘치는 경우가 있었다) — 물리적 상한(Alt+1..9 단축키)은 `hardMax`로 유지하되 실제 사용치는 `computePanelCapacity`로 파생하게 교체했다.
+- `MetricsPanel`은 두 텍스트 줄에 `wrap="truncate"`가 없어 좁은 폭에서 랩(줄바꿈) 성장이 가능했다 — 다른 패널과 동일하게 추가.
+- `app.tsx`가 ChatBox가 실제로 클리핑하는 값(`chatViewportRows`)을 4개 패널 모두에 `availableRows`로 하달 — 예산과 실렌더가 같은 값에서 파생돼 드리프트가 구조적으로 불가능하다.
+- ⚠️ **tmux 실렌더 검증은 이 배치에 포함되지 않는다** — 단위테스트+타입은 자동 검증됐으나 "실제로 안 잘리는가"는 실 터미널 확인이 필요하다(`tmux new -x 80 -y 24` 저높이 + `-x 100 -y 40` 정상에서 4개 패널 토글 확인 권장).
+
+### 재init 불요
+hook 계약 무변경 — 이번 배치는 판정 로직(P4)과 TUI 렌더 로직(Task A)만 건드린다.
+
+검증: `verify.sh --full` 1217/1217 · `npm run eval` hard **22/22**(P4는 judge 미경유라 무변경이 정상 신호) · scope-critic 3회 전 SubTask 통과(catch 0건) · team-dev 7 SubTask 병렬(worktree 격리) + sh-dev-loop 3 SubTask 직렬.
+
 ## [0.12.4] - 2026-08-18
 
 **원장 생존 재검증(security-auditor Critical, 0.12.3 이월) + `gate reset --hard` + eval 형상계약 확대**
