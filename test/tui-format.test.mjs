@@ -45,6 +45,8 @@ import {
   isTurnSpacerBoundary,
   isAssistantRunLead,
   accentFirstVisualLine,
+  PANEL_CHROME_ROWS,
+  computePanelCapacity,
 } from "../dist/tui/format.js";
 import { createInitialState, reduce } from "../dist/tui/model.js";
 
@@ -1065,4 +1067,55 @@ test("accentFirstVisualLine: 원본 배열을 변형하지 않는다(불변 갱�
   const snapshot = JSON.parse(JSON.stringify(original));
   accentFirstVisualLine(original);
   assert.deepEqual(original, snapshot);
+});
+
+// ===== computePanelCapacity (0.13.0 Task A-1) — MetricsPanel/SkillsPanel/HelpPanel/ReposPanel이
+// 렌더되는 ChatBox 콘텐츠 영역은 height 고정+overflow:hidden이라, 패널 콘텐츠가 가용 행수를
+// 넘으면 조용히 잘린다. computeSidebarWindow(윈도잉)의 maxVisible 인자를 만드는 상위 예산 계산
+// 함수 — chrome 3행(테두리 2 + 제목 1) 제외 후, 안 넘치면 그대로, 넘치면 인디케이터
+// (▲위/▼아래) 최악의 경우 2행을 예약한다(Sidebar/ReposPanel과 동일 관례). =====
+
+test("PANEL_CHROME_ROWS: 테두리 2행 + 제목 1행 = 3", () => {
+  assert.equal(PANEL_CHROME_ROWS, 3);
+});
+
+test("computePanelCapacity: itemCount가 body 이하면(안 넘침) itemCount 그대로 반환", () => {
+  // availableRows=10 → body = 10 - 3 = 7, itemCount=5 <= 7
+  assert.equal(computePanelCapacity(10, 5), 5);
+});
+
+test("computePanelCapacity: itemCount가 body를 넘으면(넘침) body-2(최소 1) 반환", () => {
+  // availableRows=10 → body=7, itemCount=10 > 7 → max(1, 7-2)=5
+  assert.equal(computePanelCapacity(10, 10), 5);
+});
+
+test("computePanelCapacity: 경계 itemCount===body → 안 넘침 취급, body 그대로(인디케이터 없음)", () => {
+  assert.equal(computePanelCapacity(10, 7), 7);
+});
+
+test("computePanelCapacity: 경계 itemCount===body+1 → 넘침 취급, body-2로 전환(인디케이터 등장)", () => {
+  assert.equal(computePanelCapacity(10, 8), 5);
+});
+
+test("computePanelCapacity: itemCount===0이면 availableRows와 무관하게 항상 0(표시할 게 없으면 예약도 없다)", () => {
+  assert.equal(computePanelCapacity(20, 0), 0);
+  assert.equal(computePanelCapacity(0, 0), 0);
+  assert.equal(computePanelCapacity(-5, 0), 0);
+});
+
+test("computePanelCapacity: hardMax 지정 시 계산값과 hardMax 중 작은 쪽(ReposPanel Alt+1..9 상한)", () => {
+  // availableRows=30 → body=27, itemCount=50 > 27 → max(1,25)=25, hardMax=9 → min(25,9)=9
+  assert.equal(computePanelCapacity(30, 50, 9), 9);
+  // hardMax가 계산값보다 크면 계산값 그대로
+  assert.equal(computePanelCapacity(10, 10, 9), 5);
+});
+
+test("computePanelCapacity: availableRows<=0이어도 크래시 없이 안전한 값을 반환한다(NaN/음수 금지)", () => {
+  const a = computePanelCapacity(0, 5);
+  assert.ok(Number.isFinite(a) && a >= 0, `NaN/음수 금지: ${a}`);
+  assert.equal(a, 1); // body=0, itemCount=5>0 → max(1, 0-2)=1
+
+  const b = computePanelCapacity(-10, 3);
+  assert.ok(Number.isFinite(b) && b >= 0, `NaN/음수 금지: ${b}`);
+  assert.equal(b, 1); // body=max(0,-13)=0, itemCount=3>0 → max(1,-2)=1
 });
