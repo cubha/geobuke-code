@@ -17,7 +17,10 @@ function load(cwd: string): { m: Metrics; real: RealM1 } {
   return { m: computeMetrics(events), real };
 }
 
-export function MetricsPanel({ cwd }: { cwd: string }) {
+// availableRows(옵션) — 향후 패널 세로예산 절단(computePanelCapacity, src/tui/format.ts) 확장을
+// 대비한 다른 패널들과의 시그니처 일관성용. 이 패널은 항상 고정 3행(제목 1 + 위반율/오탐율 1 +
+// M2/M3 1)이라 실제로 잘라낼 항목이 없어 현재는 미사용(구조분해 생략으로 unused 경고 자체를 회피).
+export function MetricsPanel({ cwd }: { cwd: string; availableRows?: number }) {
   const [data, setData] = useState<{ m: Metrics; real: RealM1 } | null>(null);
 
   useEffect(() => {
@@ -43,12 +46,12 @@ export function MetricsPanel({ cwd }: { cwd: string }) {
       <Text color={PANEL_TITLE_COLOR} bold>
         📊 라이브 메트릭 <Text color="gray">— .gbc/events.jsonl</Text>
       </Text>
-      <Text>
+      <Text wrap="truncate">
         <Text color="green">진짜 M1</Text> 위반율 {pct(real.violation.rate)} <Text color="gray">({real.violation.scored} scored · {real.violation.unscored} unscored)</Text>
         {"   "}오탐율 <Text color={real.falsePositive.rate && real.falsePositive.rate > 0 ? "yellow" : "green"}>{pct(real.falsePositive.rate)}</Text>{" "}
         <Text color="gray">({real.falsePositive.fpCandidates}/{real.falsePositive.totalBlocks})</Text>
       </Text>
-      <Text color="gray">
+      <Text color="gray" wrap="truncate">
         M2 게이트 적중 {data.m.m2.gateCaught} · 도중발견 {data.m.m2.deferred} M3 재작업단위 {data.m.m3.multiEditUnits}/{data.m.m3.workUnits}
       </Text>
     </Box>
