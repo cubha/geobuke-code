@@ -1,0 +1,35 @@
+{
+  "_source": "fa-support repo .gbc/events.jsonl 라인 1222-1228, specHash=a0cddd870403eeb8 (실측 원문, 재구성/의역 금지)",
+  "1222": [
+    "ScheduleReminderService의 scanContractReminders/scanScheduleReminders가 linkUrl을 meta로 전달",
+    "기존 spec 2건은 objectContaining 추가로 갱신"
+  ],
+  "1223_negative_new_clause": [
+    "알림 링크 생성 유틸(buildCustomerDetailLink/buildScheduleDayLink) 신규 + ScheduleReminderService의 scanContractReminders/scanScheduleReminders가 linkUrl을 meta로 전달, 기존 spec 2건은 objectContaining 추가로 갱신"
+  ],
+  "1225_merge": [
+    "ScheduleReminderService의 scanContractReminders/scanScheduleReminders가 linkUrl을 meta로 전달, 기존 spec 2건은 objectContaining 추가로 갱신"
+  ],
+  "1226_abbrev": [
+    "scanScheduleReminders가 linkUrl을 meta로 전달"
+  ],
+  "1228_identical_second_item": [
+    "기존 spec 2건은 objectContaining 추가로 갱신"
+  ],
+  "cases": [
+    { "id": "1225_merge", "announcedKey": "1222", "newItemsKey": "1225_merge", "expectRepeat": true,
+      "note": "두 공지 항목을 쉼표로 병합한 문장 — 완전일치는 실패하지만 근사매칭은 잡아야 함" },
+    { "id": "1226_abbrev", "announcedKey": "1222", "newItemsKey": "1226_abbrev", "expectRepeat": true,
+      "note": "공지 첫 항목의 축약형(주어 생략)" },
+    { "id": "1228_identical_second_item", "announcedKey": "1222", "newItemsKey": "1228_identical_second_item", "expectRepeat": true,
+      "note": "공지 두번째 항목과 완전 동일 문장" },
+    { "id": "1223_negative_new_clause", "announcedKey": "1222", "newItemsKey": "1223_negative_new_clause", "expectRepeat": false,
+      "note": "공지 내용에 신규 유틸(buildCustomerDetailLink/buildScheduleDayLink) 언급이 '추가'된 것 — 완전 재진술이 아니라 신규 절이 섞였으므로 커버리지가 낮아야 함" }
+  ],
+  "synthetic": {
+    "announced": ["A가 B를 호출"],
+    "newItems": ["C가 B를 호출"],
+    "expectRepeat": false,
+    "note": "유니그램 집합만 보면 B·호출이 공통이라 커버리지가 높게 나오지만, 의미상 완전히 다른 위반(A→C 주체 교체)이다. 바이그램('a가 b를','b를 호출' vs 'c가 b를','b를 호출')으로 보면 공통 바이그램이 'b를 호출' 1개뿐이라 커버리지가 낮아지고, 유니그램 폴백은 newItems 토큰이 2개 이상(바이그램 존재)이라 발동하지 않는다 — 바이그램이라야 걸러지는 케이스임을 증명."
+  }
+}
