@@ -1476,18 +1476,25 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           showWelcome={activeScrollBuffer.length === 0}
           panelNode={
             state.panel === "metrics" ? (
-              <MetricsPanel cwd={cwd} />
+              <MetricsPanel cwd={cwd} availableRows={chatViewportRows} />
             ) : state.panel === "repos" ? (
               // 0.10.4 ST6 — contentColumns는 ChatBox 자체의 테두리+패딩(4)·컬럼갭(1)까지 뺀
               // chatInnerColumns여야 한다. 기존엔 computeContentColumns(...) 원값(그 5컬럼을 포함한
               // 값)을 그대로 넘겨 REPOS_PANEL_ROW_OVERHEAD 예산이 실제보다 5컬럼 더 넓다고 착각—
               // 긴 경로가 실제 렌더 폭에서 줄바꿈돼 패널 행수가 예산을 초과하고 알트스크린 잔상이
               // 발생했다(백로그 "ReposPanel 세로 오버플로"의 실체, tmux 실기 검증으로 확인).
-              <ReposPanel cwd={cwd} contentColumns={chatInnerColumns} cursor={reposPanelCursor} />
+              // 0.13.0 A-2 — availableRows(=chatViewportRows, ChatBox가 실제로 클리핑하는 값과
+              // 동일)를 추가로 하달해 세로도 가로와 동일하게 예산 인식하게 한다.
+              <ReposPanel
+                cwd={cwd}
+                contentColumns={chatInnerColumns}
+                cursor={reposPanelCursor}
+                availableRows={chatViewportRows}
+              />
             ) : state.panel === "skills" ? (
-              <SkillsPanel cwd={cwd} />
+              <SkillsPanel cwd={cwd} availableRows={chatViewportRows} />
             ) : state.panel === "help" ? (
-              <HelpPanel />
+              <HelpPanel availableRows={chatViewportRows} />
             ) : undefined
           }
           // ST5(0.9.4 T2)→0.10.3 — 프리뷰가 별도 노드가 아니라 대화 시각행 윈도우 안에서 스크롤백
