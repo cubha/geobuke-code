@@ -7,16 +7,24 @@
 // 썼는데(scope-critic 지적, DECISION_CHANGED) "세션 중 정적"이 "cwd 변경 무관"을 함의하지 않는다 —
 // 멀티 repo 탭 전환은 같은 세션 안에서 cwd 스코프(scanSkillsWithOrigin의 프로젝트 .claude/skills
 // 경로)가 바뀌므로, MetricsPanel(useEffect([cwd]) 패턴)과 동일하게 cwd 변경을 감시해 재스캔한다.
+// 세로예산 윈도잉(A-3) — ReposPanel과 동일한 computePanelCapacity+computeSidebarWindow 합성.
+// 스킬 개수엔 물리적 상한이 없어 hardMax는 생략(가용 행수만큼만 자연 제한). 이 패널은 커서 이동
+// 배선이 없어 cursor=0 고정 — 항상 목록 맨 위부터 채우고, 넘치는 나머지는 "아래 N개"로 안내한다.
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { scanSkillsWithOrigin, type SkillInfoWithOrigin } from "../skills.js";
+import { computePanelCapacity, computeSidebarWindow } from "../format.js";
 import { BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
 
-export function SkillsPanel({ cwd }: { cwd: string }) {
+export function SkillsPanel({ cwd, availableRows = 20 }: { cwd: string; availableRows?: number }) {
   const [skills, setSkills] = useState<SkillInfoWithOrigin[]>(() => scanSkillsWithOrigin(cwd));
   useEffect(() => {
     setSkills(scanSkillsWithOrigin(cwd));
   }, [cwd]);
+
+  const maxVisible = computePanelCapacity(availableRows, skills.length);
+  const win = computeSidebarWindow(skills.length, 0, maxVisible);
+  const visible = skills.slice(win.start, win.end);
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={BORDER_COLOR} paddingX={1}>
@@ -26,15 +34,19 @@ export function SkillsPanel({ cwd }: { cwd: string }) {
       {skills.length === 0 ? (
         <Text color="gray">설치된 skill 없음 — 'gbc init'으로 gbc 스킬 설치</Text>
       ) : (
-        skills.map((s) => (
-          // wrap=truncate(0.10.3) — 설명이 랩되면 항목당 2행+중간절단으로 고정 뷰포트가 금방 차고
-          // 클리핑 단면이 지저분해진다(실기검증). 항목당 정확히 1행 — 더 많은 스킬이 한 화면에 든다.
-          <Text key={`${s.origin}:${s.name}`} wrap="truncate">
-            <Text color="green">/{s.name}</Text>
-            <Text color="gray"> [{s.origin === "project" ? "프로젝트" : "전역"}]</Text>
-            {s.description ? <Text color="gray"> — {s.description.slice(0, 80)}</Text> : null}
-          </Text>
-        ))
+        <>
+          {win.aboveCount > 0 && <Text color="gray">▲ 위 {win.aboveCount}개</Text>}
+          {visible.map((s) => (
+            // wrap=truncate(0.10.3) — 설명이 랩되면 항목당 2행+중간절단으로 고정 뷰포트가 금방 차고
+            // 클리핑 단면이 지저분해진다(실기검증). 항목당 정확히 1행 — 더 많은 스킬이 한 화면에 든다.
+            <Text key={`${s.origin}:${s.name}`} wrap="truncate">
+              <Text color="green">/{s.name}</Text>
+              <Text color="gray"> [{s.origin === "project" ? "프로젝트" : "전역"}]</Text>
+              {s.description ? <Text color="gray"> — {s.description.slice(0, 80)}</Text> : null}
+            </Text>
+          ))}
+          {win.belowCount > 0 && <Text color="gray">▼ 아래 {win.belowCount}개</Text>}
+        </>
       )}
     </Box>
   );
