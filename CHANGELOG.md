@@ -2,7 +2,7 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
-## [0.13.0] - 2026-08-20
+## [0.13.0] - 2026-08-22
 
 **block-repeat 근사매칭(P4) + TUI 패널 세로예산(Task A)** — 0.12.0 "후속 PR 배치"에서 두 번 순연된 항목을 이번 배치에서 전부 소화.
 
@@ -21,12 +21,15 @@
 - `ReposPanel`의 `REPOS_PANEL_MAX_VISIBLE = 9`는 세로 행수와 무관한 하드코딩이었다(예: 80×24 터미널에서 실제 가용 행수보다 넘치는 경우가 있었다) — 물리적 상한(Alt+1..9 단축키)은 `hardMax`로 유지하되 실제 사용치는 `computePanelCapacity`로 파생하게 교체했다.
 - `MetricsPanel`은 두 텍스트 줄에 `wrap="truncate"`가 없어 좁은 폭에서 랩(줄바꿈) 성장이 가능했다 — 다른 패널과 동일하게 추가.
 - `app.tsx`가 ChatBox가 실제로 클리핑하는 값(`chatViewportRows`)을 4개 패널 모두에 `availableRows`로 하달 — 예산과 실렌더가 같은 값에서 파생돼 드리프트가 구조적으로 불가능하다.
-- ⚠️ **tmux 실렌더 검증은 이 배치에 포함되지 않는다** — 단위테스트+타입은 자동 검증됐으나 "실제로 안 잘리는가"는 실 터미널 확인이 필요하다(`tmux new -x 80 -y 24` 저높이 + `-x 100 -y 40` 정상에서 4개 패널 토글 확인 권장).
+- ✅ **tmux 실렌더 검증 완료**(2026-08-22, 발행 직전) — `tmux new -x 80 -y 24`(저높이)와 `-x 100 -y 40`(정상) 두 크기에서 4개 패널을 모두 토글해 실제 렌더를 캡처했다. SkillsPanel 잔여 표시가 80×24에서 `▼ 아래 17개`, 100×40에서 `▼ 아래 9개`로 **터미널 높이에 따라 파생**되고, HelpPanel은 80×24 `▼ 아래 5개` → 100×40 전량 표시로 윈도잉이 풀린다(= 예산이 실렌더 값에서 나온다는 직접 증거). ReposPanel은 등록 7건이 가용 행수 이내라 윈도잉 없이 전량 표시, MetricsPanel은 세 줄 모두 `…` 절단으로 랩 성장이 없다. 네 패널 모두 ChatBox 경계를 넘지 않는다.
 
 ### 재init 불요
 hook 계약 무변경 — 이번 배치는 판정 로직(P4)과 TUI 렌더 로직(Task A)만 건드린다.
 
-검증: `verify.sh --full` 1217/1217 · `npm run eval` hard **22/22**(P4는 judge 미경유라 무변경이 정상 신호) · scope-critic 3회 전 SubTask 통과(catch 0건) · team-dev 7 SubTask 병렬(worktree 격리) + sh-dev-loop 3 SubTask 직렬.
+검증: `verify.sh --full` 1217/1217 · `npm run eval` hard **22/22**(P4는 judge 미경유라 무변경이 정상 신호) + scope 회귀 6/6 · `/verify-impl` 축A 인수검증 UNMET 0·UNREQUESTED 0(기준선 `docs/plan/PLAN-0.13.0-block-repeat-and-panel-budget.md`) · 회귀락 3개 테스트 파일 전부 append-only(바이트 diff 확인 — 기존 block-repeat 5건·evidenceFlip 3건 무수정) · scope-critic 3회 전 SubTask 통과(catch 0건) · team-dev 7 SubTask 병렬(worktree 격리) + sh-dev-loop 3 SubTask 직렬.
+- ⚠️ **골든 replay는 실행하지 않았다** — 이 저장소의 골든 캡처는 opt-in이고 현재 `.gbc/golden.json`이 없어(케이스 0건) 재판정할 대상 자체가 없다. 판정 드리프트 회귀락은 이번 배치에서 `npm run eval`(hard 22 + scope 6)이 전담한다.
+- `security-auditor`(발행 직전, `main..HEAD` 소스 diff 전량) **Critical 0건** · Warning 2건은 비차단으로 판단해 이월: ⓐ `REPEAT_COVERAGE_MIN=0.8`의 캘리브레이션 표본이 실측 4건뿐이라 얇다(사후 추적은 `repeatMatch`로 가능, 표본 축적 후 재검증) · ⓑ `readPendingReview`가 신규 필드 `seen`의 형상을 검사하지 않아 손상된 `pending-review.json`에서 `TypeError` 가능(`runHookSafely` fail-open 경계 안이라 가시적 통과, 조용한 우회 아님 — 형상 가드 1줄이 다음 배치 최우선).
+- ⚠️ **축B(시안 대비 화면) 미검증** — 이 저장소에 `docs/design/` 시안이 없어 대조할 기준선 자체가 없다(위 tmux 실렌더 검증은 시안 대조가 아니라 "클리핑이 실제로 사라졌는가"의 동작 확인이다).
 
 ## [0.12.4] - 2026-08-18
 
