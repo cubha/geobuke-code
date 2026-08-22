@@ -14,8 +14,8 @@ import { isGoldenCapture } from "./config.js";
 import { activeDeferItems, resolvedDeferItems } from "./defer.js";
 import { goldenCaseId } from "./golden.js";
 import { nowIso } from "./time.js";
-import { normalizeCase } from "./text.js";
-import { readPendingReview } from "./review.js";
+import { normalizeCase, isAnnouncedRepeat } from "./text.js";
+import { readPendingReview, mergeAnnounced } from "./review.js";
 // evidence.ts는 judge.ts와 달리 무거운 외부 SDK가 없다(node:child_process만, 코어 모듈) — judge처럼
 // lazy dynamic import로 감쌀 이유가 없어 정적 import한다(지연 로딩 규율은 @anthropic-ai/sdk류 외부
 // 패키지에 대한 것이지 순수·grep 유틸까지 확장 적용하지 않는다 — F-16 정정 반영).
@@ -533,8 +533,11 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
       if (!verdict2.failOpen) {
         // 집합 비교(0.12.0 F-3) — 길이 비교였을 땐 "개수는 같고 내용만 바뀐" 교체가 flip=false로
         // 기록됐다. P2b가 오탐을 얼마나 해소했는지 증명해야 할 지표가 스스로를 과소집계하던 결함.
-        // ⑧의 block-repeat 판정이 쓰는 것과 **같은** sameMissingSet을 재사용한다(정규화 후 정렬
-        // 비교라 순서 차이는 flip이 아님) — 두 곳이 "같은 missing인가"를 다르게 답하면 안 된다.
+        // ⑧의 block-repeat 판정과 이 함수(sameMissingSet)를 공유하던 시절엔 "두 곳이 같은 missing인가를
+        // 다르게 답하면 안 된다"였지만, 0.13.0 P4부터 두 곳은 **의도적으로 다른 술어**를 쓴다: 여기(flip)는
+        // 지표 정밀도가 목적이라 엄격한 완전일치(정규화 후 정렬 비교, 순서 차이는 flip 아님)를 유지하고,
+        // ⑧의 block-repeat는 사용자 노이즈 억제가 목적이라 근사매칭(isAnnouncedRepeat)까지 추가로 본다.
+        // sameMissingSet 자체의 계약은 이 파일 전역에서 불변 — P2b 효과 계측이 왜곡되지 않는다.
         evidenceFlip = verdict2.verdict !== verdict.verdict || !sameMissingSet(verdict2.missing, verdict.missing);
         // 골든에 2단계를 후첨(0.12.0 F-13) — ⑥의 expected(1차 판정)는 **그대로 두고** 근거 원문과
         // 재판정 결과만 덧붙인다. 이래야 replay가 P2b까지 재현해 드리프트를 볼 수 있으면서도,
@@ -615,8 +618,21 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
     // SubTask가 매 편집마다 같은 문구로 재차단되던 노이즈). specEmpty는 대상 아님(그쪽은 ST1의
     // walk-up이 근본원인) — 여긴 missing[] 기반 침묵-누락 반복만 다룬다.
     const prior = deps.readPendingReview(cwd);
-    const isRepeat = !specEmpty && prior?.specHash === specHash && sameMissingSet(prior.missing, verdict.missing);
-    effects.pendingReview = { missing: verdict.missing, reason: verdict.reason, source, at: nowIso(), specHash: logHash };
+    // 0.13.0 P4 — 완전일치(sameMissingSet)만으로는 LLM이 매번 병합/분리/축약으로 missing[]을
+    // 재직렬화하는 실측 결함(fa-support events.jsonl 라인1222-1228, specHash=a0cddd870403eeb8)을
+    // 못 잡는다. Tier1(exactRepeat)은 기존 그대로 두고, Tier2(approxRepeat)로 누적 이력(mergeAnnounced,
+    // review.ts) 대비 바이그램 커버리지(isAnnouncedRepeat, text.ts) 근사매칭을 추가한다.
+    // GBC_REPEAT_MATCH=exact면 Tier2를 끄고 기존(완전일치만) 동작으로 되돌릴 수 있다(escape hatch,
+    // GBC_BLOCK_MODE·GBC_NO_SCOPE와 동일 관례).
+    const announced = mergeAnnounced(prior, specHash, verdict.missing);
+    const exactRepeat = !specEmpty && prior?.specHash === specHash && sameMissingSet(prior.missing, verdict.missing);
+    const approxRepeat =
+      env.GBC_REPEAT_MATCH !== "exact" &&
+      !specEmpty &&
+      prior?.specHash === specHash &&
+      isAnnouncedRepeat(verdict.missing, prior.seen ?? prior.missing);
+    const isRepeat = exactRepeat || approxRepeat;
+    effects.pendingReview = { missing: verdict.missing, reason: verdict.reason, source, at: nowIso(), specHash: logHash, seen: announced };
     if (isRepeat) {
       return {
         kind: "block-repeat",
@@ -629,7 +645,9 @@ export async function evaluateGate(input: GateInput, deps: GateDeps): Promise<Ga
         effects,
         event: {
           at: nowIso(), session, specHash: logHash, kind: "gate", tool: toolName,
-          decision: "block-repeat", missing: verdict.missing, deferCount: defers.length, ...fileMeta, ...evidenceMeta, ...appliedMeta,
+          decision: "block-repeat", missing: verdict.missing, deferCount: defers.length,
+          repeatMatch: exactRepeat ? "exact" : "covered",
+          ...fileMeta, ...evidenceMeta, ...appliedMeta,
         },
       };
     }

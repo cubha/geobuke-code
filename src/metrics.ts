@@ -119,6 +119,13 @@ export interface GateEvent {
   appliedStale?: number;
   /** 재검증이 alive/stale을 판별하지 못해(읽기 실패·outside·앵커 0개) 그대로 유지한 엔트리 수. */
   appliedUnverified?: number;
+  /**
+   * block-repeat(0.13.0 P4) 판별이 어느 술어로 성립했는가. "exact"=완전일치(sameMissingSet),
+   * "covered"=근사매칭(isAnnouncedRepeat, 바이그램 커버리지). decision이 "block-repeat"가 아니면
+   * undefined. baseline(UPR/IPR) 대비 비교 시 이 필드로 exact/covered를 분리 집계해야 한다 —
+   * covered 발동이 늘면 억제도 늘어(오탐 후보 repeated-unresolved 증가) 단순 비교는 오독을 낳는다.
+   */
+  repeatMatch?: "exact" | "covered";
 }
 
 /** missing[]을 항목 수/길이로 캡 */

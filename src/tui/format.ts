@@ -625,6 +625,38 @@ export function computeSidebarWindow(total: number, cursor: number, maxVisible: 
   return { start, end, aboveCount: start, belowCount: total - end };
 }
 
+// ── 패널 세로 예산 계산 (0.13.0 Task A-1) ──
+// MetricsPanel/SkillsPanel/HelpPanel/ReposPanel이 렌더되는 ChatBox 콘텐츠 영역은 height 고정+
+// overflow:"hidden"이라, 패널 콘텐츠가 가용 행수를 넘으면 패널 자신은 그 사실을 모른 채 조용히
+// 잘린다(어떤 "더 있음" 표시도 없이). computePanelCapacity는 그 예산을 계산해 computeSidebarWindow의
+// maxVisible 인자를 만들어주는 상위 함수다(합성은 각 패널 배선 SubTask 몫 — 여기선 계산만).
+
+/**
+ * 패널 공용 chrome 행수: 테두리 2행(위/아래) + 제목 1행 = 3.
+ * 근거: src/tui/ui/*.tsx 패널 컴포넌트가 전부 공유하는
+ * `<Box flexDirection="column" borderStyle="round" ... paddingX={1}><Text bold>제목</Text>...</Box>`
+ * 구조에서 실측(ink borderStyle이 위/아래 각 1행을 차지 + 제목 Text가 1행).
+ */
+export const PANEL_CHROME_ROWS = 3;
+
+/**
+ * 패널에 실제로 표시할 수 있는 항목 수(순수). availableRows에서 PANEL_CHROME_ROWS를 뺀 콘텐츠
+ * 본문 행수(body) 안에 itemCount가 다 들어가면 그대로 보여주고(인디케이터 불필요), 넘치면
+ * ▲위/▼아래 인디케이터가 각 1행씩 최악의 경우(스크롤 중간에서 둘 다 뜨는 상황) 2행을 미리
+ * 예약한다 — Sidebar/ReposPanel이 이미 쓰는 것과 동일한 관례. 예약을 미리 안 하면 커서가
+ * 창 중간으로 들어갈 때 인디케이터가 새로 뜨면서 표시 가능 행수가 진동한다.
+ * hardMax가 주어지면 계산값과 hardMax 중 작은 값을 반환한다(물리적 상한 — 예: ReposPanel의
+ * Alt+1..9 단축키 상한 9). itemCount===0이면 availableRows/hardMax와 무관하게 항상 0을
+ * 최우선으로 반환한다(표시할 게 없는데 인디케이터용 행을 예약하는 건 잘못이다).
+ * availableRows<=0이어도 크래시 없이 안전한 값(0 또는 1)을 반환한다.
+ */
+export function computePanelCapacity(availableRows: number, itemCount: number, hardMax?: number): number {
+  if (itemCount === 0) return 0;
+  const body = Math.max(0, availableRows - PANEL_CHROME_ROWS);
+  const capacity = itemCount <= body ? itemCount : Math.max(1, body - 2);
+  return hardMax === undefined ? capacity : Math.min(capacity, hardMax);
+}
+
 // ── 워드마크 + 안내카드 (0.9.2 ST13) ──
 // figlet "ANSI Shadow" 폰트로 생성한 정적 문자열을 그대로 임베드한다(zero-dep 원칙 — 런타임에
 // figlet을 설치·실행하지 않는다. 빌드타임에 한 번 생성한 상수).

@@ -78,6 +78,11 @@ export interface PendingReview {
   at: string;
   /** 판정 당시 명세 해시(0.9.3 ST2) — 같은 작업단위(specHash)의 재발화 판별용. 빈 명세는 "". */
   specHash: string;
+  /**
+   * 0.13.0 P4 — 같은 작업단위(specHash)에서 누적된 missing 문구 이력. block-repeat 근사매칭
+   * 판정의 대조군. 구버전 gbc가 읽으면 무시되는 옵셔널 필드.
+   */
+  seen?: string[];
 }
 
 // ===== scope 판정 (축A 파급반경 + 축B Ponytail 사다리) — 0.5.2 =====

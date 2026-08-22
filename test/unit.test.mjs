@@ -38,6 +38,8 @@ import {
   writePendingReview,
   readPendingReview,
   clearPendingReview,
+  mergeAnnounced,
+  MAX_ANNOUNCED_SEEN,
 } from "../dist/review.js";
 import {
   buildPreCommand,
@@ -73,7 +75,7 @@ import { goldenCaseId, diffVerdict, upsertGolden, summarizeReplay, needsP2bRepla
 import { EVIDENCE_TIME_BUDGET_MS } from "../dist/evidence.js";
 import { GREP_TIMEOUT_MS } from "../dist/scope.js";
 import { resolveApiKey, safeModel, buildCliInvocation } from "../dist/judge.js";
-import { normalizeCase, MAX_CASE } from "../dist/text.js";
+import { normalizeCase, MAX_CASE, tokenizeCase, coverageRatio, isAnnouncedRepeat, REPEAT_COVERAGE_MIN } from "../dist/text.js";
 import { isStopHintMuted, setStopHintMuted } from "../dist/config.js";
 import { parseBinding } from "../dist/verify.js";
 import {
@@ -4023,4 +4025,141 @@ test("parseSince: 극단 상대값은 Invalid Date가 아니라 null(모듈이 �
   // RangeError로 CLI가 죽었다(security-auditor 실측 재현).
   assert.equal(parseSince("99999999999d"), null);
   assert.equal(parseSince("999999999999999h"), null);
+});
+
+// ── P4-2: PendingReview 누적이력(mergeAnnounced) ──────────────────────────
+// block-repeat 근사매칭 판정(다음 SubTask, gate-core.ts)의 대조군을 만드는 순수 누적 함수.
+// 이 블록은 mergeAnnounced 자체(누적/초기화/중복제거/상한절단)와, reset --hard가 seen 필드를
+// 포함한 레코드를 통째로 삭제한다는 사실을 명시적으로 락한다. gate-core.ts는 건드리지 않는다.
+
+test("mergeAnnounced: prior=null → missing을 정규화해 그대로 반환(초기화)", () => {
+  const result = mergeAnnounced(null, "hash-a", ["  케이스1  ", "케이스2\n줄바꿈"]);
+  assert.deepEqual(result, ["케이스1", "케이스2 줄바꿈"]);
+});
+
+test("mergeAnnounced: prior.specHash가 다르면 새 작업단위로 간주해 초기화(prior 내용 안 섞임)", () => {
+  const prior = {
+    missing: ["옛케이스"],
+    seen: ["옛케이스", "더옛케이스"],
+    reason: "r",
+    source: "s",
+    at: "2026-08-20T00:00:00Z",
+    specHash: "hash-old",
+  };
+  const result = mergeAnnounced(prior, "hash-new", ["새케이스"]);
+  assert.deepEqual(result, ["새케이스"]);
+});
+
+test("mergeAnnounced: 같은 specHash + prior.seen 있음 → 누적+정규화 기준 중복 제거(먼저 나온 순서 보존)", () => {
+  const prior = {
+    missing: ["a", "b"],
+    seen: ["a", "b"],
+    reason: "r",
+    source: "s",
+    at: "2026-08-20T00:00:00Z",
+    specHash: "hash-a",
+  };
+  const result = mergeAnnounced(prior, "hash-a", ["b", "c"]);
+  assert.deepEqual(result, ["a", "b", "c"]);
+});
+
+test("mergeAnnounced: 같은 specHash + prior.seen 없음(구버전 레코드) → prior.missing을 시드로 누적", () => {
+  const prior = {
+    missing: ["옛missing1", "옛missing2"],
+    reason: "r",
+    source: "s",
+    at: "2026-08-20T00:00:00Z",
+    specHash: "hash-a",
+    // seen 필드 없음 — 0.13.0 이전 레코드 시뮬레이션
+  };
+  const result = mergeAnnounced(prior, "hash-a", ["옛missing2", "새missing"]);
+  assert.deepEqual(result, ["옛missing1", "옛missing2", "새missing"]);
+});
+
+test("mergeAnnounced: 51개 이상 누적 시 최근 50개만 남고 오래된 것부터 잘린다", () => {
+  const seen = Array.from({ length: 50 }, (_, i) => `case${i}`);
+  const prior = {
+    missing: seen,
+    seen,
+    reason: "r",
+    source: "s",
+    at: "2026-08-20T00:00:00Z",
+    specHash: "hash-a",
+  };
+  const result = mergeAnnounced(prior, "hash-a", ["case-new1", "case-new2"]);
+  assert.equal(MAX_ANNOUNCED_SEEN, 50);
+  assert.equal(result.length, 50);
+  // 가장 오래된 것(case0, case1)이 빠지고 최신 2건이 끝에 남는다
+  assert.ok(!result.includes("case0"), "가장 오래된 항목은 잘려야 한다");
+  assert.ok(!result.includes("case1"), "두번째로 오래된 항목도 잘려야 한다");
+  assert.deepEqual(result.slice(-2), ["case-new1", "case-new2"]);
+});
+
+test("gate reset --hard 회귀락: seen 필드 포함 레코드도 clearPendingReview로 전부 삭제된다", () => {
+  const cwd = tmp();
+  try {
+    const rec = {
+      missing: ["a", "b"],
+      seen: ["a", "b", "c"],
+      reason: "누적 이력 포함 레코드",
+      source: ".gbc/spec.md",
+      at: "2026-08-20T00:00:00Z",
+      specHash: "hash-a",
+    };
+    writePendingReview(cwd, rec);
+    assert.deepEqual(readPendingReview(cwd), rec, "seen 필드 포함해 라운드트립되어야 함");
+    clearPendingReview(cwd);
+    assert.equal(readPendingReview(cwd), null, "reset --hard(clearPendingReview)는 seen까지 통째로 지운다");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// ── P4-1: 토크나이저+바이그램 커버리지 술어 ──────────────────────────────
+// block-repeat(같은 작업단위에서 이미 안내한 침묵-누락 재차단 억제) 판별을 완전일치에서
+// 근사매칭으로 확장하는 작업의 1번째 조각. 코퍼스는 fa-support repo .gbc/events.jsonl
+// 라인 1222-1228(specHash=a0cddd870403eeb8) 실측 원문 그대로 — 재구성/의역 금지.
+const blockRepeatCorpus = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("./fixtures/block-repeat-corpus.json", import.meta.url)),
+    "utf8",
+  ),
+);
+
+test("tokenizeCase: '/', ',', '·', 괄호를 구분자로 취급해 토큰 분해한다", () => {
+  assert.deepEqual(tokenizeCase("A/B,C·D(E)"), ["a", "b", "c", "d", "e"]);
+});
+
+test("tokenizeCase: 빈 토큰은 제거된다", () => {
+  assert.deepEqual(tokenizeCase("  ,, //  "), []);
+});
+
+test("coverageRatio: announced가 빈 배열이면 0을 반환한다", () => {
+  assert.equal(coverageRatio(["아무 문장"], []), 0);
+});
+
+test("coverageRatio: newItems 토큰이 1개 이하면 유니그램으로 폴백한다(바이그램 0개)", () => {
+  // "갱신" 한 토큰짜리 newItems는 바이그램을 만들 수 없다 — 유니그램 집합 비교로 폴백해야 함.
+  const ratio = coverageRatio(["갱신"], ["기존 spec 2건은 objectContaining 추가로 갱신"]);
+  assert.equal(ratio, 1);
+});
+
+for (const c of blockRepeatCorpus.cases) {
+  const announced = blockRepeatCorpus[c.announcedKey];
+  const newItems = blockRepeatCorpus[c.newItemsKey];
+  test(`isAnnouncedRepeat(${c.id}): expectRepeat=${c.expectRepeat} — ${c.note}`, () => {
+    assert.equal(
+      isAnnouncedRepeat(newItems, announced),
+      c.expectRepeat,
+      `coverageRatio=${coverageRatio(newItems, announced)}, REPEAT_COVERAGE_MIN=${REPEAT_COVERAGE_MIN}`,
+    );
+  });
+}
+
+test("isAnnouncedRepeat(synthetic bigram negative): 유니그램 공통(B·호출)만으로는 안 걸러지고 바이그램이라야 걸러진다", () => {
+  const { announced, newItems, expectRepeat } = blockRepeatCorpus.synthetic;
+  // 유니그램만 보면 겹침이 커 보이는 함정 케이스 — coverageRatio가 실제로 바이그램 경로를
+  // 탔는지(폴백 아님) 직접 확인해 이 테스트의 의도(P4-1 요구사항 2번째 추가 케이스)를 증명한다.
+  assert.ok(newItems.flatMap(tokenizeCase).length >= 2, "바이그램이 생성될 토큰 수 확보");
+  assert.equal(isAnnouncedRepeat(newItems, announced), expectRepeat);
 });
