@@ -1,27 +1,12 @@
 // 0.10.4 ST7(개선3-a) — '?' 단축키 도움말 패널. 기존 패널 3종(metrics/repos/skills)과 동일한 토글
 // 시스템(model.ts TOGGLE_PANEL/CLOSE_PANEL)에 얹힌 네 번째 패널 — 정적 텍스트라 별도 상태 없음.
+// 0.13.1 T-1 — 키맵 데이터는 format.ts SHORTCUT_ROWS(SHORTCUT_REGISTRY 파생)를 단일 소스로 쓴다.
+// 이 파일이 먼저 format.ts를 import하던 기존 방향(computePanelCapacity 등)을 그대로 따른 것 —
+// 반대 방향(format.ts가 HelpPanel을 import)은 ESM 순환이 된다.
 import React from "react";
 import { Box, Text } from "ink";
 import { BORDER_COLOR, PANEL_TITLE_COLOR } from "./theme.js";
-import { computePanelCapacity, computeSidebarWindow } from "../format.js";
-
-export const SHORTCUT_ROWS: readonly [string, string][] = [
-  ["Alt+1..9", "repo 전환/opt-in"],
-  ["Alt+W", "현재 repo opt-out"],
-  ["Alt+M", "메트릭 패널"],
-  ["Alt+R", "repos 패널(↑/↓·Enter)"],
-  ["Alt+S", "skills 패널"],
-  ["Alt+T", "타이틀 full/mini 전환"],
-  ["Alt+F", "포커스 모드(사이드바 숨김/복귀)"],
-  ["Tab", "사이드바 포커스 토글"],
-  ["PgUp/PgDn", "대화창 스크롤"],
-  ["Esc", "스트리밍 중단 · 패널/드롭다운 닫기"],
-  ["Ctrl+C ×2", "종료(2초 내 재입력)"],
-  ["Shift+↵", "입력창 개행"],
-  ["/", "스킬 드롭다운(↑/↓·Enter/Tab 완성)"],
-  ["!cmd", "셸 명령 직접 실행(게이트 미경유 · 파이프/리다이렉트/변수확장 미지원)"],
-  ["?", "이 도움말(입력창 비어있을 때)"],
-];
+import { computePanelCapacity, computeSidebarWindow, SHORTCUT_ROWS } from "../format.js";
 
 export function HelpPanel({ availableRows }: { availableRows?: number } = {}) {
   const maxVisible = computePanelCapacity(availableRows ?? 20, SHORTCUT_ROWS.length);

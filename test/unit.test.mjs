@@ -41,6 +41,8 @@ import {
   mergeAnnounced,
   MAX_ANNOUNCED_SEEN,
 } from "../dist/review.js";
+import { recordApplied, loadApplied } from "../dist/applied.js";
+import { closeWorkUnit } from "../dist/work-unit.js";
 import {
   buildPreCommand,
   normalizeHooks,
@@ -4115,6 +4117,124 @@ test("gate reset --hard 회귀락: seen 필드 포함 레코드도 clearPendingR
   }
 });
 
+test("closeWorkUnit(0.13.1 ST2): gbc done 경로도 reset --hard처럼 pendingReview·적용이력 원장을 지운다", () => {
+  const cwd = tmp();
+  try {
+    addSpecCase(cwd, "케이스 A");
+    const specHash = "hash-close-test";
+    writePendingReview(cwd, {
+      missing: ["케이스 A"],
+      seen: ["케이스 A"],
+      reason: "r",
+      source: ".gbc/spec.md",
+      at: "2026-08-20T00:00:00Z",
+      specHash,
+    });
+    recordApplied(cwd, specHash, {
+      at: "2026-08-20T00:00:00Z",
+      tool: "Edit",
+      file: "a.ts",
+      digest: "- x\n+ y",
+    });
+    assert.notEqual(readPendingReview(cwd), null, "사전조건: pendingReview가 심어져 있어야 한다");
+    assert.equal(loadApplied(cwd, specHash).length, 1, "사전조건: applied 원장이 심어져 있어야 한다");
+
+    const archived = closeWorkUnit(cwd);
+
+    assert.ok(archived, "명세가 있었으므로 아카이브 경로를 반환해야 한다");
+    assert.equal(readPendingReview(cwd), null, "closeWorkUnit은 pendingReview를 지워야 한다");
+    assert.equal(loadApplied(cwd, specHash).length, 0, "closeWorkUnit은 적용이력 원장도 지워야 한다");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+for (const [label, badSeen] of [
+  ["문자열", "corrupted"],
+  ["숫자", 42],
+  ["객체", { a: 1 }],
+  ["null", null],
+]) {
+  test(`readPendingReview(0.13.1 ST3): seen이 손상된 형상(${label})이어도 크래시 없이 missing을 보존한다`, () => {
+    const cwd = tmp();
+    try {
+      writePendingReview(cwd, {
+        missing: ["케이스 A", "케이스 B"],
+        seen: badSeen,
+        reason: "r",
+        source: ".gbc/spec.md",
+        at: "2026-08-20T00:00:00Z",
+        specHash: "hash-a",
+      });
+      const rec = readPendingReview(cwd);
+      assert.notEqual(rec, null, "레코드 전체를 버리면 안 된다(Tier1 생존)");
+      assert.deepEqual(rec.missing, ["케이스 A", "케이스 B"], "missing은 보존돼야 한다");
+      assert.equal(rec.seen, undefined, "손상된 seen은 strip돼야 한다");
+      // 소비처 크래시 없음 확인 — mergeAnnounced의 `prior.seen ?? prior.missing` 폴백,
+      // isAnnouncedRepeat(text.ts)의 flatMap이 정상 동작해야 한다.
+      assert.doesNotThrow(() => mergeAnnounced(rec, "hash-a", ["케이스 C"]));
+      const merged = mergeAnnounced(rec, "hash-a", ["케이스 C"]);
+      assert.deepEqual(merged, ["케이스 A", "케이스 B", "케이스 C"], "seen 폴백이 missing 기준으로 정상 동작해야 한다");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+}
+
+// 0.13.1 ST3 후속(발행 전 security-auditor Critical) — 컨테이너 레벨(Array.isArray)만 검사하면
+// "배열이지만 원소가 문자열이 아닌" 손상은 그대로 통과한다. 그 값은 normalizeCase의 item.trim()에서
+// TypeError를 던지고, 예외는 runHookSafely가 fail-open(allow)으로 흡수한다 — 게이트가 조용히 뚫린다.
+// 게다가 자가치유도 안 된다: effects.pendingReview 재기록(gate-core.ts)이 크래시 지점보다 뒤라
+// 손상 레코드가 그대로 남아, 같은 작업단위(specHash 불변) 내내 모든 재차단이 새어나간다.
+// seen(strip)과 missing(레코드 폐기)의 처리가 갈리는 이유는 위 ST3 주석 참조.
+for (const [label, badElem] of [
+  ["숫자", 42],
+  ["null", null],
+  ["객체", { a: 1 }],
+  ["중첩배열", ["x"]],
+]) {
+  test(`readPendingReview(0.13.1 ST3+): seen 배열의 원소가 비문자열(${label})이면 seen을 strip한다`, () => {
+    const cwd = tmp();
+    try {
+      writePendingReview(cwd, {
+        missing: ["케이스 A"],
+        seen: ["케이스 A", badElem],
+        reason: "r",
+        source: ".gbc/spec.md",
+        at: "2026-08-20T00:00:00Z",
+        specHash: "hash-a",
+      });
+      const rec = readPendingReview(cwd);
+      assert.notEqual(rec, null, "missing이 온전하면 레코드는 살아야 한다(Tier1 생존)");
+      assert.equal(rec.seen, undefined, "원소 손상 seen은 strip");
+      // 실제 크래시 경로(gate-core.ts:633 → text.ts coverageRatio → normalizeCase)를 그대로 태운다.
+      assert.doesNotThrow(() => isAnnouncedRepeat(["케이스 A"], rec.seen ?? rec.missing));
+      assert.doesNotThrow(() => mergeAnnounced(rec, "hash-a", ["케이스 B"]));
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test(`readPendingReview(0.13.1 ST3+): missing 배열의 원소가 비문자열(${label})이면 레코드 전체를 버린다`, () => {
+    const cwd = tmp();
+    try {
+      writePendingReview(cwd, {
+        missing: ["케이스 A", badElem],
+        reason: "r",
+        source: ".gbc/spec.md",
+        at: "2026-08-20T00:00:00Z",
+        specHash: "hash-a",
+      });
+      // seen과 달리 strip이 불가능하다 — missing은 Tier1(sameMissingSet)·소비처(cli gate review)의
+      // 필수 필드라, 손상된 채로 살리면 크래시 경로가 남는다. 기존 "missing 비배열 → null" 가드의
+      // 원소 레벨 확장이다.
+      assert.equal(readPendingReview(cwd), null);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+}
+
 // ── P4-1: 토크나이저+바이그램 커버리지 술어 ──────────────────────────────
 // block-repeat(같은 작업단위에서 이미 안내한 침묵-누락 재차단 억제) 판별을 완전일치에서
 // 근사매칭으로 확장하는 작업의 1번째 조각. 코퍼스는 fa-support repo .gbc/events.jsonl
@@ -4162,4 +4282,16 @@ test("isAnnouncedRepeat(synthetic bigram negative): 유니그램 공통(B·호�
   // 탔는지(폴백 아님) 직접 확인해 이 테스트의 의도(P4-1 요구사항 2번째 추가 케이스)를 증명한다.
   assert.ok(newItems.flatMap(tokenizeCase).length >= 2, "바이그램이 생성될 토큰 수 확보");
   assert.equal(isAnnouncedRepeat(newItems, announced), expectRepeat);
+});
+
+test("package-lock.json 버전 드리프트 가드(0.13.1 ST7): package.json과 lock의 version이 일치해야 한다", () => {
+  const root = resolve(fileURLToPath(import.meta.url), "..", "..");
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+  assert.equal(lock.version, pkg.version, "package-lock.json 최상위 version이 package.json과 어긋났다");
+  assert.equal(
+    lock.packages[""].version,
+    pkg.version,
+    'package-lock.json packages[""].version이 package.json과 어긋났다',
+  );
 });

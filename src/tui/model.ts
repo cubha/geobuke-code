@@ -46,8 +46,13 @@ export interface Statusline {
   model: string;
   usagePct: number;
   costUsd: number;
-  /** ST15(0.9.2) — 마지막으로 종료된 턴의 소요시간(ms). 0이면 아직 턴이 없었음(표시 생략 신호). */
+  /** ST15(0.9.2) — 마지막으로 종료된 턴의 소요시간(ms). 0이면 아직 턴이 없었음(표시 생략 신호).
+   *  0.13.1 T-2 — 승인대기(사람이 canUseTool에 응답하기까지)는 제외한 값이다(computeTurnMs). */
   lastTurnMs: number;
+  /** 0.13.1 T-2 — 마지막 턴이 정상 종료/중단(사용자 Esc)/오류 중 무엇으로 끝났는지. lastTurnMs
+   *  숫자만으론 세 경로가 구분되지 않아 오독 여지가 있었다(app.tsx formatEngineAbort/
+   *  formatEngineFailure 분기를 그대로 재사용해 판정). 기본값 "ok"(아직 턴이 없었을 때도 무해). */
+  lastTurnOutcome: "ok" | "aborted" | "error";
   /** ST7(0.9.4 T1) — 마지막 턴의 첫 토큰까지 걸린 시간(ms, SDK result.ttft_ms). 0이면 아직 턴이
    *  없었거나 세션 재사용으로 체감 단축된 걸 실측할 값(성공기준 ⓐ) — 표시 생략 신호는 lastTurnMs와 동일. */
   lastTtftMs: number;
@@ -94,10 +99,19 @@ export const DEFAULT_STATUSLINE: Statusline = {
   usagePct: 0,
   costUsd: 0,
   lastTurnMs: 0,
+  lastTurnOutcome: "ok",
   lastTtftMs: 0,
   tokensUsed: 0,
   tokensMax: 0,
 };
+
+/**
+ * 0.13.1 T-2 — 승인대기 구간을 제외한 실제 턴 소요시간(순수). 음수 클램프는 시계 역행이나
+ * approvalWaitMs 과대측정(중첩 승인 누적 오차 등) 방어용이다.
+ */
+export function computeTurnMs(args: { startedAt: number; endedAt: number; approvalWaitMs: number }): number {
+  return Math.max(0, args.endedAt - args.startedAt - args.approvalWaitMs);
+}
 
 export function createInitialState(statuslineSeed?: Partial<Statusline>): TuiState {
   return {

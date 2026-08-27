@@ -386,3 +386,33 @@ test("TURN_START: streamingText도 함께 리셋(직전 턴의 잔여 델타가 
   assert.equal(s.streamingText, "");
   assert.equal(s.streaming, true, "기존 계약 유지");
 });
+
+// ── computeTurnMs (0.13.1 T-2, 순수) — 승인대기 구간을 제외한 실제 턴 소요시간 ──
+import { computeTurnMs } from "../dist/tui/model.js";
+
+test("computeTurnMs: 승인대기가 없으면 endedAt-startedAt 그대로", () => {
+  assert.equal(computeTurnMs({ startedAt: 1000, endedAt: 5000, approvalWaitMs: 0 }), 4000);
+});
+
+test("computeTurnMs: 승인대기 구간을 제외한다", () => {
+  assert.equal(computeTurnMs({ startedAt: 1000, endedAt: 10000, approvalWaitMs: 6000 }), 3000);
+});
+
+test("computeTurnMs: 승인대기가 전체 구간과 같거나 더 크면 0으로 클램프(음수 방지)", () => {
+  assert.equal(computeTurnMs({ startedAt: 1000, endedAt: 5000, approvalWaitMs: 4000 }), 0);
+  assert.equal(computeTurnMs({ startedAt: 1000, endedAt: 5000, approvalWaitMs: 9000 }), 0);
+});
+
+test("createInitialState: lastTurnOutcome 기본값 ok", () => {
+  const s = createInitialState();
+  assert.equal(s.statusline.lastTurnOutcome, "ok");
+});
+
+test("STATUSLINE_UPDATE: lastTurnOutcome 부분병합(무관 필드 보존)", () => {
+  let s = createInitialState();
+  s = reduce(s, { type: "STATUSLINE_UPDATE", patch: { lastTurnMs: 3000, lastTurnOutcome: "aborted" } });
+  assert.equal(s.statusline.lastTurnOutcome, "aborted");
+  assert.equal(s.statusline.lastTurnMs, 3000);
+  s = reduce(s, { type: "STATUSLINE_UPDATE", patch: { costUsd: 1.5 } });
+  assert.equal(s.statusline.lastTurnOutcome, "aborted", "무관 필드 패치가 이전 outcome을 지우면 안 된다");
+});

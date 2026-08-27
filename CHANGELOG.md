@@ -2,6 +2,78 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다. 형식은 [Keep a Changelog](https://keepachangelog.com/), 버전은 [SemVer](https://semver.org/)를 따른다.
 
+## [0.13.1] - 2026-08-27
+
+**「잔여 종결」— 1.0.0(A4) 이외 전 항목 종결.** 신규 기능 0건. 가드·상한·문구·실측·결정문만 다루며, **판정 입력(judge 프롬프트 조립)은 의도적으로 무변경**이다 — 0.13.0 P4의 효과를 사후 귀속하려면 같은 배치에서 판정 입력을 흔들면 안 된다(교란분리).
+
+### Fixed — 펜딩-검토 레코드 형상가드 (0.13.0 이월 Warning ⓑ의 본체, security-auditor Critical)
+
+0.13.0이 "형상 가드 1줄이 다음 배치 최우선"으로 이월한 항목인데, 실제 범위는 그보다 넓었고 영향도 더 컸다.
+
+- **컨테이너 검사만으로는 못 막는다.** `Array.isArray`만 보면 "배열이지만 원소가 문자열이 아닌" 손상이 통과하고, 그 값은 소비처의 `normalizeCase`(`item.trim()`)에서 `TypeError`를 던진다. 예외는 `runHookSafely`가 fail-open으로 흡수하므로 **그 편집은 게이트 검사를 받지 않고 통과한다**. 검사를 원소 단위(`isStringArray`)로 올렸다.
+- **`seen`만의 문제가 아니었다.** Tier1의 `sameMissingSet(prior.missing, …)`도 같은 `normalizeCase` 경로라 `missing` 원소 손상이 동일하게 샌다 — 0.6.1 R3 가드가 컨테이너만 보던 시절의 원래 사각이다.
+- **자가치유가 안 된다.** 손상 레코드를 덮어쓸 `effects.pendingReview` 기록이 크래시 지점보다 뒤라, 같은 작업단위(specHash 불변) 내내 모든 재차단이 같은 방식으로 샌다. 실측으로 확인: 크래시 후 손상 레코드가 그대로 잔존한다.
+- **처리 방향은 의도적으로 비대칭이다.** `seen` 손상은 그 필드만 strip(`missing`이 살아있으면 Tier1은 계속 동작해야 한다), `missing` 손상은 레코드째 폐기(Tier1·`gbc gate review`의 필수 필드라 strip이 불가능) — 후자는 재발화 억제만 사라지고 차단은 유지되므로 더 엄격한 방향이다.
+- 0.13.0 CHANGELOG는 이 결함을 "가시적 통과, 조용한 우회 아님"으로 적었는데 **실측 결과 그 서술이 맞다** — fail-open 배너와 `.gbc/failopen.log` 항목이 남는다. 다만 게이트가 우회되는 것 자체는 사실이고, `gate` 이벤트는 아예 기록되지 않는다.
+
+### Fixed — `gbc done`이 펜딩-검토를 지우지 않던 위생 불일치
+
+`clearPendingReview`가 `gate reset --hard`와 spec-add 배치에서만 호출되고 `gbc done` 경로엔 없었다. 판정 오염은 아니지만(Tier1/2 모두 specHash 스코프) `reset --hard`와의 비대칭이 다음 감사자를 헷갈리게 하고, M-1 도그푸딩 관측을 옛 펜딩으로 오염시킨다. 부수효과를 `closeWorkUnit`(신규 `src/work-unit.ts`) 한 함수로 묶어 계약을 코드로 고정했다 — 인라인 나열이면 "pendingReview도 지우는지"가 다시 사후 검출로만 잡힌다.
+
+⛔ `gate reset --hard`는 이 함수를 재사용하지 **않는다**. 겹치는 부수효과가 3개라 통합 제안이 반복해서 나오지만 의도가 반대다 — reset은 명세를 둔 채 판정만 되돌려 *같은 작업단위를 재발동*시키고, done은 명세를 아카이브해 *작업단위를 끝낸다*. 통합하면 단순 리셋이 `spec.md`를 통째로 비우는 회귀가 된다(근거를 코드 주석으로 고정).
+
+### Fixed — TUI 크래시 덤프 시크릿 누출
+
+`formatCrashDump`가 `redactSecrets`를 적용하지 않아 스크롤백이 그대로 파일에 떨어졌다. `extraction.ts`의 **기존 8패턴군을 재사용**(신규 패턴 없음)하되, **본문 join 후 1회·절단보다 먼저** 적용한다 — PEM 블록은 여러 스크롤백 엔트리에 걸쳐 매치되므로 엔트리별 적용은 단일행 키만 잡고 다행 PEM은 놓친다(`formatBangOutput` 선례와 동일 규율).
+
+### Fixed — 턴 소요시간 의미 정정 + 중단/오류 표기
+
+- `computeTurnMs` — 사람이 승인 프롬프트 앞에서 멈춰 있던 시간(`approvalWaitMs`, 중첩 승인 누적)을 뺀다. 종전 `lastTurnMs`는 승인 대기를 포함해 "모델이 얼마나 걸렸나"로 읽을 수 없었다.
+- `StatuslineState.lastTurnOutcome`(`ok`/`aborted`/`error`) 추가 — 중단·오류를 **기존 세그먼트의 접미**(`12.3s 중단`)로만 표기한다. 신규 세그먼트 추가는 금지했다: 상태줄은 `height=1·overflow hidden`이라 세그먼트 **순서 자체가 좁은 폭 강등 우선순위**이고, 토큰 세그먼트가 "맨 끝=가장 먼저 잘리는 자리"로 고정돼 있다.
+
+### Added — 키맵 단일소스 레지스트리
+
+단축키 정의가 `HelpPanel`과 웰컴카드에 이중으로 존재해 0.11.2에서 Alt+F가 카드에만 누락된 적이 있다. 레지스트리를 `format.ts`(Ink-free)로 옮기고 `HelpPanel`이 소비하게 방향을 잡았다(반대 방향은 ESM 순환). `card: {order,label} | null`을 **필수 nullable**로 둬 신규 키 추가 시 카드 노출 여부를 **컴파일타임에 강제**한다 — 누락이 리뷰 성실성이 아니라 타입 검사에 걸린다.
+
+### Added — `package-lock.json` 버전 드리프트 기계가드
+
+lock의 `version`이 0.10.4에 고착돼 있었다(의존성 그래프는 정상). 추적을 유지하고 `package.json.version === lock.version === lock.packages[""].version`을 `npm test`/`prepublishOnly`에 편입했다. **발행 시 함의: bump를 손으로 하면 이 가드에 걸린다 — `npm version --no-git-tag-version`을 쓸 것.**
+
+### Docs
+
+- README의 EPERM 절을 중립 워딩으로 정정하고(특정 상황을 전제하는 단어 제거), PowerShell 예시를 차단 대상 자체(`...\claude.exe`)에서 **실측 확인된 우회 경로**(JS 설치본 `cli.js`)로 교체했다. SDK가 어느 claude와 짝인지는 추측하지 말고 번들 바이너리에 직접 물어보는 방법을 함께 적었다.
+- 로드맵 정정: 로드맵이 미완으로 적어둔 3건이 **코드 실증 결과 이미 종결**돼 있었다(Doc-1=0.12.0 ST13 / R-3=0.10.1의 Static 폐기+0.10.4 / T-1은 제안 방향이 ESM 순환이라 반전). T-4(win32 `shell:true`+공백 homedir)는 **재현 실측 0건**이라 「현행 유지」결정문으로 종결하고 재개조건을 명시했다.
+- H-2: 머지완료 원격브랜치를 목록화했다(삭제후보 17 / 보존 2). ⚠️ 이 저장소는 squash-merge라 `git branch -r --merged`가 1건만 잡는다 — 판정 근거는 PR 상태다.
+
+### M-1 관측 종결 — 0.12.4 수락기준 충족
+
+0.12.4의 원장 생존 재검증이 실제로 발화하는지는 그동안 미관측이었다. 스크래치 repo에서 실 hook 진입점으로 정·역 대조: 원장 생존 시 `appliedCount:1`/`pass` ↔ 기록된 구현을 파일에서 삭제하면 **`appliedStale:1`**, 낡은 엔트리가 탈락한다. `appliedStale`이 도그푸딩 내내 0이면 배선이 죽은 것이라는 관측 원칙이 이로써 해소됐다.
+
+### 재init 불요
+
+hook 계약 무변경.
+
+### 검증
+
+`verify.sh --eval` **1244/1244** · eval hard **22/22**(TP14 TN8 **FP0 FN0**, baseline 유지 — 7개 코드 SubTask 전부 판정입력 무영향이라 **무변경이 정상 신호**) · scope 회귀 **6/6**.
+
+`/verify-impl` 축A(`acceptance-critic`, 독립 컨텍스트) **UNMET 0 · UNREQUESTED 0**(기준선 `docs/plan/PLAN-0.13.1-residual-closeout.md`).
+
+**런타임 실증** — 이 저장소엔 시안이 없어 축B를 화면 대조 대신 실제 구동으로 대체했고, 핵심 항목엔 **음성대조**를 붙였다(수정을 되돌리면 결함이 재현되고, 되돌리면 사라진다):
+
+- 형상가드: 실 hook이 만든 진짜 레코드에 원소 손상 주입 → 현행은 `block-repeat`·fail-open 0건 / 수정 전 가드로 되돌리면 `TypeError: item.trim is not a function` → fail-open·`failopen.log` 1건·**gate 이벤트 미기록**. 양 필드 동시 손상(worst case)도 fail-open 없이 더 엄격한 `block`.
+- `gbc done`: 실 CLI 구동으로 4개 부수효과 확인 / `clearPendingReview` 호출만 제거하면 펜딩 잔존(옛 결함 재현).
+- lock 가드: 현행 통과 / `package.json`만 손편집하면 실패.
+- 크래시 덤프: **4개 엔트리에 걸쳐 쪼개진 PEM** + 단일행 키 3종 전부 마스킹, 헤더 형식 보존·멱등.
+- 키맵: tmux 80×24·100×40 실렌더에서 **레지스트리 ≡ 카드**(순서·문구 완전일치, 기계 대조), `card=null` 5항목 미누출, `?` 실입력으로 도움말 15항목 확인.
+- 턴시간: 실 턴 2건 — Esc 중단 시 `8.8s 중단`(토큰이 여전히 맨 끝 = 클램프 순서 유지) · 승인 프롬프트를 고의로 방치한 턴에서 wall clock 47.2s → 보고 **6.7s**(40.5s 차감), 대조군(승인 없는 턴)은 12.7s ≈ wall clock.
+
+상세는 `docs/analysis/VERIFY-IMPL-0.13.1-2026-08-26.md`.
+
+⚠️ **골든 replay 미실행** — `.gbc/golden.json`이 없어(케이스 0건) 재판정 대상 자체가 없다. 판정 드리프트 회귀락은 `npm run eval`(hard 22 + scope 6)이 전담한다.
+
+⚠️ **배치 범위 밖 관측 1건(미수정)** — 상태줄에 빈 세그먼트가 보인다(첫 턴 전 `data.model`이 빈 문자열). `git diff`로 세그먼트 배열이 이번 배치에서 무수정임을 확인했으므로 회귀가 아닌 기존 동작이라 기록만 남긴다.
+
 ## [0.13.0] - 2026-08-22
 
 **block-repeat 근사매칭(P4) + TUI 패널 세로예산(Task A)** — 0.12.0 "후속 PR 배치"에서 두 번 순연된 항목을 이번 배치에서 전부 소화.

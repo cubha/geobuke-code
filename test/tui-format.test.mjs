@@ -18,6 +18,8 @@ import {
   formatSpinnerLine,
   WORDMARK_GEOBUKE,
   formatWelcomeCard,
+  SHORTCUT_REGISTRY,
+  SHORTCUT_ROWS,
   renderWordmark,
   formatTagline,
   formatMiniTitleLabel,
@@ -131,6 +133,29 @@ test("formatStatusline: lastTurnMs(0.9.2 ST15) — 0/미지정이면 세그먼�
   assert.ok(!withoutTurn.some((s) => /\ds$/.test(s.text)), "턴 없음 — 경과시간 세그먼트 없음");
   const withTurn = formatStatusline({ ...base, lastTurnMs: 12345 });
   assert.ok(withTurn.some((s) => s.text === "12.3s"), "소수 1자리 초 단위");
+});
+
+test("formatStatusline: lastTurnOutcome(0.13.1 T-2) — 기존 세그먼트에 접미만 붙고 새 세그먼트를 만들지 않는다", () => {
+  const base = { dir: "d", branch: "main", dirty: false, model: "m", usagePct: 0, costUsd: 0, lastTurnMs: 12345 };
+  const ok = formatStatusline({ ...base, lastTurnOutcome: "ok" });
+  assert.equal(ok.filter((s) => /\ds/.test(s.text)).length, 1, "세그먼트 개수 불변");
+  assert.ok(ok.some((s) => s.text === "12.3s"), "ok는 접미 없음");
+
+  const aborted = formatStatusline({ ...base, lastTurnOutcome: "aborted" });
+  assert.equal(aborted.filter((s) => /\ds/.test(s.text)).length, 1);
+  assert.ok(aborted.some((s) => s.text === "12.3s 중단"));
+
+  const error = formatStatusline({ ...base, lastTurnOutcome: "error" });
+  assert.ok(error.some((s) => s.text === "12.3s 오류"));
+
+  const unspecified = formatStatusline({ ...base });
+  assert.ok(unspecified.some((s) => s.text === "12.3s"), "outcome 미지정(구버전 패치 호환)이면 접미 없음");
+
+  // 접미가 붙어도 토큰 세그먼트는 여전히 맨 끝이어야 한다 — 이 줄은 height=1·overflow=hidden으로
+  // 잘리므로(app.tsx) 세그먼트 순서 자체가 좁은 폭 강등 우선순위다. 접미로 줄이 ~5칸 넓어져 토큰이
+  // 더 일찍 잘리는 건 의도된 트레이드오프지만, "가장 먼저 잘리는 자리"가 바뀌는 건 회귀다(:171 짝).
+  const withTokens = formatStatusline({ ...base, lastTurnOutcome: "aborted", tokensUsed: 12345, tokensMax: 200000 });
+  assert.equal(withTokens[withTokens.length - 1].text, "12.3k/200k", "중단 접미가 붙어도 토큰이 맨 끝");
 });
 
 test("formatStatusline: lastTtftMs(0.9.4 ST7) — 0/미지정이면 세그먼트 생략, >0이면 'ttft 1.7s' 형식", () => {
@@ -428,6 +453,37 @@ test("formatWelcomeCard: HelpPanel이 안내하는 주요 토글 키(Alt+M/R/S/T
   for (const key of ["Alt+M", "Alt+R", "Alt+S", "Alt+T", "Alt+F"]) {
     assert.ok(all.includes(key), `${key} 안내 누락`);
   }
+});
+
+// 0.13.1 T-1 — 키맵 레지스트리 단일소스화 구조 테스트. 0.11.2 Alt+F 누락(카드에만 빠짐)이
+// 사후검출 테스트로만 방어되던 것을, "card≠null 집합 == 카드 렌더 키 집합"을 구조로 고정한다.
+test("SHORTCUT_REGISTRY: card≠null인 엔트리 전부가, 그리고 그것만이 카드 키맵 행에 실린다(양방향)", () => {
+  const cardKeys = new Set(SHORTCUT_REGISTRY.filter((e) => e.card !== null).map((e) => e.key));
+  const cardLabelText = formatWelcomeCard(0, 0, []).map(joinTextSegments).join("\n");
+  for (const e of SHORTCUT_REGISTRY) {
+    const inCard = cardLabelText.includes(e.card ? e.card.label : "__never__");
+    if (e.card !== null) {
+      assert.ok(inCard, `card 등록된 ${e.key}가 카드에 없다`);
+    }
+  }
+  // 역방향: HelpPanel 도움말 텍스트에는 없고 card 라벨에만 있는 문구가 섞여 들면 안 된다 —
+  // card.label이 registry의 card 필드 밖에서 온 게 아님을 확인.
+  assert.equal(cardKeys.size, SHORTCUT_REGISTRY.filter((e) => e.card !== null).length);
+});
+
+test("SHORTCUT_REGISTRY: 카드 키맵 행 수는 ceil(card 엔트리수/2)와 같다(기존 5줄 계약 파생 확인)", () => {
+  const cardCount = SHORTCUT_REGISTRY.filter((e) => e.card !== null).length;
+  const rows = formatWelcomeCard(0, 0, []);
+  const keymapRows = rows.slice(-Math.ceil(cardCount / 2));
+  assert.equal(keymapRows.length, Math.ceil(cardCount / 2));
+  assert.equal(cardCount, 10, "기존 5줄×2칸 계약 — 카드 엔트리 수가 바뀌면 이 상수부터 갱신할 것");
+});
+
+test("SHORTCUT_ROWS: SHORTCUT_REGISTRY와 등록 순서·개수가 1:1 대응한다(HelpPanel 소비 계약)", () => {
+  assert.equal(SHORTCUT_ROWS.length, SHORTCUT_REGISTRY.length);
+  SHORTCUT_REGISTRY.forEach((e, i) => {
+    assert.deepEqual(SHORTCUT_ROWS[i], [e.key, e.help]);
+  });
 });
 
 test("formatWelcomeCard: 스킬 이름 세그먼트는 accent 톤(패널 강조와 일관)", () => {
