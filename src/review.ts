@@ -21,12 +21,38 @@ export function writePendingReview(cwd: string, p: PendingReview): void {
 /**
  * 펜딩-검토 레코드 읽기. 없으면 null. 형상 가드(0.6.1 R3): valid-JSON이라도 객체가 아니거나
  * missing이 배열이 아니면 null — cmdGateReview의 missing.length 접근이 throw로 새지 않게.
+ * seen 형상가드(0.13.1 ST3, feedback_regression_input_shape_contract 계열 3회째): seen이 존재하는데
+ * 문자열 배열이 아니면 그 필드만 버린다(레코드 전체를 null로 버리지 않는다 — missing이 살아있으면
+ * Tier1은 계속 동작해야 한다). missing은 반대로 레코드째 버린다 — Tier1(sameMissingSet)과
+ * cmdGateReview의 필수 필드라 strip이 불가능하고, 손상된 채 살리면 크래시 경로가 그대로 남는다.
+ *
+ * 소비처(mergeAnnounced의 `prior.seen ?? prior.missing`, isAnnouncedRepeat(text.ts)의 flatMap)는
+ * `??`만 쓰므로 값이 존재하는데 타입이 틀리면 못 막는다 — 여기서의 strip·폐기가 검사의 역할을
+ * 대신한다. 원소 단위로 보는 이유는 isStringArray 주석 참조.
  */
 export function readPendingReview(cwd: string): PendingReview | null {
   const raw = readJson<unknown>(pendingPath(cwd), null);
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-  if (!Array.isArray((raw as { missing?: unknown }).missing)) return null;
+  const obj = raw as { missing?: unknown; seen?: unknown };
+  if (!isStringArray(obj.missing)) return null;
+  if ("seen" in obj && !isStringArray(obj.seen)) {
+    const { seen: _seen, ...rest } = obj;
+    return rest as PendingReview;
+  }
   return raw as PendingReview;
+}
+
+/**
+ * 검사가 **원소 단위**인 이유(0.13.1 ST3, 발행 전 security-auditor Critical): 컨테이너만
+ * (`Array.isArray`) 보면 "배열이지만 원소가 문자열이 아닌" 손상이 통과하는데, 그 값은 소비처의
+ * `normalizeCase`(`item.trim()`)에서 TypeError를 던진다 — 예외는 `runHookSafely`가 fail-open으로
+ * 흡수하므로 **게이트가 조용히 뚫린다**. 게다가 자가치유가 안 된다: 손상 레코드를 덮어쓸
+ * `effects.pendingReview` 기록(gate-core.ts)이 크래시 지점보다 뒤라, 같은 작업단위(specHash 불변)
+ * 내내 모든 재차단이 같은 방식으로 새어나간다. `.trim()` 하나 때문에 게이트 전체가 무력화되는
+ * 비대칭이라 컨테이너 검사로는 부족하다.
+ */
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === "string");
 }
 
 /** 펜딩-검토 레코드 제거(분류 완료 후). 파일 부재면 무동작(idempotent). */

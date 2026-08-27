@@ -287,6 +287,47 @@ test("formatCrashDump: text가 빈 문자열인 엔트리는 제외(빈 줄 오�
   assert.ok(!bodyLines.includes(""), "빈 텍스트 엔트리가 빈 줄로 새면 안 됨");
 });
 
+// ── formatCrashDump redaction (0.13.1 T-3 — extraction.ts redactSecrets 대칭화) ──
+
+test("formatCrashDump: 단일행 시크릿(sk-ant-/AKIA/Bearer)을 마스킹한다", () => {
+  const entries = [
+    { kind: "text", text: "key=sk-ant-abcdefgh12345678" },
+    { kind: "text", text: "aws AKIAABCDEFGH12345678" },
+    { kind: "text", text: "Authorization: Bearer abcd1234efgh5678" },
+  ];
+  const out = formatCrashDump(entries, "exit", "2026-07-16T00:00:00.000Z");
+  assert.doesNotMatch(out, /sk-ant-abcdefgh12345678/);
+  assert.doesNotMatch(out, /AKIAABCDEFGH12345678/);
+  assert.doesNotMatch(out, /Bearer abcd1234efgh5678/);
+  assert.match(out, /\[REDACTED\]/);
+});
+
+test("formatCrashDump: 여러 스크롤백 엔트리에 걸친 PEM 블록도 마스킹한다(결정적 케이스)", () => {
+  // PEM 블록의 BEGIN/END가 서로 다른 두 엔트리에 나뉘어 있다 — 엔트리별 redaction이면 놓치는 사각지대.
+  const entries = [
+    { kind: "text", text: "-----BEGIN RSA PRIVATE KEY-----" },
+    { kind: "text", text: "MIIBogIBAAJBAKj34GkxFhD91as4kkNSHV7bwYVfE+z" },
+    { kind: "text", text: "-----END RSA PRIVATE KEY-----" },
+  ];
+  const out = formatCrashDump(entries, "exit", "2026-07-16T00:00:00.000Z");
+  assert.doesNotMatch(out, /MIIBogIBAAJBAKj34GkxFhD91as4kkNSHV7bwYVfE\+z/);
+  assert.match(out, /\[REDACTED\]/);
+});
+
+test("formatCrashDump: 헤더/구분선 형식은 redaction에 영향받지 않는다", () => {
+  const out = formatCrashDump([{ kind: "text", text: "sk-ant-abcdefgh12345678" }], "uncaughtException: boom", "2026-07-16T12:34:56.000Z");
+  assert.match(out, /uncaughtException: boom/);
+  assert.match(out, /2026-07-16T12:34:56\.000Z/);
+  assert.match(out, /^=+$/m, "구분선(=반복)이 보존돼야 한다");
+});
+
+test("formatCrashDump: 이미 redact된 텍스트(!bash 출력 등)에 멱등이다", () => {
+  const entries = [{ kind: "text", text: "이미 마스킹됨: [REDACTED]" }];
+  const out = formatCrashDump(entries, "exit", "2026-07-16T00:00:00.000Z");
+  const occurrences = out.match(/\[REDACTED\]/g) ?? [];
+  assert.equal(occurrences.length, 1, "이미 REDACTED인 텍스트가 중복 마스킹되면 안 된다");
+});
+
 // ── formatEngineFailure: spawn EPERM/EACCES 진단 배선 (0.9.2 ST6 — runEngine이 rethrow하지 않고
 // EngineResult.error 문자열로 반환하는 실제 경로. classifyTuiStartupError는 ink 로딩 크래시(cli.ts
 // cmdTui 바깥 catch)만 보고 이 경로는 못 본다 — 그래서 여기서 classifySpawnPermissionError를 직접

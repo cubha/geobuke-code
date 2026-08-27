@@ -21,7 +21,6 @@ import {
   addSpecCase,
   readSpecCases,
   clearSpec,
-  archiveSpec,
   resolveSpecText,
 } from "./spec.js";
 import {
@@ -45,6 +44,7 @@ import { findStrayGbcMarkers, quarantineStrayMarkers } from "./doctor.js";
 import { resolveRunCommand, runRunnerCommand } from "./run.js";
 import { statVerifyResults } from "./junit.js";
 import { readPendingReview, clearPendingReview, resolveRefs } from "./review.js";
+import { closeWorkUnit } from "./work-unit.js";
 import { isStopHintMuted, setStopHintMuted, isGoldenCapture, setGoldenCapture } from "./config.js";
 import { loadGolden, clearGolden, diffVerdict, summarizeReplay, needsP2bReplay } from "./golden.js";
 import type { ReplayOutcome } from "./golden.js";
@@ -415,14 +415,14 @@ function cmdSpec(args: string[]): void {
  * clearApplied(0.12.3 P2a)도 함께 지운다 — 적용이력 원장은 specHash 전환 시 자동 무효화되지만,
  * "완료" 시점에 명시적으로도 비워 다음 작업단위가 이전 원장 잔재를 절대 안 보게 한다. `gate reset`
  * (재판정 유도)은 원장을 지우지 않는다 — 목적이 다르다(이력 폐기가 아니라 판정만 되돌림).
+ * pendingReview도 함께 지운다(0.13.1 ST2) — `gate reset --hard`와의 비대칭을 해소한다(work-unit.ts
+ * closeWorkUnit 참조). 판정 오염은 아니었다(Tier1/2 모두 specHash 스코프) — 위생 불일치 수정.
  */
 function cmdDone(): void {
   const cwd = resolveProjectRoot(process.cwd());
   const beforeHash = curHash(cwd);
-  const archived = archiveSpec(cwd);
+  const archived = closeWorkUnit(cwd);
   logCli(cwd, "done", beforeHash);
-  resetGate(cwd);
-  clearApplied(cwd);
   if (archived) {
     console.log(`🐢 작업단위 종료 — 명세 아카이브: ${archived}`);
   } else {

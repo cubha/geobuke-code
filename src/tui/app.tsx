@@ -9,7 +9,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import type { GateDecision } from "../gate-core.js";
-import { createInitialState, reduce, DEFAULT_STATUSLINE, type TuiState, type ApprovalChoice, type ToolCallPreview, type Statusline } from "./model.js";
+import { createInitialState, reduce, DEFAULT_STATUSLINE, computeTurnMs, type TuiState, type ApprovalChoice, type ToolCallPreview, type Statusline } from "./model.js";
 import * as Editor from "./editor.js";
 import type { EditorState } from "./editor.js";
 import { classifyKey, type KeyRoutingContext } from "./keymap.js";
@@ -329,6 +329,11 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   // 다른 탭에서의 !bash 실행이 이 탭의 중첩실행 가드에 영향을 주지 않는다.
   const bangRunningRef = useRef(new Set<string>());
   const sessionsRef = useRef(new Map<string, EngineSession>());
+  // 0.13.1 T-2 — repoId별 승인대기 누적(ms). submit()이 턴 시작 시 0으로 리셋하고, makeInkCanUseTool의
+  // canUseTool 클로저가 매 승인 대기마다(중첩 승인 포함) 더한다. 턴 종료 시 이 값을 computeTurnMs에
+  // 넘겨 lastTurnMs에서 제외한다 — session별이 아니라 repoId별인 이유는 canUseTool 클로저가
+  // repoId로 스코프되기 때문(makeInkCanUseTool(repoId)).
+  const approvalWaitMsRef = useRef(new Map<string, number>());
   // ST3(0.9.4 T2)→ST11: partial 델타 어셈블러도 repoId별. index별 누적 안전성 근거는 기존과 동일
   // (bridge.ts DeltaAssembler 주석) — 탭마다 독립된 인스턴스라 교차오염 자체가 물리적으로 불가능.
   const deltaAssemblersRef = useRef(new Map<string, DeltaAssembler>());
@@ -544,6 +549,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
   const makeInkCanUseTool = useCallback((repoId: string): CanUseTool => {
     return async (toolName, input, options) => {
       const ctx = classifyApprovalRequest(toolName, input as Record<string, unknown>);
+      const waitStartedAt = Date.now(); // 0.13.1 T-2 — 이 승인 대기 구간만 측정(사람 응답까지).
       const answer = await new Promise<{ choice: ApprovalChoice; editedText?: string }>((resolve) => {
         // §3-C(2026-07-27 /analyze 회귀수정) — 예전엔 도구 종류와 무관하게 preview를 항상 채워서,
         // formatToolPreview가 빈 배열을 반환하는 4종 밖 도구(WebFetch·MCP 등)의 승인이 빈 본문으로
@@ -564,6 +570,8 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         // 애초에 호출 자체를 생략해 불필요한 dispatch를 만들지 않는다.
         if (wasEmpty && repoId === tabsRef.current.activeTabId) activateApproval(item);
       });
+      // 이 승인 하나가 대기한 실측 시간을 이 턴의 누적치에 더한다(중첩 승인이면 여러 번 더해짐).
+      approvalWaitMsRef.current.set(repoId, (approvalWaitMsRef.current.get(repoId) ?? 0) + (Date.now() - waitStartedAt));
       const resolution = resolveApproval(answer.choice, ctx, input as Record<string, unknown>, answer.editedText);
       // ANSWERED dispatch는 useInput의 answer() 헬퍼가 resolve() 직전에 이미 실행한다(3차 자체검토로
       // 발견한 중복 제거 — 여기서 다시 부르면 동일 이벤트가 두 번 발화돼 향후 reducer가 비-멱등 로직을
@@ -706,11 +714,15 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
       // 후속 제출·재접속(respawn) 전부 이 한 줄로 커버된다. activeTabId 무관(배경 탭도 정확히 갱신).
       setTabs((prev) => updateTabStatus(prev, repoId, { status: "streaming" }));
       const turnStartedAt = Date.now(); // ST15(0.9.2) — statusline lastTurnMs 계산용
+      approvalWaitMsRef.current.set(repoId, 0); // 0.13.1 T-2 — 이 턴 시작 시 이전 턴 누적을 리셋.
       // ST5-4(0.11.0) — finally에서 getContextUsage()를 부르려면 try 블록 밖에서도 세션 핸들이
       // 필요하다(catch 경로로 빠지면 세션이 아예 없을 수 있어 undefined 허용). try 내부는 별도
       // const로 받아 그대로 쓴다 — let을 closure(setTabs 콜백 등)에서 참조하면 TS가 "possibly
       // undefined"로 좁히지 못한다(재대입 가능성 때문에 narrowing이 함수 경계를 못 넘음).
       let sessionForUsage: EngineSession | undefined;
+      // 0.13.1 T-2 — formatEngineAbort/formatEngineFailure 분기(기존, 아래 else 블록)를 그대로
+      // 재사용해 outcome을 판정한다. catch로 빠지면(getOrCreateSession/submit 자체가 throw) "error".
+      let turnOutcome: "ok" | "aborted" | "error" = "ok";
       try {
         const session = await getOrCreateSession(repoId);
         sessionForUsage = session;
@@ -751,6 +763,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           setTabs((prev) => updateTabStatus(prev, repoId, { status: "dead" }));
           // 0.10.4 ST2 — activeTabId 가드 제거(pushLine이 repoId 버퍼에 직접 적재, 결함1 근본수정).
           pushLine(repoId, "🐢 세션이 종료되어 다음 메시지부터 새 세션으로 다시 시작합니다.", "warn");
+          turnOutcome = "error"; // 0.13.1 T-2 — 턴이 정상 완료되지 못했다.
         } else {
           setTabs((prev) => updateTabStatus(prev, repoId, { status: "alive", sessionId: session.sessionId }));
           // 중단(aborted)은 사용자가 의도한 취소라 실패(danger)와 다른 톤(warn)으로 먼저 본다.
@@ -758,9 +771,13 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           const fallbackMsg = formatResumeFallbackBanner(result); // 0.10.0 ST5 — resume 실패→새 세션 재시도 고지
           if (abortMsg) {
             pushLine(repoId, abortMsg, "warn");
+            turnOutcome = "aborted"; // 0.13.1 T-2
           } else {
             const failureMsg = formatEngineFailure(result);
-            if (failureMsg) pushLine(repoId, failureMsg, "danger");
+            if (failureMsg) {
+              pushLine(repoId, failureMsg, "danger");
+              turnOutcome = "error"; // 0.13.1 T-2
+            }
           }
           if (fallbackMsg) pushLine(repoId, fallbackMsg, "warn");
           if (!result.isError && result.sessionId) {
@@ -774,6 +791,7 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
         }
       } catch (e) {
         commitStream(repoId);
+        turnOutcome = "error"; // 0.13.1 T-2
         // agent-sdk는 engine.ts가 lazy dynamic import한다(첫 프롬프트 제출 시점) — ink/react와 달리
         // cli.ts의 cmdTui try/catch는 이 실패를 못 잡는다(ST6 scope-critic 발견). 여기서 별도로
         // 친절 안내하지 않으면 사용자는 잘린 스택트레이스만 본다. 분류는 bridge.ts
@@ -799,10 +817,12 @@ export function App({ cwd, model, version }: { cwd: string; model?: string; vers
           // 필드(branch·dirty·lastTurnMs) 갱신은 그대로 진행하고, 토큰 필드만 패치에서 생략돼
           // 직전 표시값이 유지된다(mapContextUsageToStatuslinePatch 계약).
           const usage = sessionForUsage ? await sessionForUsage.getContextUsage() : null;
+          const approvalWaitMs = approvalWaitMsRef.current.get(repoId) ?? 0; // 0.13.1 T-2
           const patch = {
             branch: g.branch,
             dirty: g.dirty,
-            lastTurnMs: Date.now() - turnStartedAt,
+            lastTurnMs: computeTurnMs({ startedAt: turnStartedAt, endedAt: Date.now(), approvalWaitMs }),
+            lastTurnOutcome: turnOutcome,
             ...mapContextUsageToStatuslinePatch(usage),
           };
           dispatch({ type: "STATUSLINE_UPDATE", patch });

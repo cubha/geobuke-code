@@ -737,6 +737,57 @@ export interface CardSkill {
  * 않는다 — Ink Box borderStyle이 CJK 폭을 정확히 계산해 그리므로 렌더 컴포넌트(WelcomeCard.tsx)
  * 소관, 이 함수는 데이터(TextSegment[][])만 순수 생성한다(format.ts의 Ink-free 원칙 유지).
  */
+
+/**
+ * 키맵 단일 소스(0.13.1 T-1) — HelpPanel(전량)과 웰컴카드(요약)가 각자 하드코딩하던 것이 0.11.2
+ * Alt+F 누락(카드에서만 빠짐, HelpPanel엔 있었음)의 근본원인이었다. `card`를 필수(nullable) 필드로
+ * 둔 이유: 선택 필드면 신규 키 추가 시 카드 노출 여부를 깜빡해도 컴파일이 통과한다 — nullable
+ * 필수로 두면 "이 키를 카드에 실을지"를 추가할 때마다 명시적으로 결정하게 강제된다.
+ * `card.order`는 formatWelcomeCard의 기존 행 순서(Alt+M/R → Alt+S/esc → shift+↵/⌃C →
+ * Alt+T/Alt+F → ?/PgUp)를 그대로 보존하기 위한 값 — 등록 순서(SHORTCUT_ROWS/HelpPanel 표시 순서)와
+ * 독립이다.
+ */
+export interface ShortcutEntry {
+  key: string;
+  help: string;
+  card: { order: number; label: string } | null;
+}
+
+export const SHORTCUT_REGISTRY: readonly ShortcutEntry[] = [
+  { key: "Alt+1..9", help: "repo 전환/opt-in", card: null },
+  { key: "Alt+W", help: "현재 repo opt-out", card: null },
+  { key: "Alt+M", help: "메트릭 패널", card: { order: 0, label: "Alt+M 메트릭" } },
+  { key: "Alt+R", help: "repos 패널(↑/↓·Enter)", card: { order: 1, label: "Alt+R repos" } },
+  { key: "Alt+S", help: "skills 패널", card: { order: 2, label: "Alt+S skills" } },
+  { key: "Alt+T", help: "타이틀 full/mini 전환", card: { order: 6, label: "Alt+T 타이틀" } },
+  { key: "Alt+F", help: "포커스 모드(사이드바 숨김/복귀)", card: { order: 7, label: "Alt+F 포커스" } },
+  { key: "Tab", help: "사이드바 포커스 토글", card: null },
+  { key: "PgUp/PgDn", help: "대화창 스크롤", card: { order: 9, label: "PgUp/PgDn 스크롤" } },
+  { key: "Esc", help: "스트리밍 중단 · 패널/드롭다운 닫기", card: { order: 3, label: "esc 중단" } },
+  { key: "Ctrl+C ×2", help: "종료(2초 내 재입력)", card: { order: 5, label: "⌃C 종료(2회)" } },
+  { key: "Shift+↵", help: "입력창 개행", card: { order: 4, label: "shift+↵ 개행" } },
+  { key: "/", help: "스킬 드롭다운(↑/↓·Enter/Tab 완성)", card: null },
+  { key: "!cmd", help: "셸 명령 직접 실행(게이트 미경유 · 파이프/리다이렉트/변수확장 미지원)", card: null },
+  { key: "?", help: "이 도움말(입력창 비어있을 때)", card: { order: 8, label: "? 도움말" } },
+];
+
+/** HelpPanel 전량 표시용(등록 순서 그대로) — 표시 계약은 그대로 유지하고 소스만 단일화. */
+export const SHORTCUT_ROWS: readonly [string, string][] = SHORTCUT_REGISTRY.map((e) => [e.key, e.help]);
+
+/** 카드 요약용 — card.order로 정렬 후 2개씩 묶어 한 줄에 병기(기존 formatWelcomeCard 레이아웃). */
+function buildCardKeymapRows(): TextSegment[][] {
+  const entries = SHORTCUT_REGISTRY.filter(
+    (e): e is ShortcutEntry & { card: { order: number; label: string } } => e.card !== null,
+  ).sort((a, b) => a.card.order - b.card.order);
+  const rows: TextSegment[][] = [];
+  for (let i = 0; i < entries.length; i += 2) {
+    const row: TextSegment[] = [{ text: entries[i].card.label, tone: "dim" }];
+    if (entries[i + 1]) row.push({ text: entries[i + 1].card.label, tone: "dim" });
+    rows.push(row);
+  }
+  return rows;
+}
+
 export function formatWelcomeCard(specCount: number, deferCount: number, skills: CardSkill[]): TextSegment[][] {
   const rows: TextSegment[][] = [
     [{ text: "🐢 게이트 활성", tone: "accent" }],
@@ -753,43 +804,11 @@ export function formatWelcomeCard(specCount: number, deferCount: number, skills:
       { text: s.blurb, tone: "dim" },
     ]);
   }
-  // 0.10.3 — 키맵 표기를 Alt+ 기준으로 교체(현장 이슈③④): 레거시 터미널 인코딩엔 Ctrl+숫자
-  // 코드가 없고 Ctrl+M은 Enter와 동일 바이트라, ⌃ 표기가 대부분의 실터미널(특히 Windows)에서
-  // 거짓 안내였다. Ctrl 바인딩은 kitty protocol 활성 터미널용으로 코드에 병존한다(app.tsx).
-  rows.push(
-    [
-      { text: "Alt+M 메트릭", tone: "dim" },
-      { text: "Alt+R repos", tone: "dim" },
-    ],
-    [
-      { text: "Alt+S skills", tone: "dim" },
-      { text: "esc 중단", tone: "dim" },
-    ],
-    [
-      { text: "shift+↵ 개행", tone: "dim" },
-      { text: "⌃C 종료(2회)", tone: "dim" },
-    ],
-    // 0.11.0 — full/mini 타이틀 토글(사용자 확정 2026-07-22).
-    // 2026-07-30(사용자 실사용 지적) — Alt+F(포커스 모드) 병기. 0.11.1이 이 키를 도입하며
-    // HelpPanel에만 넣고 첫 진입 화면인 이 카드에는 빠뜨렸는데, '?' 도움말은 그걸 눌러본 사람만
-    // 보는 순환이라(바로 아래 주석이 지적한 그 문제) 신규 키가 사실상 미노출이었다. 새 줄이 아니라
-    // Alt+T와 같은 줄에 병기하는 이유: cardRows가 computeResponsiveLayout 강등 사다리의 입력이라
-    // 카드가 1행 자라면 저높이 터미널의 마스코트·타이틀 강등 임계가 함께 밀린다.
-    // 문구는 "Alt+M 메트릭 · Alt+R repos" 등 위 두 줄과 같은 간결체 — 병기하면서 구 "Alt+T 타이틀
-    // 전환"을 그대로 두면 표시폭 32로 카드 내부폭 30을 넘어 테두리를 뚫는다(폭 테스트가 포착).
-    [
-      { text: "Alt+T 타이틀", tone: "dim" },
-      { text: "Alt+F 포커스", tone: "dim" },
-    ],
-    // 2026-07-27(사용자 실사용 지적) — 이 카드가 키맵을 상세히 안내하면서도 정작 "더 많은 키맵을
-    // 보는 방법"(? 도움말)과 대화창 스크롤 방법이 빠져있었다. HelpPanel.tsx 자신도 "?"를
-    // 목록에 넣지만 그건 이미 ?를 눌러 도움말을 연 사람만 보는 순환 문제라 여기(첫 진입 화면)에도
-    // 노출한다.
-    [
-      { text: "? 도움말", tone: "dim" },
-      { text: "PgUp/PgDn 스크롤", tone: "dim" },
-    ],
-  );
+  // 0.13.1 T-1 — 키맵 요약 행은 SHORTCUT_REGISTRY(card.order)에서 파생한다(단일 소스화). 순서·
+  // 문구는 기존과 동일(Alt+M/R → Alt+S/esc → shift+↵/⌃C → Alt+T/Alt+F → ?/PgUp) — 신규 키를
+  // 카드에 실을지는 이제 레지스트리 등록 시점에 `card` 필드로 강제 결정된다(0.11.2 Alt+F 누락
+  // 재발 방지, 사후검출 테스트가 아니라 구조로 막는다).
+  rows.push(...buildCardKeymapRows());
   return rows;
 }
 
@@ -1018,8 +1037,12 @@ export function formatStatusline(data: Statusline, opts?: { dirWidth?: number })
   ];
   // ST15(0.9.2) — 마지막 턴 소요시간. 0/미지정(아직 턴 없음)이면 의미 없는 "0.0s"를 상시 노출하지
   // 않는다(스피너의 진행중 경과와 달리 이건 "지난 턴 결과"라 없을 수 있는 값).
+  // 0.13.1 T-2 — 중단/오류는 기존 세그먼트에 접미로만 표기한다(새 세그먼트 추가 금지 — 토큰
+  // 세그먼트가 "맨 끝=가장 먼저 잘리는 자리"로 고정돼 있어 세그먼트 수가 늘면 좁은 폭 overflow
+  // 클램프 순서가 바뀐다). ok(기본값·구버전 패치로 미지정)면 접미 없음.
   if (data.lastTurnMs > 0) {
-    segments.push({ text: `${(data.lastTurnMs / 1000).toFixed(1)}s`, tone: "dim" });
+    const suffix = data.lastTurnOutcome === "aborted" ? " 중단" : data.lastTurnOutcome === "error" ? " 오류" : "";
+    segments.push({ text: `${(data.lastTurnMs / 1000).toFixed(1)}s${suffix}`, tone: "dim" });
   }
   // ST7(0.9.4 T1) — 첫 토큰까지 걸린 시간. lastTurnMs(턴 전체 소요)와 형식이 같아 접두어로 구분한다.
   if (data.lastTtftMs > 0) {

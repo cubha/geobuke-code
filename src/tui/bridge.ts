@@ -16,6 +16,7 @@ import type { TuiEvent, ApprovalChoice, Statusline } from "./model.js";
 import type { GateDecision } from "../gate-core.js";
 import type { EngineResult } from "../engine.js";
 import { classifySpawnPermissionError, NOT_INSTALLED_RE } from "./startup-diagnostics.js";
+import { redactSecrets } from "../extraction.js";
 
 // ── SDK 메시지 → TuiEvent ──
 
@@ -241,7 +242,11 @@ export function formatCrashDump(entries: DumpableEntry[], reason: string, atIso:
   const lines = entries.filter((e) => e.kind === "text" && e.text).map((e) => e.text as string);
   const header = `🐢 gbc TUI 세션 종료 — ${reason} (${atIso})`;
   const divider = "=".repeat(Math.max(header.length, 20));
-  return `${header}\n${divider}\n${lines.join("\n")}\n`;
+  // redaction은 join 후 본문 전체에 1회 적용한다(0.13.1 T-3) — extraction.ts의 PEM 블록 패턴은
+  // 여러 줄(=여러 스크롤백 엔트리)에 걸쳐 매치되므로, 엔트리별로 적용하면 단일행 케이스는 잡아도
+  // 엔트리 경계에 걸친 PEM은 놓친다(formatBangOutput·summarizeAppliedEdit과 동일 규율 — 절단 등
+  // 어떤 후처리보다 먼저 적용).
+  return `${header}\n${divider}\n${redactSecrets(lines.join("\n"))}\n`;
 }
 
 // ── partial 스트리밍 델타 어셈블러 (0.9.4 ST3, T2) ──
