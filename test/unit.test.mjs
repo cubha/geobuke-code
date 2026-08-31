@@ -56,6 +56,7 @@ import {
   buildPostToolUseCommand,
   ensurePostToolUseHook,
   hasPostToolUseHook,
+  planUpdateTargets,
 } from "../dist/install.js";
 import {
   buildInitStalenessNotice,
@@ -149,6 +150,65 @@ test("parseVerdict: JSON 추출 + block/pass 정규화", () => {
   assert.equal(v.verdict, "block");
   assert.deepEqual(v.missing, ["x"]);
   assert.equal(v.reason, "r");
+});
+
+// ---------- 판정응답 JSON 추출 견고화 (0.14.0 ST4) ----------
+// 종전 추출은 raw.match(/\{[\s\S]*\}/) — 첫 '{'부터 **마지막** '}'까지 탐욕적으로 집었다.
+// 모델이 JSON 뒤에 중괄호를 포함한 내용을 덧붙이면 잘린 구간이 "완결 JSON + 나머지"가 되어
+// JSON.parse가 'Unexpected non-whitespace character after JSON'으로 던지고, 그 예외를
+// runHookSafely가 fail-open으로 흡수해 **그 편집이 게이트 검사를 받지 못한다**.
+// 실측: daily-news-dispatch 2026-08-30(판정 4152건 중 이 유형 fail-open 3건).
+// 뒤 산문에 중괄호가 *없으면* 통과하므로 평소엔 드러나지 않는다 — 아래 케이스가 그 경계다.
+test("parseVerdict: JSON 뒤에 둘째 중괄호 블록이 붙어도 첫 객체로 판정한다", () => {
+  const v = parseVerdict('{"verdict":"block","missing":["케이스 A"],"reason":"누락"}\n{ "note": "extra" }');
+  assert.equal(v.verdict, "block");
+  assert.deepEqual(v.missing, ["케이스 A"]);
+});
+
+test("parseVerdict: 코드펜스 뒤 중괄호 낀 설명이 붙어도 판정한다", () => {
+  const raw = '```json\n{"verdict":"pass","missing":[],"reason":"동작 무관"}\n```\n\n참고: { 중괄호 } 포함 설명';
+  assert.equal(parseVerdict(raw).verdict, "pass");
+});
+
+test("parseVerdict: 앞쪽에 중괄호 낀 산문이 와도 처음 파싱되는 JSON을 채택한다", () => {
+  const raw = '형식은 {verdict} 입니다.\n{"verdict":"block","missing":["b"],"reason":"r"}';
+  const v = parseVerdict(raw);
+  assert.equal(v.verdict, "block");
+  assert.deepEqual(v.missing, ["b"]);
+});
+
+test("parseVerdict: reason 문자열 안의 중괄호가 추출을 깨뜨리지 않는다", () => {
+  const v = parseVerdict('{"verdict":"block","missing":[],"reason":"객체 { a: 1 } 형태가 누락"}');
+  assert.equal(v.verdict, "block");
+  assert.match(v.reason, /\{ a: 1 \}/);
+});
+
+test("parseVerdict: 유효 JSON이 하나도 없으면 throw(기존 fail-open 경로 유지)", () => {
+  assert.throws(() => parseVerdict("판정을 내릴 수 없습니다."), /JSON을 찾지 못함/);
+  // 절단된 응답은 이 수정의 대상이 아니다 — 원인이 파서가 아니라 응답 truncation이라
+  // 파서로는 고칠 수 없고, 기존대로 throw→fail-open으로 남는다(정직 고지).
+  assert.throws(() => parseVerdict('{"verdict":"block","missing":["아직 안 끝난'), /JSON을 찾지 못함/);
+});
+
+// 같은 탐욕적 패턴이 reviewed·score 경로에도 있었다(scope-critic 적발, DECISION_CHANGED: yes).
+// 두 경로는 throw를 try로 잡아 unverifiable/unscored로 매핑하므로 fail-open은 아니지만(심각도 차이),
+// **같은 원인**이라 한쪽만 고치면 비대칭이 남아 다음 사람이 또 밟는다. 셋 다 같은 추출기를 쓴다.
+test("parseReviewVerdict: JSON 뒤에 중괄호 낀 내용이 붙어도 판정한다(unverifiable로 새지 않음)", () => {
+  const v = parseReviewVerdict('{"status":"pass","reason":"케이스 주소화 확인"}\n\n부연: { 참고 } 설명');
+  assert.equal(v.status, "pass");
+  assert.match(v.reason, /주소화/);
+});
+
+// 발행 전 보안검토 W1 — 후보마다 처음부터 균형 스캔을 다시 하므로 퇴화 입력에서 O(n²)이 성립한다.
+// API 경로는 max_tokens 1024라 무해하지만 CLI 폴백은 stdout 10MB이고 이 파싱은 자식 종료 *후*
+// 동기 실행이라 CLI_TIMEOUT_MS의 보호를 못 받는다 — 훅이 단일스레드라 멈추면 편집이 멈춘다.
+test("parseVerdict: 퇴화 입력(중괄호 반복)에서도 상한 안에 종료한다", () => {
+  const started = Date.now();
+  assert.throws(() => parseVerdict("{".repeat(200_000)), /JSON을 찾지 못함/);
+  assert.ok(Date.now() - started < 3000, "상한이 없으면 여기서 사실상 멈춘다");
+  // 상한이 정당한 판정을 자르지 않는지 — 정상 응답은 1KB 수준이라 여유가 크다
+  const padded = " ".repeat(2000) + '{"verdict":"block","missing":["x"],"reason":"r"}';
+  assert.equal(parseVerdict(padded).verdict, "block");
 });
 
 test("parseVerdict: 알 수 없는 verdict는 pass로", () => {
@@ -860,7 +920,10 @@ test("gbc update --dry-run: .gbc 있으면 npm 설치+init 2단계, 없으면 in
     const b = dry(bare);
     assert.match(b, /npm i -g geobuke-code@latest/);
     assert.doesNotMatch(b, /\$ gbc init --yes/); // init 단계 없음
-    assert.match(b, /init 생략/);
+    // 0.14.0 — 문구가 "init 생략"에서 건너뜀+**사유**로 바뀌었다(--all의 skip 보고와 단일 형식).
+    // 단언은 약화가 아니라 강화다: 이전엔 "생략했다"만 봤지만 이제 사유가 실제로 표면화되는지까지 본다.
+    assert.match(b, /건너뜀: .*gbc 프로젝트 아님/);
+    assert.match(b, /재init 대상 없음/);
   } finally {
     rmSync(proj, { recursive: true, force: true });
     rmSync(bare, { recursive: true, force: true });
@@ -1177,6 +1240,157 @@ test("normalizeHooks: 기존 hook(keyless·옛 bash 키주입)을 pure 명령으
   assert.doesNotMatch(settings.hooks.PreToolUse[0].hooks[0].command, /ANTHROPIC_API_KEY/);
   // 이미 pure → 재정규화 안 함(멱등)
   assert.equal(normalizeHooks(settings, "/x/dist/cli.js"), 0);
+});
+
+// ---------- 교차참조 도그푸딩 보존 (0.14.0 — gbc update --all 전제) ----------
+// 기존 보존 규칙(canonicalPreCommands)은 ⓐ현재 cliPath 절대경로 ⓑ${CLAUDE_PROJECT_DIR} placeholder
+// 두 형태만 정식으로 봤다. 그런데 워크스페이스 도그푸딩은 **타 repo의 dist를 절대경로로** 가리키는
+// 세 번째 형태를 쓴다(실측: 등록된 5개 repo 전부가 geobuke-code/dist/cli.js를 가리키고 있었다).
+// 이 형태가 정규화 대상이면 `gbc update --all`이 한 번에 전 repo의 도그푸딩 배선을 전역 경로로
+// 갈아치운다 — 그것도 무증상으로. 그래서 "명령이 실존하는 cli.js를 가리키면 건드리지 않는다"를
+// 추가한다. 판정은 normalizeHooks(쓰기)와 hasStalePreToolUse(읽기)가 **같은 술어를 공유**해야
+// 한다: 한쪽만 고치면 "정규화는 안 하는데 stale이라고 나그하는" 모순이 남는다.
+const CROSS_REPO_CLI = resolve(fileURLToPath(import.meta.url), "..", "..", "dist", "cli.js");
+
+function crossRepoPre(cmdPath) {
+  return {
+    hooks: {
+      PreToolUse: [
+        { matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command: `node "${cmdPath}" hook pre-tool-use` }] },
+      ],
+    },
+  };
+}
+
+test("normalizeHooks: 타 repo dist를 가리켜도 그 cli.js가 실존하면 보존한다(도그푸딩 교차참조)", () => {
+  const settings = crossRepoPre(CROSS_REPO_CLI);
+  const before = settings.hooks.PreToolUse[0].hooks[0].command;
+  // cliPath는 전역 설치본을 흉내낸 다른 경로 — 그럼에도 덮어쓰면 안 된다.
+  assert.equal(normalizeHooks(settings, "/usr/lib/node_modules/geobuke-code/dist/cli.js"), 0);
+  assert.equal(settings.hooks.PreToolUse[0].hooks[0].command, before, "실존 cli.js를 가리키는 명령은 무수정");
+});
+
+test("normalizeHooks: 가리키는 cli.js가 실존하지 않으면 정규화한다(자가치유)", () => {
+  const settings = crossRepoPre("/does/not/exist/dist/cli.js");
+  assert.equal(normalizeHooks(settings, "/x/dist/cli.js"), 1);
+  assert.equal(settings.hooks.PreToolUse[0].hooks[0].command, 'node "/x/dist/cli.js" hook pre-tool-use');
+});
+
+test("normalizeHooks: 옛 bash 키주입 형태는 실존 경로를 가리켜도 정규화한다(진짜 구식 감지 유지)", () => {
+  const settings = {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Edit|Write|MultiEdit",
+          hooks: [
+            {
+              type: "command",
+              command: `ANTHROPIC_API_KEY="$(cat "$HOME/.gbc/api-key")" node "${CROSS_REPO_CLI}" hook pre-tool-use`,
+            },
+          ],
+        },
+      ],
+    },
+  };
+  assert.equal(normalizeHooks(settings, "/x/dist/cli.js"), 1, "prefix가 붙은 구식은 보존 대상이 아니다");
+  assert.doesNotMatch(settings.hooks.PreToolUse[0].hooks[0].command, /ANTHROPIC_API_KEY/);
+});
+
+// ---------- gbc update --all 대상 산정 (0.14.0) ----------
+// 순회 자체는 프로세스 스폰이라 테스트가 어렵다 — "어디에 init을 돌릴지" 결정만 순수함수로
+// 떼어내 결정론 검증한다(judge/collectCaseEvidence를 deps로 뺀 것과 같은 원칙).
+function mkProject() {
+  const d = tmp();
+  mkdirSync(join(d, ".gbc"), { recursive: true });
+  return d;
+}
+
+test("planUpdateTargets: 레지스트리가 비면 cwd 하나만(--all 없는 기존 동작)", () => {
+  const cwd = mkProject();
+  const t = planUpdateTargets(cwd, []);
+  assert.equal(t.length, 1);
+  assert.deepEqual({ path: t[0].path, action: t[0].action }, { path: cwd, action: "init" });
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("planUpdateTargets: cwd가 gbc 프로젝트가 아니면 skip + 사유", () => {
+  const cwd = tmp(); // .gbc 없음
+  const t = planUpdateTargets(cwd, []);
+  assert.equal(t[0].action, "skip");
+  assert.match(t[0].reason ?? "", /프로젝트/);
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("planUpdateTargets: --all은 cwd+레지스트리 합집합이며 cwd가 먼저·중복 제거", () => {
+  const cwd = mkProject();
+  const other = mkProject();
+  // 레지스트리에 cwd가 이미 들어있어도 두 번 돌면 안 된다(실측 레지스트리가 그렇다).
+  const t = planUpdateTargets(cwd, [other, cwd]);
+  assert.equal(t.length, 2, "중복 제거");
+  assert.equal(t[0].path, cwd, "cwd 우선");
+  assert.deepEqual(
+    t.map((x) => x.action),
+    ["init", "init"],
+  );
+  rmSync(cwd, { recursive: true, force: true });
+  rmSync(other, { recursive: true, force: true });
+});
+
+test("planUpdateTargets: 디렉토리 없음·.gbc 없음 레지스트리 항목은 건너뛰고 사유를 남긴다", () => {
+  const cwd = mkProject();
+  const notProject = tmp(); // 존재하지만 .gbc 없음
+  const gone = join(tmpdir(), "gbc-does-not-exist-xyz");
+  const t = planUpdateTargets(cwd, [gone, notProject]);
+  const byPath = Object.fromEntries(t.map((x) => [x.path, x]));
+  assert.equal(byPath[gone].action, "skip");
+  assert.match(byPath[gone].reason ?? "", /디렉토리/);
+  assert.equal(byPath[notProject].action, "skip");
+  assert.match(byPath[notProject].reason ?? "", /프로젝트/);
+  // 건너뛴 항목이 있어도 정상 대상은 그대로 남는다(fail-soft의 산정 단계 대응)
+  assert.equal(t.filter((x) => x.action === "init").length, 1);
+  rmSync(cwd, { recursive: true, force: true });
+  rmSync(notProject, { recursive: true, force: true });
+});
+
+// 발행 전 보안검토 W4 — repos.json은 다른 프로세스가 쓸 수 있는 전역 파일이라 신뢰하지 않는다는
+// 것이 이 저장소 관례이고(cmdMetrics --all·doctor·gate-core 전부 lstatSync로 심링크 거부),
+// 이 경로의 결과는 읽기가 아니라 **쓰기+스폰**(gbc init이 settings.json·스킬을 심는다)이라
+// 오히려 더 엄격해야 한다. existsSync만 쓰면 심링크를 따라가 의도치 않은 위치에 설치된다.
+test("planUpdateTargets: 심링크 디렉토리는 따라가지 않고 사유와 함께 건너뛴다", () => {
+  const cwd = mkProject();
+  const real = mkProject();
+  const link = join(tmpdir(), `gbc-link-${process.pid}-${real.split("-").pop()}`);
+  try {
+    symlinkSync(real, link, "dir");
+  } catch {
+    return; // 심링크 권한 없는 환경(일부 Windows) — 이 검증은 건너뛴다
+  }
+  try {
+    const t = planUpdateTargets(cwd, [link]);
+    const entry = t.find((x) => x.path === resolve(link));
+    assert.equal(entry.action, "skip", "심링크는 init 대상이 아니다");
+    assert.match(entry.reason ?? "", /심링크/);
+    // 실제 디렉토리는 정상 대상이어야 한다(과잉 차단이 아님을 증명)
+    assert.equal(planUpdateTargets(cwd, [real]).find((x) => x.path === real).action, "init");
+  } finally {
+    rmSync(link, { force: true });
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(real, { recursive: true, force: true });
+  }
+});
+
+test("hasStalePreToolUse: 보존 판정을 normalizeHooks와 공유한다(모순 없음)", () => {
+  const alive = crossRepoPre(CROSS_REPO_CLI);
+  const dead = crossRepoPre("/does/not/exist/dist/cli.js");
+  const GLOBAL = "/usr/lib/node_modules/geobuke-code/dist/cli.js";
+  assert.equal(hasStalePreToolUse(alive, GLOBAL), false, "실존 cli.js면 stale 나그를 띄우지 않는다");
+  assert.equal(hasStalePreToolUse(dead, GLOBAL), true, "죽은 경로는 stale");
+  // 두 함수가 같은 술어를 쓴다는 것의 실증: 판정이 항상 반대여야 한다.
+  for (const s of [crossRepoPre(CROSS_REPO_CLI), crossRepoPre("/does/not/exist/dist/cli.js")]) {
+    const stale = hasStalePreToolUse(s, GLOBAL);
+    const changed = normalizeHooks(structuredClone(s), GLOBAL) > 0;
+    assert.equal(stale, changed, "stale 판정과 정규화 여부가 일치해야 한다");
+  }
 });
 
 // ---------- ②init-staleness 감지 + 업데이트 안내 (ST3) ----------

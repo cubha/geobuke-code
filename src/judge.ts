@@ -282,10 +282,79 @@ export function filterMissingBySpec(
   return { kept, dropped: missing.length - kept.length };
 }
 
+/**
+ * `start` 위치의 `{`부터 **짝이 맞는 `}`**까지를 잘라 반환한다(없으면 null).
+ * 문자열 리터럴 안의 중괄호는 세지 않으며 백슬래시 이스케이프를 인식한다 — reason에 `}`가
+ * 들어있는 정상 응답을 깨뜨리지 않기 위해서다(회귀락 있음).
+ */
+function sliceBalancedObject(raw: string, start: number): string | null {
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < raw.length; i++) {
+    const c = raw[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return raw.slice(start, i + 1);
+  }
+  return null; // 미완결(절단된 응답) — 호출부가 다음 후보로 넘어간다
+}
+
+/**
+ * 판정 응답에서 **첫 번째 유효 JSON 객체**를 뽑는다(0.14.0 ST4).
+ *
+ * 종전엔 `raw.match(/\{[\s\S]*\}/)` 하나였다 — 첫 `{`부터 **마지막** `}`까지 탐욕적으로 집는다.
+ * 모델이 JSON 뒤에 중괄호를 포함한 내용을 덧붙이면(둘째 블록·코드펜스 뒤 설명 등) 잘린 구간이
+ * "완결 JSON + 나머지"가 되어 `JSON.parse`가 `Unexpected non-whitespace character after JSON`으로
+ * 던졌다. 그 예외는 `runHookSafely`가 fail-open으로 흡수하므로 **그 편집은 게이트 검사를 받지
+ * 못한다**(실측: daily-news-dispatch 2026-08-30, 판정 4152건 중 이 유형 3건).
+ * 뒤 산문에 중괄호가 *없으면* 마지막 `}`가 JSON 자신의 것이라 통과했다 — 그래서 드물게 터졌다.
+ *
+ * 후보 `{`마다 균형 스캔 후 파싱을 시도해 **처음 성공하는 것**을 채택한다. 첫 `{`만 보지 않는
+ * 이유는 앞에 중괄호 낀 산문(`형식은 {verdict} 입니다`)이 올 수 있기 때문이다.
+ * 유효 객체가 하나도 없으면 null → 호출부가 기존대로 throw(→fail-open). **절단된 응답은 이
+ * 수정의 대상이 아니다** — 원인이 파서가 아니라 응답 truncation이라 파서로는 고칠 수 없다.
+ *
+ * ⚠️ 상한 2종(발행 전 보안검토 W1): 후보마다 처음부터 균형 스캔을 다시 하므로 퇴화 입력
+ * (`{`만 반복 등)에서 O(n²)이 성립한다. 종전 정규식은 V8 엔진이 처리해 이 특성이 없었으니
+ * 이번 배치가 새로 들인 여지다. API 경로는 max_tokens 1024라 무해하지만 **CLI 폴백은 stdout
+ * 상한이 10MB이고, 이 파싱은 자식 프로세스 종료 *후* 동기 실행이라 CLI_TIMEOUT_MS의 보호를
+ * 받지 못한다** — 훅은 단일스레드라 멈추면 사용자 편집이 멈춘다. 정상 판정 응답은 1KB 수준이라
+ * 아래 상한이 정당한 판정을 자를 일은 없다(이 저장소의 MAX_* 상한 관례와 동형).
+ */
+const MAX_EXTRACT_SCAN = 64_000;
+const MAX_EXTRACT_CANDIDATES = 64;
+
+function extractFirstJsonObject(input: string): unknown | null {
+  const raw = input.length > MAX_EXTRACT_SCAN ? input.slice(0, MAX_EXTRACT_SCAN) : input;
+  let tried = 0;
+  for (let i = raw.indexOf("{"); i !== -1; i = raw.indexOf("{", i + 1)) {
+    if (++tried > MAX_EXTRACT_CANDIDATES) return null;
+    const block = sliceBalancedObject(raw, i);
+    if (block === null) continue;
+    try {
+      return JSON.parse(block);
+    } catch {
+      // 이 후보는 JSON이 아니다(산문 속 중괄호 등) — 다음 `{`로.
+    }
+  }
+  return null;
+}
+
 function parseVerdict(raw: string): Verdict {
-  const m = raw.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error(`게이트 응답에서 JSON을 찾지 못함: ${raw.slice(0, 200)}`);
-  const j = JSON.parse(m[0]);
+  const parsed = extractFirstJsonObject(raw);
+  // 배열·null도 배제한다 — `[...]`는 `{`로 시작하지 않아 후보가 아니지만, 형상 가드는
+  // review.ts readPendingReview와 같은 관례로 명시해 둔다(외부 입력을 무조건 신뢰하지 않는다).
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`게이트 응답에서 JSON을 찾지 못함: ${raw.slice(0, 200)}`);
+  }
+  const j = parsed as Record<string, unknown>;
   const verdict = j.verdict === "block" ? "block" : "pass";
   return {
     verdict,
@@ -579,9 +648,10 @@ ${code}`;
  */
 export function parseReviewVerdict(raw: string): ReviewVerdict {
   try {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (!m) return { status: "unverifiable", reason: "검토 응답에서 JSON 미발견" };
-    const j = JSON.parse(m[0]);
+    // 추출기는 parseVerdict와 공유한다(0.14.0 ST4 — scope-critic 범위확대). 세 파서가 각자
+    // 탐욕적 정규식을 갖고 있어 같은 결함이 세 벌 있었다.
+    const j = extractFirstJsonObject(raw) as Record<string, unknown> | null;
+    if (j === null || Array.isArray(j)) return { status: "unverifiable", reason: "검토 응답에서 JSON 미발견" };
     const reason = typeof j.reason === "string" ? j.reason : "";
     if (j.status === "pass") return { status: "pass", reason };
     if (j.status === "fail") return { status: "fail", reason };
@@ -870,9 +940,9 @@ ${edits}`;
  */
 export function parseScoreVerdict(raw: string): ScoreVerdict {
   try {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (!m) return { verdict: "unscored", uncovered: [], reason: "score 응답에서 JSON 미발견" };
-    const j = JSON.parse(m[0]);
+    // 추출기 공유 — parseVerdict·parseReviewVerdict와 동일(0.14.0 ST4).
+    const j = extractFirstJsonObject(raw) as Record<string, unknown> | null;
+    if (j === null || Array.isArray(j)) return { verdict: "unscored", uncovered: [], reason: "score 응답에서 JSON 미발견" };
     const reason = typeof j.reason === "string" ? j.reason : "";
     const uncovered = Array.isArray(j.uncovered) ? j.uncovered.filter((u: unknown) => typeof u === "string") : [];
     if (j.verdict === "violated") return { verdict: "violated", uncovered, reason };

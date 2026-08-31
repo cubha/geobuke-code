@@ -53,7 +53,7 @@ import { selectedTransport, judgeM1Violation } from "./judge.js";
 import { runVerify } from "./verify.js";
 import { scaffoldVerify } from "./scaffold.js";
 import type { CaseVerdict } from "./types.js";
-import { buildPreCommand, normalizeHooks, ensureSessionStartHook, ensurePostToolUseHook, DEV_PLACEHOLDER, assessRepoHealth, GBC_SKILL_NAMES } from "./install.js";
+import { buildPreCommand, normalizeHooks, ensureSessionStartHook, ensurePostToolUseHook, DEV_PLACEHOLDER, assessRepoHealth, GBC_SKILL_NAMES, planUpdateTargets } from "./install.js";
 import { readProjectSettings } from "./notice.js";
 import { refreshCacheIfStale } from "./version.js";
 import { logEvent, computeMetrics, tagEventsWithRepo, readEventsMerged, eventsPath, parseSince, filterEventsSince } from "./metrics.js";
@@ -1099,27 +1099,41 @@ async function cmdScore(args: string[]): Promise<void> {
 
 // ---------- gbc update ----------
 /**
- * 전역 최신 설치 + (현재 프로젝트면) 재init을 한 번에. 자동 silent 업데이트가 아니라 명시 명령 —
+ * 전역 최신 설치 + 재init을 한 번에. 자동 silent 업데이트가 아니라 명시 명령 —
  * 사용자가 nag를 보고 'gbc update' 한 줄로 갱신한다(매번 두 명령 외울 필요 제거).
  * ★재init은 '새로 깔린' 바이너리를 fresh spawn해야 신규 스킬·hook이 반영된다(현재 실행 중인 건 구버전).
+ *
+ * `--all`(0.14.0)은 `gbc repos` 등록 repo 전체로 재init을 전파한다. 종전엔 repo마다 손으로
+ * 돌려야 했고(릴리스 노트의 "5repo 재init"이 매번 그것이었다), 빠뜨린 repo는 신규 스킬·hook을
+ * 영영 못 받았다 — never-init은 hook이 없어 안내조차 도달하지 않는 구조적 사각이다.
  */
 function cmdUpdate(args: string[]): void {
   const cwd = resolveProjectRoot(process.cwd());
   const dry = args.includes("--dry-run");
-  const isProject = existsSync(join(cwd, ".gbc"));
-  const steps = ["npm i -g geobuke-code@latest", ...(isProject ? ["gbc init --yes"] : [])];
+  // --all: 등록된 모든 repo에 재init을 퍼뜨린다(0.14.0). 플래그 해석은 여기서만 하고,
+  // "어디에 돌릴지"는 planUpdateTargets(순수함수)가 정한다 — 그래야 결정론 테스트가 가능하다.
+  const all = args.includes("--all");
+  const targets = planUpdateTargets(cwd, all ? loadRepos() : []);
+  const inits = targets.filter((t) => t.action === "init");
+  const skips = targets.filter((t) => t.action === "skip");
 
   if (dry) {
-    console.log("🐢 gbc update — 실행 예정(--dry-run):");
-    steps.forEach((s) => console.log(`  $ ${s}`));
-    if (!isProject)
-      console.log("  (현재 폴더에 .gbc 없음 → init 생략. 프로젝트에서 'gbc init --yes' 실행)");
+    console.log(`🐢 gbc update${all ? " --all" : ""} — 실행 예정(--dry-run):`);
+    console.log("  $ npm i -g geobuke-code@latest");
+    for (const t of inits) console.log(`  $ gbc init --yes   (cwd: ${t.path})`);
+    for (const t of skips) console.log(`  - 건너뜀: ${t.path} — ${t.reason}`);
+    if (inits.length === 0) console.log("  (재init 대상 없음)");
+    if (!all) console.log("  ℹ️ 등록된 모든 repo에 퍼뜨리려면 'gbc update --all'");
     return;
   }
 
-  console.log(`🐢 gbc update — 전역 최신 설치${isProject ? " + 현재 프로젝트 재init" : ""}`);
+  console.log(
+    `🐢 gbc update${all ? " --all" : ""} — 전역 최신 설치` +
+      (inits.length > 0 ? ` + 재init ${inits.length}곳` : ""),
+  );
 
   // 1) 전역 최신 설치. shell:true + 고정 명령 문자열(사용자 입력 없음 → 인젝션 무관, 크로스플랫폼).
+  //    --all이어도 **설치는 1회**다(전역 패키지는 공유 자원 — repo마다 재설치할 이유가 없다).
   const r1 = spawnSync("npm i -g geobuke-code@latest", { stdio: "inherit", shell: true });
   if (r1.status !== 0) {
     console.error(
@@ -1128,17 +1142,29 @@ function cmdUpdate(args: string[]): void {
     process.exit(1);
   }
 
-  // 2) gbc 프로젝트면 재init — 신규 스킬(gbc-mute 등)·최신 hook 반영.
-  if (isProject) {
-    const r2 = spawnSync("gbc init --yes", { stdio: "inherit", shell: true, cwd });
-    if (r2.status !== 0) {
-      console.error("⚠️ 전역 설치는 됐으나 'gbc init --yes' 실패 — 프로젝트에서 수동 실행하세요.");
-      process.exit(1);
-    }
-  } else {
-    console.log("ℹ️ 현재 폴더는 gbc 프로젝트 아님(.gbc 없음) → 각 프로젝트에서 'gbc init --yes' 실행하세요.");
+  // 2) 대상별 재init — 신규 스킬(gbc-mute 등)·최신 hook 반영.
+  //    ★'새로 깔린' 바이너리를 fresh spawn해야 신규 스킬·hook이 반영된다(현재 실행 중인 건 구버전).
+  //    ⚠️ 경로는 **명령 문자열에 보간하지 않고** spawnSync의 cwd 옵션으로만 넘긴다 — repos.json은
+  //    다른 프로세스가 쓰는 글로벌 파일이라(repos.ts loadRepos 주석), 경로를 셸 명령에 이어붙이면
+  //    거기서 인젝션 표면이 생긴다. loadRepos의 절대경로 필터와 다층 방어.
+  const failed: string[] = [];
+  for (const t of inits) {
+    const r = spawnSync("gbc init --yes", { stdio: "inherit", shell: true, cwd: t.path });
+    // fail-soft: 한 repo가 실패해도 나머지는 계속 돈다 — 5곳 중 1곳 실패로 나머지 4곳을
+    // 못 받게 하면 --all의 값이 사라진다. 실패는 모아서 끝에 한 번에 보고한다.
+    if (r.status !== 0) failed.push(t.path);
   }
-  console.log("✅ gbc update 완료.");
+
+  for (const t of skips) console.log(`ℹ️ 건너뜀: ${t.path} — ${t.reason}`);
+  if (!all && inits.length === 0) {
+    console.log("ℹ️ 등록된 모든 repo에 퍼뜨리려면 'gbc update --all'");
+  }
+  if (failed.length > 0) {
+    console.error(`⚠️ 재init 실패 ${failed.length}곳 — 해당 폴더에서 'gbc init --yes' 수동 실행하세요:`);
+    failed.forEach((p) => console.error(`   ${p}`));
+    process.exit(1);
+  }
+  console.log(`✅ gbc update 완료 — 재init ${inits.length}곳${skips.length > 0 ? ` · 건너뜀 ${skips.length}곳` : ""}.`);
 }
 
 /**
@@ -1419,7 +1445,8 @@ function usage(): void {
 사용:
   gbc init [--yes] [--no-register]    프로젝트에 hook + /gate · /gbc-mute · /gbc-monitor 스킬 설치
                                       (--no-register: 크로스-repo 레지스트리 자동등록 생략)
-  gbc update [--dry-run]              전역 최신 설치 + 현재 프로젝트 재init (한방 갱신)
+  gbc update [--all] [--dry-run]      전역 최신 설치 + 재init (한방 갱신)
+                                      --all = 'gbc repos' 등록 repo 전체에 재init 전파
   gbc status                          게이트 상태 + 로드된 명세 확인
   gbc defer add "<케이스>"             케이스를 명시적으로 미루기 (→ open)
   gbc defer list                      미룬 항목 목록 (상태: 미해결/진행중/해결/철회)
