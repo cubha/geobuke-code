@@ -564,3 +564,11 @@ test("classifyBlockOutcomeAcrossRepos: 빈 입력·빈 repo는 그대로 빈 결
   assert.deepEqual(classifyBlockOutcomeAcrossRepos([]), []);
   assert.deepEqual(classifyBlockOutcomeAcrossRepos([[], []]), []);
 });
+
+// 0.14.0 ST4 후속(scope-critic 범위확대) — parseVerdict와 같은 탐욕적 추출이 여기에도 있었다.
+// JSON 뒤에 중괄호 낀 내용이 붙으면 unscored로 떨어져 계측이 조용히 비는 경로였다.
+test("parseScoreVerdict: JSON 뒤에 중괄호 낀 내용이 붙어도 판정한다(unscored로 새지 않음)", () => {
+  const v = parseScoreVerdict('{"verdict":"compliant","uncovered":[],"reason":"전부 커버"}\n\n메모: { 참고 }');
+  assert.equal(v.verdict, "compliant");
+  assert.match(v.reason, /전부 커버/);
+});

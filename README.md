@@ -137,7 +137,7 @@ phase-protocol/계획 → /plan(SubTask) → 【게이트: 구현 직전 케이�
 | **업데이트 필요 시** | (PreToolUse·SessionStart) | hook 구버전(②) 또는 신버전 출시(①)면 갱신 안내. PreToolUse는 세션당 1회(`systemMessage` 비차단) — **통과된 작업단위(cached-skip) 편집에도 표시**(0.3.0: 평상 작업 대부분이 cached-skip이라, 여기서 빠지면 배너가 거의 안 떴음). SessionStart는 진입 시 표시(모델 컨텍스트). `gbc status`는 캐시만 갱신하고 안내는 **표시하지 않는다**(명시 진단 명령). 게이트 통과/차단 동작은 불변 |
 
 > 세션 진입 알림만 끄려면 `GBC_NO_SESSION_HINT=1`. 매 대화 종료(Stop) defer 리마인드만 끄려면 `gbc defer mute`(영속, 해제 `unmute` · 스킬 `/gbc-mute`) — 진입 알림은 남는다. 업데이트 안내만 끄려면 `GBC_NO_UPDATE_NOTICE=1`. scope 사후 판정을 끄려면 `GBC_NO_SCOPE=1`.
-> 프로젝트 hook이 구식이거나(SessionStart 누락·옛 명령) 새 버전이 나오면 gbc가 감지해 **`gbc update`**(전역 최신 + 현재 프로젝트 재init 한방) 또는 수동 `npm i -g geobuke-code@latest → gbc init --yes`를 안내한다. 단 안내는 **이미 hook이 등록된 프로젝트**(=한 번이라도 `gbc init`을 한 코호트)에만 도달한다 — 전혀 init하지 않은 프로젝트엔 실행할 hook이 없어 구조적으로 알릴 수 없다(gbc는 전역 hook을 깔지 않는다).
+> 프로젝트 hook이 구식이거나(SessionStart 누락·옛 명령) 새 버전이 나오면 gbc가 감지해 **`gbc update`**(전역 최신 + 재init 한방, `--all`이면 등록된 repo 전체) 또는 수동 `npm i -g geobuke-code@latest → gbc init --yes`를 안내한다. 단 안내는 **이미 hook이 등록된 프로젝트**(=한 번이라도 `gbc init`을 한 코호트)에만 도달한다 — 전혀 init하지 않은 프로젝트엔 실행할 hook이 없어 구조적으로 알릴 수 없다(gbc는 전역 hook을 깔지 않는다).
 > **업데이트 안내(①)는 네트워크를 게이트 핫패스에 들이지 않는다**: `~/.gbc/version-check.json` 캐시만 비교하고, 갱신 fetch는 안전한 비-핫패스에서만 짧은 타임아웃(1.5s)으로. ⓐSessionStart는 캐시가 stale이면 **표시 전에 갱신**해 신버전이 그 세션에 바로 뜬다(1세션 지연 없음). ⓑ**PreToolUse는 judge를 도는 편집(cache-miss)에서 캐시가 stale이면 refresh를 judge와 *병렬*로 건다**(0.3.0) — judge가 ≥1.5s라 지연 0이고, 사용자가 `gbc status`를 직접 치지 않아도 캐시가 최신이 된다. **cached-skip 핫패스에는 네트워크를 절대 넣지 않는다.** 조회 실패는 조용히 무시(fail-silent)되어 게이트 결정에 영향이 없다. 캐시 TTL 12h.
 
 ### 작업단위 구현이력 (PostToolUse, 0.12.3 + 원장 재검증 0.12.4)
@@ -280,7 +280,7 @@ gbc verify                                                   # 사다리 리포�
 | 명령 | 설명 |
 |---|---|
 | `gbc init` | hook + `/gate` · `/gbc-mute` · `/gbc-monitor` 스킬 설치 + 크로스-repo 레지스트리 자동등록(opt-out: `--no-register`) |
-| `gbc update` | 전역 최신 설치(`npm i -g …@latest`) + 현재 프로젝트 재init 한방. `--dry-run`으로 실행 명령만 미리보기 |
+| `gbc update` | 전역 최신 설치(`npm i -g …@latest`) + 재init 한방. **`--all`이면 `gbc repos` 등록 repo 전체로 재init 전파**(전역 설치는 1회). `--dry-run`으로 실행 명령만 미리보기 |
 | `gbc status` | 게이트 상태 + 로드된 명세 + Stop 리마인드 음소거 여부 |
 | `gbc defer add "<케이스>"` | 케이스를 명시적으로 미루기 (→ open) |
 | `gbc defer list` | 미룬 항목 목록 (상태: 미해결/진행중/해결/철회) |

@@ -2,6 +2,8 @@
 // 키 주입은 셸이 아니라 gbc 코드(judge.ts resolveApiKey)가 처리한다 → hook 명령은
 // 셸 무관 순수 형태라 native Windows(cmd.exe)/bash/zsh/Mac에서 동일하게 동작한다.
 
+import { existsSync, lstatSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { Settings, HookCmd } from "./types.js";
 
 // 리팩토링(2026-07-24) — normalizeHooks·hasStalePreToolUse·hasSessionStartHook·hasPreToolUseGate·
@@ -65,13 +67,36 @@ export function buildPreCommand(cliPath: string): string {
  * keyless 명령·옛 bash 키주입 prefix 명령을 모두 pure로 교체 → "모든 OS 동일 명령" 목표 달성.
  * settings를 제자리 수정하고 변경 건수를 반환한다(멱등: 이미 표준이면 0건).
  */
+/**
+ * PreToolUse 명령이 **이미 유효한가** — 정규화(쓰기)와 stale 감지(읽기)가 공유하는 단일 술어.
+ * 두 곳이 각자 판정하면 "정규화는 안 하는데 stale이라고 나그하는" 모순이 생긴다(회귀락으로 고정).
+ *
+ * 유효한 형태는 셋이다:
+ *   ⓐ 현재 cliPath 절대경로 · ⓑ ${CLAUDE_PROJECT_DIR} placeholder(자기참조 도그푸딩)
+ *   ⓒ **실존하는 다른 cli.js를 가리키는 절대경로**(교차참조 도그푸딩 — 0.14.0 추가)
+ *
+ * ⓒ가 필요한 이유(실측): 워크스페이스 도그푸딩은 각 repo의 hook이 *개발 중인 repo*의 dist를
+ * 절대경로로 가리킨다(등록된 5개 repo 전부가 그랬다). ⓐⓑ만 인정하면 이 형태가 전부 정규화
+ * 대상이 되고, `gbc update --all`이 한 번에 전 repo의 도그푸딩 배선을 전역 경로로 갈아치운다 —
+ * 무증상으로. 종전엔 사람이 repo 하나씩 의도적으로 init해서 드러나지 않던 갭이다.
+ *
+ * 판정 기준을 "실존"으로 둔 것은 자가치유를 위해서다: 가리키던 dist가 사라지면(repo 삭제·경로
+ * 변경) 그 hook은 어차피 죽은 것이므로 다음 init이 전역 경로로 되살린다.
+ * prefix가 붙은 옛 형태(bash 키주입 등)는 정규식이 완전일치라 여기서 걸러지지 않는다 —
+ * 진짜 구식 감지는 그대로 살아있다.
+ */
+function isValidPreCommand(command: string, cliPath: string): boolean {
+  if (canonicalPreCommands(cliPath).includes(command)) return true;
+  const m = /^node "(.+)" hook pre-tool-use$/.exec(command);
+  return m !== null && existsSync(m[1]);
+}
+
 export function normalizeHooks(settings: Settings, cliPath: string): number {
-  const canon = canonicalPreCommands(cliPath);
   let changed = 0;
   forEachHookCmd(settings, "PreToolUse", (h) => {
-    // 이미 정식(절대 or placeholder)이면 건드리지 않는다 — dev placeholder를 절대경로로 덮어
-    // 도그푸딩 설치를 깨뜨리지 않게. 진짜 구식(옛 bash 키주입 등)만 절대경로로 교체.
-    if (h.command.includes("hook pre-tool-use") && !canon.includes(h.command)) {
+    // 이미 유효(절대 or placeholder or 실존 cli.js)면 건드리지 않는다 — 도그푸딩 설치를
+    // 깨뜨리지 않게. 진짜 구식(옛 bash 키주입 등)·죽은 경로만 절대경로로 교체.
+    if (h.command.includes("hook pre-tool-use") && !isValidPreCommand(h.command, cliPath)) {
       h.command = buildPreCommand(cliPath);
       changed++;
     }
@@ -94,10 +119,16 @@ export function buildPostToolUseCommand(cliPath: string): string {
  * 감지부만 떼어낸 비파괴 술어 — ②init-staleness 안내가 settings를 수정하지 않고 판단하게 한다.
  */
 export function hasStalePreToolUse(settings: Settings, cliPath: string): boolean {
-  const canon = canonicalPreCommands(cliPath);
-  // dev placeholder도 정식이므로 stale 아님 — 절대경로 런타임에서 placeholder를 구식으로 오판해
-  // 'gbc init' 재실행을 헛권하던 false-positive 차단(B-잔여 #3의 실제 증상).
-  return findHookCmd(settings, "PreToolUse", (c) => c.includes("hook pre-tool-use") && !canon.includes(c)) !== undefined;
+  // 판정은 normalizeHooks와 **같은 술어**(isValidPreCommand)를 공유한다 — dev placeholder도,
+  // 실존하는 교차참조 dist도 정식이므로 stale 아님. 절대경로 런타임에서 placeholder를 구식으로
+  // 오판해 'gbc init' 재실행을 헛권하던 false-positive 차단(B-잔여 #3의 실제 증상)의 연장선.
+  return (
+    findHookCmd(
+      settings,
+      "PreToolUse",
+      (c) => c.includes("hook pre-tool-use") && !isValidPreCommand(c, cliPath),
+    ) !== undefined
+  );
 }
 
 /** (read-only) SessionStart hook(session-start 명령)이 등록돼 있는지. 0.2.1 이하 init엔 없음. */
@@ -142,6 +173,61 @@ export function assessRepoHealth(settings: Settings, isGbcProject: boolean): Rep
     missingSession: !hasSessionStartHook(settings),
     missingPostToolUse: !hasPostToolUseHook(settings),
   };
+}
+
+/** `gbc update`가 재init을 돌릴(또는 건너뛸) 대상 1건. reason은 skip일 때만 채운다. */
+export interface UpdateTarget {
+  path: string;
+  action: "init" | "skip";
+  reason?: string;
+}
+
+/**
+ * `gbc update [--all]`이 어느 경로에 재init을 돌릴지 산정한다(순수함수 — 스폰·쓰기 없음).
+ *
+ * 순회 자체는 프로세스 스폰이라 결정론 테스트가 어렵다. 그래서 "어디에 돌릴지"만 떼어내
+ * 검증 가능하게 둔다(evaluateGate가 judge·collectCaseEvidence를 deps로 뺀 것과 같은 원칙).
+ *
+ * - `repos`는 호출부가 정한다: `--all`이면 loadRepos(), 아니면 [] — 이 함수는 플래그를 모른다.
+ * - **cwd가 항상 먼저**다. 레지스트리에 cwd가 이미 있어도 두 번 돌지 않는다(실측 레지스트리가
+ *   실제로 자기 자신을 포함한다). dedup 키는 resolve된 절대경로.
+ * - 건너뛰기는 세 가지: 디렉토리 자체가 없음(레지스트리 stale 항목 — 실측으로 존재한다) ·
+ *   **디렉토리가 아님(심링크 포함)** · `.gbc`가 없어 gbc 프로젝트가 아님.
+ *   전부 **조용히 빠뜨리지 않고 사유를 남긴다**.
+ *   등록만 해두고 init한 적 없는 repo를 여기서 init해버리면 사용자가 의도하지 않은 곳에
+ *   hook을 심게 되므로, 판단 기준은 "이미 gbc 프로젝트인가"다.
+ *
+ * ⚠️ **단일 `lstatSync`로 부재·심링크를 한 번에 판정한다**(발행 전 보안검토 W4). `repos.json`은
+ * 다른 프로세스가 쓸 수 있는 전역 파일이라 신뢰하지 않는다는 것이 이 저장소의 관례이고,
+ * cmdMetrics --all·doctor·gate-core 등이 전부 같은 방식으로 심링크를 거부한다. 여기만
+ * `existsSync`를 쓰면 그 관례에서 이탈하는데, **이 경로의 결과는 읽기가 아니라 쓰기+스폰**이라
+ * (`gbc init --yes`가 그 디렉토리에 settings.json·스킬을 심는다) 오히려 더 엄격해야 한다.
+ * `existsSync`+`lstatSync` 분리를 쓰지 않는 이유도 관례와 동일 — 두 번 보면 그 사이가 TOCTOU 창이다.
+ */
+export function planUpdateTargets(cwd: string, repos: string[]): UpdateTarget[] {
+  const seen = new Set<string>();
+  const out: UpdateTarget[] = [];
+  for (const raw of [cwd, ...repos]) {
+    const path = resolve(raw);
+    if (seen.has(path)) continue;
+    seen.add(path);
+    let isDir: boolean;
+    try {
+      isDir = lstatSync(path).isDirectory(); // 심링크면 false(따라가지 않는다), 부재면 throw
+    } catch {
+      isDir = false;
+      out.push({ path, action: "skip", reason: "디렉토리 없음(레지스트리 stale 항목)" });
+      continue;
+    }
+    if (!isDir) {
+      out.push({ path, action: "skip", reason: "디렉토리 아님(심링크 등 — 안전상 제외)" });
+    } else if (!existsSync(join(path, ".gbc"))) {
+      out.push({ path, action: "skip", reason: "gbc 프로젝트 아님(.gbc 없음)" });
+    } else {
+      out.push({ path, action: "init" });
+    }
+  }
+  return out;
 }
 
 /**
